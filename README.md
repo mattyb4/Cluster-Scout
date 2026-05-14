@@ -2,7 +2,7 @@
 
 Created by Matt Banks, Jaden Searle, Tyler Plauche, and Alissa Moulder
 
-Mentored by Dr. Josh Anderson
+Mentored by Dr. Josh Andersen
 
 ## Introduction
 
