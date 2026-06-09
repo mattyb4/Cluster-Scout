@@ -94,6 +94,25 @@ def download(url: str, outpath: Path, session: requests.Session, retries: int = 
     raise RuntimeError(f"Failed download after retries: {url}")
 
 
+def _is_cached(acc_dir: Path, acc: str, also_pae: bool) -> bool:
+    """Return True when all needed files for this accession are already present locally.
+
+    AlphaFold encodes the model version in the filename (e.g. model_v6.cif), so this
+    check is implicitly version-aware: a version bump produces a new filename that won't
+    exist yet, causing the cache check to fail and triggering a fresh download.
+    """
+    if not acc_dir.is_dir():
+        return False
+    struct_re = re.compile(rf"^AF-{re.escape(acc)}-F\d+-model_v\d+\.", re.IGNORECASE)
+    pae_re    = re.compile(rf"^AF-{re.escape(acc)}-F\d+-predicted_aligned_error_v\d+\.", re.IGNORECASE)
+    files = list(acc_dir.iterdir())
+    if not any(struct_re.match(f.name) for f in files):
+        return False
+    if also_pae and not any(pae_re.match(f.name) for f in files):
+        return False
+    return True
+
+
 def read_table(path: str) -> pd.DataFrame:
     p = Path(path)
     if p.suffix.lower() in (".xlsx", ".xls"):
@@ -122,11 +141,20 @@ def main(in_path: str, id_column: str, out_dir: str, prefer: str, also_pae: bool
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     report_rows = []
+    cached_count = 0
 
     with requests.Session() as s:
         s.headers.update({"User-Agent": "bulk-afdb-downloader/1.0"})
         for acc in tqdm(accs, desc="Downloading AlphaFold structures"):
             row = {"UniProt": acc, "status": "", "structure_file": "", "pae_file": "", "note": ""}
+
+            if _is_cached(out_base / acc, acc, also_pae):
+                row["status"] = "ALREADY_CACHED"
+                row["note"] = "Files already present; skipped API call"
+                report_rows.append(row)
+                cached_count += 1
+                continue
+
             try:
                 meta = fetch_prediction(acc, s)
                 if not meta:
@@ -188,7 +216,10 @@ def main(in_path: str, id_column: str, out_dir: str, prefer: str, also_pae: bool
     rep.to_csv(rep_path, sep="\t", index=False)
     print(f"\nWrote report: {rep_path}")
 
-    error_rows = rep[rep["status"] != "DOWNLOADED"]
+    downloaded_count = (rep["status"] == "DOWNLOADED").sum()
+    print(f"Already cached (skipped): {cached_count}  |  Downloaded this run: {downloaded_count}")
+
+    error_rows = rep[~rep["status"].isin({"DOWNLOADED", "ALREADY_CACHED"})]
     if not error_rows.empty:
         err_path = logs_dir / "download_errors.tsv"
         error_rows.to_csv(err_path, sep="\t", index=False)

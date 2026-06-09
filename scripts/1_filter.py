@@ -1,3 +1,4 @@
+import argparse
 import re
 import requests
 import pandas as pd
@@ -133,19 +134,75 @@ def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
     return pd.DataFrame(rows).drop_duplicates(subset=["UniProt"])
 
 
-def main():
+def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
+    """Fetch primary gene symbol -> reviewed human UniProt accession via the UniProt REST API."""
+    genes = list(set(gene_names))
+    gene_set = set(genes)
+    rows = []
+    total_batches = (len(genes) + batch_size - 1) // batch_size
+    for i in tqdm(range(0, len(genes), batch_size), desc="Fetching UniProt IDs for genes", total=total_batches):
+        batch = genes[i : i + batch_size]
+        gene_query = " OR ".join(f"gene_exact:{g}" for g in batch)
+        query = f"({gene_query}) AND organism_id:9606 AND reviewed:true"
+        url = "https://rest.uniprot.org/uniprotkb/search"
+        params = {
+            "query": query,
+            "fields": "accession,gene_names",
+            "format": "tsv",
+            "size": min(batch_size * 3, 500),
+        }
+
+        while url:
+            resp = requests.get(url, params=params)
+            resp.raise_for_status()
+            lines = resp.text.strip().split("\n")
+            for line in lines[1:]:
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    accession = parts[0].strip()
+                    gene_field = parts[1].strip()
+                    primary_gene = gene_field.split()[0] if gene_field else None
+                    if primary_gene and primary_gene in gene_set:
+                        rows.append({"gene": primary_gene, "UniProt": accession})
+
+            link_header = resp.headers.get("Link", "")
+            match = re.search(r'<([^>]+)>; rel="next"', link_header)
+            url = match.group(1) if match else None
+            params = None
+
+    if not rows:
+        return pd.DataFrame(columns=["gene", "UniProt"])
+    return pd.DataFrame(rows).drop_duplicates(subset=["gene"])
+
+
+def _load_and_filter_tcga(tcga_file):
+    """Shared TCGA loading and filtering logic used by both pipeline modes."""
+    tcga = pd.read_csv(tcga_file, sep="\t")
+
+    tcga["gene"] = tcga["protein_change"].apply(extract_gene_from_protein_change)
+    tcga["aa_change"] = tcga["protein_change"].apply(extract_aa_change)
+
+    tcga = tcga[tcga["gene"].notna()].copy()
+    tcga = tcga[tcga["aa_change"].apply(is_simple_substitution)].copy()
+
+    case_count_col = find_case_count_column(tcga)
+    tcga["affected_cases"] = pd.to_numeric(tcga[case_count_col], errors="coerce")
+    tcga = tcga[tcga["affected_cases"].notna()].copy()
+    tcga = tcga[tcga["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
+
+    tcga["mutation"] = tcga["aa_change"]
+    tcga["mutation_with_count"] = tcga.apply(format_mutation_with_count, axis=1)
+
+    return tcga, case_count_col
+
+
+def _run_ptm_proximity_filter(output_file):
     ptmd_file = PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv"
     tcga_file = PROJECT_ROOT / "data" / "TCGA_frequent_mutations.tsv"
-    output_file = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # -----------------------
-    # Load files
-    # -----------------------
     print("Loading PTMD and TCGA files...")
     ptmd = pd.read_csv(ptmd_file, sep="\t", low_memory=False)
-    tcga = pd.read_csv(tcga_file, sep="\t")
+    tcga, case_count_col = _load_and_filter_tcga(tcga_file)
 
     # -----------------------
     # Filter PTMD disruptions
@@ -174,28 +231,6 @@ def main():
     # -----------------------
     ptmd["ptm_site"] = ptmd.apply(build_ptm_site, axis=1)
     ptmd["ptm_disease_pair"] = ptmd["ptm_site"] + " | " + ptmd["Disease"].astype(str)
-
-    # -----------------------
-    # Prepare TCGA mutations
-    # -----------------------
-    tcga["gene"] = tcga["protein_change"].apply(extract_gene_from_protein_change)
-    tcga["aa_change"] = tcga["protein_change"].apply(extract_aa_change)
-
-    tcga = tcga[tcga["gene"].notna()].copy()
-    tcga = tcga[tcga["aa_change"].apply(is_simple_substitution)].copy()
-
-    # Find case count column automatically
-    case_count_col = find_case_count_column(tcga)
-
-    tcga["affected_cases"] = pd.to_numeric(tcga[case_count_col], errors="coerce")
-    tcga = tcga[tcga["affected_cases"].notna()].copy()
-
-    # Keep only hotspot mutations above the configured recurrence threshold.
-    tcga = tcga[tcga["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
-
-    # Keep only needed mutation label
-    tcga["mutation"] = tcga["aa_change"]
-    tcga["mutation_with_count"] = tcga.apply(format_mutation_with_count, axis=1)
 
     print("Filtering TCGA mutations and aggregating by gene...")
     # -----------------------
@@ -232,7 +267,6 @@ def main():
             "ptms_on_protein",
             "mutations_on_protein",
             "ptm_disease_pairs",
-
         ]
     ]
 
@@ -251,6 +285,62 @@ def main():
     print(f"TCGA hotspot genes: {tcga['gene'].nunique()}")
     print(f"Final merged proteins: {len(merged)}")
     print(f"Output saved to: {output_file}")
+
+
+def _run_mutation_clustering_filter(output_file):
+    tcga_file = PROJECT_ROOT / "data" / "TCGA_frequent_mutations.tsv"
+
+    print("Loading TCGA file...")
+    tcga, case_count_col = _load_and_filter_tcga(tcga_file)
+
+    print("Aggregating hotspot mutations by gene...")
+    tcga_grouped = (
+        tcga.groupby("gene", as_index=False)
+        .agg(mutations_on_protein=("mutation_with_count", clean_str_list))
+    )
+
+    gene_names = tcga_grouped["gene"].tolist()
+    print(f"Mapping {len(gene_names)} genes to UniProt IDs via UniProt API...")
+    gene_map = fetch_gene_to_uniprot_mapping(gene_names)
+
+    result = tcga_grouped.merge(gene_map, on="gene", how="left")
+    unmapped = result["UniProt"].isna().sum()
+    result = result[result["UniProt"].notna()].copy()
+    result = result.rename(columns={"UniProt": "uniprot_id"})
+    result = result[["uniprot_id", "gene", "mutations_on_protein"]]
+
+    print("Saving output...")
+    result.to_csv(output_file, sep="\t", index=False)
+
+    print("Done.")
+    print(f"Using case count column: {case_count_col}")
+    print(f"Hotspot minimum affected cases: {HOTSPOT_MIN_AFFECTED_CASES}")
+    print(f"TCGA hotspot genes: {tcga['gene'].nunique()}")
+    print(f"Genes mapped to UniProt: {len(result)}")
+    print(f"Genes not mapped to UniProt (excluded): {unmapped}")
+    print(f"Output saved to: {output_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Filter and prepare input data for the pipeline.")
+    parser.add_argument(
+        "--mode",
+        choices=["ptm-proximity", "mutation-clustering"],
+        default="ptm-proximity",
+        help=(
+            "'ptm-proximity' merges PTMD + TCGA and keeps only genes with both PTMs and mutations. "
+            "'mutation-clustering' keeps all recurrent TCGA hotspot mutations regardless of PTMs."
+        ),
+    )
+    args = parser.parse_args()
+
+    output_file = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == "mutation-clustering":
+        _run_mutation_clustering_filter(output_file)
+    else:
+        _run_ptm_proximity_filter(output_file)
 
 
 if __name__ == "__main__":
