@@ -22,6 +22,7 @@ PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.
 
 _PTM_ROWS: list[dict[str, Any]] | None = None
 
+DISTANCE_CUTOFF = 10.0  # Angstroms, adjust as needed
 
 def get_ptm_rows():
     global _PTM_ROWS
@@ -41,7 +42,7 @@ def compute_distance(coord1, coord2):
     return np.linalg.norm(coord1 - coord2)
 
 #find mutations within cutoff distance of PTM site
-def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cutoff=10.0): #adjust cutoff as needed
+def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF): #adjust cutoff as needed
     results = []
 
     ptm_coord = get_ca_coord(chain, ptm_pos)
@@ -73,7 +74,7 @@ def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cut
     return results
 
 
-def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=10.0):
+def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF):
     """For each mutation, find other mutations within cutoff Angstroms in 3D space."""
     mut_list = list(mutation_entries)
     results = {}
@@ -266,6 +267,30 @@ def parse_ptm_diseases(uniprot, ptm_site, ptm_type):
                         diseases.append(disease)
     return "; ".join(diseases)
 
+def parse_ptm_known_disruptions(uniprot):
+    """Return dict mapping 'S516:Phosphorylation' -> set of known disrupting mutations for this protein.
+
+    Reads the ptm_known_disruptions column produced by step 1, which encodes entries as
+    'S516:Phosphorylation>D120N,E127D; K43:Ubiquitination>R40Q'.
+    """
+    result = {}
+    for row in get_ptm_rows():
+        if row.get("uniprot_id") != uniprot:
+            continue
+        field = row.get("ptm_known_disruptions", "") or ""
+        if not field or field.strip() in ("", "nan"):
+            continue
+        for entry in field.split(";"):
+            entry = entry.strip()
+            if ">" not in entry:
+                continue
+            site_full, muts_str = entry.split(">", 1)
+            mutations = {m.strip() for m in muts_str.split(",") if m.strip()}
+            key = site_full.strip()
+            result[key] = result.get(key, set()) | mutations
+    return result
+
+
 AA3TO1 = {
     "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
     "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
@@ -350,6 +375,19 @@ if args.mode == "mutation-clustering":
             if chain is None:
                 continue
 
+            pos_to_aa: dict[int, str] = {}
+            for atom in chain:
+                if atom.res_id not in pos_to_aa:
+                    pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
+
+            mutation_entries = [
+                (mut + "(isoform?)", pos) if (pos not in pos_to_aa or pos_to_aa[pos] != mut[0])
+                else (mut, pos)
+                for mut, pos in mutation_entries
+            ]
+            if len(mutation_entries) < 2:
+                continue
+
             pae_matrix = load_pae_matrix(uniprot_dir)
             clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix)
 
@@ -390,6 +428,7 @@ else:
             "unique_mutation_position_count_more_than_5_positions",
             "morethan5_linear_distance",
             "mutation_at_ptm_site",
+            "confirmed_disrupting_mutations",
             "ptm_diseases",
         ])
         skip_writer.writerow(SKIP_HEADER)
@@ -413,6 +452,7 @@ else:
             if not ptm_entries:
                 continue
             mutation_entries = parse_mutation_positions(uniprot=uniprot)
+            known_disruptions = parse_ptm_known_disruptions(uniprot)
             if not mutation_entries:
                 continue
 
@@ -432,6 +472,16 @@ else:
             for atom in chain:
                 if atom.res_id not in pos_to_aa:
                     pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
+
+            # Tag mutations whose reference AA does not match this structure.
+            # TCGA mutations are gene-level and use canonical-isoform coordinates;
+            # for non-canonical UniProt entries the same position may be a different residue.
+            # Tagging rather than dropping preserves the data and makes mismatches visible.
+            mutation_entries = [
+                (mut + "(isoform?)", pos) if (pos not in pos_to_aa or pos_to_aa[pos] != mut[0])
+                else (mut, pos)
+                for mut, pos in mutation_entries
+            ]
 
             pae_matrix = load_pae_matrix(uniprot_dir)
 
@@ -455,6 +505,9 @@ else:
                     continue
                 within_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) <= 5]
                 beyond_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) > 5]
+                site_key = f"{ptm_site}:{ptm_type}" if ptm_type else ptm_site
+                disrupting_set = known_disruptions.get(site_key, set())
+                confirmed = [hit for hit in nearby if hit["mutation"].replace("(isoform?)", "") in disrupting_set]
                 writer.writerow([
                     uniprot,
                     gene,
@@ -468,6 +521,7 @@ else:
                     unique_mutation_position_count(beyond_5),
                     linear_distances(beyond_5, ptm_position),
                     mutation_at_ptm_site(within_5, ptm_position),
+                    format_mutations(confirmed),
                     parse_ptm_diseases(uniprot, ptm_site, ptm_type),
                 ])
 

@@ -1,4 +1,5 @@
 import argparse
+import ast
 import re
 import requests
 import pandas as pd
@@ -72,6 +73,22 @@ def build_ptm_site(row):
 
 def format_mutation_with_count(row):
     return f'{row["mutation"]} ({int(row["affected_cases"])})'
+
+
+def parse_mutation_site(val):
+    """Extract mutations from a PTMD MutationSite cell (e.g. \"['D120N', 'E127D']\")."""
+    if pd.isna(val):
+        return []
+    text = str(val).strip()
+    if text in ("", "[]", "nan"):
+        return []
+    try:
+        result = ast.literal_eval(text)
+        if isinstance(result, list):
+            return [str(m).strip() for m in result if str(m).strip()]
+        return [str(result).strip()]
+    except (ValueError, SyntaxError):
+        return re.findall(r"[A-Z]\d+[A-Z*]", text)
 
 
 def find_case_count_column(df):
@@ -232,18 +249,52 @@ def _run_ptm_proximity_filter(output_file):
     ptmd["ptm_site"] = ptmd.apply(build_ptm_site, axis=1)
     ptmd["ptm_disease_pair"] = ptmd["ptm_site"] + " | " + ptmd["Disease"].astype(str)
 
+    # -----------------------
+    # Build known disrupting mutations per PTM site
+    # MutationSite records the specific mutations documented in literature as disrupting each PTM.
+    # -----------------------
+    ptmd["parsed_mutations"] = ptmd["MutationSite"].apply(parse_mutation_site)
+    ptmd_with_muts = ptmd[ptmd["parsed_mutations"].map(len) > 0].copy()
+
+    if not ptmd_with_muts.empty:
+        ptmd_exploded = ptmd_with_muts.explode("parsed_mutations")
+        ptmd_exploded = ptmd_exploded[ptmd_exploded["parsed_mutations"].notna()]
+        ptmd_exploded = ptmd_exploded[ptmd_exploded["parsed_mutations"] != ""]
+        disruption_map = (
+            ptmd_exploded
+            .groupby(["UniProt", "ptm_site"])["parsed_mutations"]
+            .apply(lambda x: ",".join(sorted(set(x.dropna()))))
+            .reset_index()
+        )
+        disruption_map["disruption_entry"] = (
+            disruption_map["ptm_site"] + ">" + disruption_map["parsed_mutations"]
+        )
+        disruptions_grouped = (
+            disruption_map
+            .groupby("UniProt")["disruption_entry"]
+            .apply(lambda x: "; ".join(x))
+            .reset_index()
+            .rename(columns={"UniProt": "uniprot_id", "disruption_entry": "ptm_known_disruptions"})
+        )
+    else:
+        disruptions_grouped = pd.DataFrame(columns=["uniprot_id", "ptm_known_disruptions"])
+
     print("Filtering TCGA mutations and aggregating by gene...")
     # -----------------------
-    # Aggregate PTMs by gene
+    # Aggregate PTMs by UniProt so each isoform is kept separate.
+    # Grouping by gene previously collapsed all isoforms under one UniProt ID,
+    # causing PTM positions from one isoform to be checked against another's structure.
     # -----------------------
     ptmd_grouped = (
-        ptmd.groupby("gene", as_index=False)
+        ptmd.groupby("UniProt", as_index=False)
         .agg(
-            uniprot_id=("UniProt", "first"),
+            gene=("gene", "first"),
             ptms_on_protein=("ptm_site", clean_str_list),
             ptm_disease_pairs=("ptm_disease_pair", clean_str_list),
         )
+        .rename(columns={"UniProt": "uniprot_id"})
     )
+    ptmd_grouped = ptmd_grouped.merge(disruptions_grouped, on="uniprot_id", how="left")
 
     # -----------------------
     # Aggregate hotspot mutations by gene
@@ -267,6 +318,7 @@ def _run_ptm_proximity_filter(output_file):
             "ptms_on_protein",
             "mutations_on_protein",
             "ptm_disease_pairs",
+            "ptm_known_disruptions",
         ]
     ]
 
