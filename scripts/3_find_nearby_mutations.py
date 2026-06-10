@@ -474,7 +474,7 @@ else:
                     pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
             # Tag mutations whose reference AA does not match this structure.
-            # TCGA mutations are gene-level and use canonical-isoform coordinates;
+            # Mutation positions are gene-level and use canonical-isoform coordinates;
             # for non-canonical UniProt entries the same position may be a different residue.
             # Tagging rather than dropping preserves the data and makes mismatches visible.
             mutation_entries = [

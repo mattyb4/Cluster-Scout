@@ -10,6 +10,8 @@ SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 HOTSPOT_MIN_AFFECTED_CASES = 3
 
+UNMATCHED_GENES_LOG = PROJECT_ROOT / "Output" / "logs" / "ptm_genes_without_cosmic_mutations.tsv"
+
 
 def clean_str_list(values):
     cleaned = []
@@ -22,29 +24,6 @@ def clean_str_list(values):
             cleaned.append(text)
 
     return "; ".join(cleaned)
-
-
-def extract_gene_from_protein_change(protein_change):
-    if pd.isna(protein_change):
-        return None
-
-    text = str(protein_change).strip()
-    parts = text.split()
-
-    return parts[0] if parts else None
-
-
-def extract_aa_change(protein_change):
-    if pd.isna(protein_change):
-        return None
-
-    text = str(protein_change).strip()
-    parts = text.split()
-
-    if len(parts) < 2:
-        return None
-
-    return parts[1]
 
 
 def is_simple_substitution(change):
@@ -89,26 +68,6 @@ def parse_mutation_site(val):
         return [str(result).strip()]
     except (ValueError, SyntaxError):
         return re.findall(r"[A-Z]\d+[A-Z*]", text)
-
-
-def find_case_count_column(df):
-    candidates = [
-        "num_cohort_ssm_affected_cases",
-        "cohort_ssm_affected_cases",
-        "affected_cases",
-        "cases",
-        "count"
-    ]
-
-    for col in candidates:
-        if col in df.columns:
-            return col
-
-    raise ValueError(
-        "Could not find a case-count column in the TCGA file. "
-        "Expected one of: num_cohort_ssm_affected_cases, "
-        "cohort_ssm_affected_cases, affected_cases, cases, count"
-    )
 
 
 def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
@@ -192,34 +151,48 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
     return pd.DataFrame(rows).drop_duplicates(subset=["gene"])
 
 
-def _load_and_filter_tcga(tcga_file):
-    """Shared TCGA loading and filtering logic used by both pipeline modes."""
-    tcga = pd.read_csv(tcga_file, sep="\t")
+COSMIC_SOMATIC_STATUSES = {
+    "Confirmed somatic variant",
+    "Reported in another cancer sample as somatic",
+}
 
-    tcga["gene"] = tcga["protein_change"].apply(extract_gene_from_protein_change)
-    tcga["aa_change"] = tcga["protein_change"].apply(extract_aa_change)
 
-    tcga = tcga[tcga["gene"].notna()].copy()
-    tcga = tcga[tcga["aa_change"].apply(is_simple_substitution)].copy()
+def _load_and_filter_cosmic(cosmic_file):
+    """Shared COSMIC Mutant Census loading and filtering logic used by both pipeline modes.
 
-    case_count_col = find_case_count_column(tcga)
-    tcga["affected_cases"] = pd.to_numeric(tcga[case_count_col], errors="coerce")
-    tcga = tcga[tcga["affected_cases"].notna()].copy()
-    tcga = tcga[tcga["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
+    The Mutant Census is one row per (mutation, sample) occurrence rather than
+    pre-aggregated hotspots, so affected-case counts are computed here by counting
+    distinct samples per (gene, amino-acid change).
+    """
+    cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
+    cosmic = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
 
-    tcga["mutation"] = tcga["aa_change"]
-    tcga["mutation_with_count"] = tcga.apply(format_mutation_with_count, axis=1)
+    cosmic = cosmic[cosmic["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
 
-    return tcga, case_count_col
+    cosmic["aa_change"] = cosmic["MUTATION_AA"].str.replace(r"^p\.", "", regex=True)
+    cosmic = cosmic[cosmic["aa_change"].apply(is_simple_substitution)].copy()
+
+    cosmic = (
+        cosmic.groupby(["GENE_SYMBOL", "aa_change"])["COSMIC_SAMPLE_ID"]
+        .nunique()
+        .reset_index(name="affected_cases")
+        .rename(columns={"GENE_SYMBOL": "gene"})
+    )
+    cosmic = cosmic[cosmic["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
+
+    cosmic["mutation"] = cosmic["aa_change"]
+    cosmic["mutation_with_count"] = cosmic.apply(format_mutation_with_count, axis=1)
+
+    return cosmic
 
 
 def _run_ptm_proximity_filter(output_file):
     ptmd_file = PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv"
-    tcga_file = PROJECT_ROOT / "data" / "TCGA_frequent_mutations.tsv"
+    cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 
-    print("Loading PTMD and TCGA files...")
+    print("Loading PTMD and COSMIC files...")
     ptmd = pd.read_csv(ptmd_file, sep="\t", low_memory=False)
-    tcga, case_count_col = _load_and_filter_tcga(tcga_file)
+    cosmic = _load_and_filter_cosmic(cosmic_file)
 
     # -----------------------
     # Filter PTMD disruptions
@@ -279,7 +252,7 @@ def _run_ptm_proximity_filter(output_file):
     else:
         disruptions_grouped = pd.DataFrame(columns=["uniprot_id", "ptm_known_disruptions"])
 
-    print("Filtering TCGA mutations and aggregating by gene...")
+    print("Filtering COSMIC mutations and aggregating by gene...")
     # -----------------------
     # Aggregate PTMs by UniProt so each isoform is kept separate.
     # Grouping by gene previously collapsed all isoforms under one UniProt ID,
@@ -299,8 +272,8 @@ def _run_ptm_proximity_filter(output_file):
     # -----------------------
     # Aggregate hotspot mutations by gene
     # -----------------------
-    tcga_grouped = (
-        tcga.groupby("gene", as_index=False)
+    cosmic_grouped = (
+        cosmic.groupby("gene", as_index=False)
         .agg(
             mutations_on_protein=("mutation_with_count", clean_str_list),
         )
@@ -309,7 +282,7 @@ def _run_ptm_proximity_filter(output_file):
     # -----------------------
     # Merge datasets
     # -----------------------
-    merged = ptmd_grouped.merge(tcga_grouped, on="gene", how="left")
+    merged = ptmd_grouped.merge(cosmic_grouped, on="gene", how="left")
 
     merged = merged[
         [
@@ -322,6 +295,18 @@ def _run_ptm_proximity_filter(output_file):
         ]
     ]
 
+    # -----------------------
+    # Log PTMD proteins with no matching COSMIC hotspot mutations for their gene
+    # (gene-name mismatch between PTMD/UniProt and COSMIC, or no mutation met
+    # HOTSPOT_MIN_AFFECTED_CASES for that gene) before dropping them.
+    # -----------------------
+    unmatched = merged[merged["mutations_on_protein"].isna()].copy()
+    UNMATCHED_GENES_LOG.parent.mkdir(parents=True, exist_ok=True)
+    unmatched[["uniprot_id", "gene", "ptms_on_protein"]].to_csv(
+        UNMATCHED_GENES_LOG, sep="\t", index=False, encoding="utf-16"
+    )
+    print(f"Wrote {len(unmatched)} proteins with no matching COSMIC hotspot mutations to: {UNMATCHED_GENES_LOG}")
+
     merged = merged[merged["mutations_on_protein"].notna()].copy()
 
     # -----------------------
@@ -331,31 +316,30 @@ def _run_ptm_proximity_filter(output_file):
     merged.to_csv(output_file, sep="\t", index=False)
 
     print("Done.")
-    print(f"Using case count column: {case_count_col}")
     print(f"Hotspot minimum affected cases: {HOTSPOT_MIN_AFFECTED_CASES}")
     print(f"PTMD disruption genes: {ptmd['gene'].nunique()}")
-    print(f"TCGA hotspot genes: {tcga['gene'].nunique()}")
+    print(f"COSMIC hotspot genes: {cosmic['gene'].nunique()}")
     print(f"Final merged proteins: {len(merged)}")
     print(f"Output saved to: {output_file}")
 
 
 def _run_mutation_clustering_filter(output_file):
-    tcga_file = PROJECT_ROOT / "data" / "TCGA_frequent_mutations.tsv"
+    cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 
-    print("Loading TCGA file...")
-    tcga, case_count_col = _load_and_filter_tcga(tcga_file)
+    print("Loading COSMIC file...")
+    cosmic = _load_and_filter_cosmic(cosmic_file)
 
     print("Aggregating hotspot mutations by gene...")
-    tcga_grouped = (
-        tcga.groupby("gene", as_index=False)
+    cosmic_grouped = (
+        cosmic.groupby("gene", as_index=False)
         .agg(mutations_on_protein=("mutation_with_count", clean_str_list))
     )
 
-    gene_names = tcga_grouped["gene"].tolist()
+    gene_names = cosmic_grouped["gene"].tolist()
     print(f"Mapping {len(gene_names)} genes to UniProt IDs via UniProt API...")
     gene_map = fetch_gene_to_uniprot_mapping(gene_names)
 
-    result = tcga_grouped.merge(gene_map, on="gene", how="left")
+    result = cosmic_grouped.merge(gene_map, on="gene", how="left")
     unmapped = result["UniProt"].isna().sum()
     result = result[result["UniProt"].notna()].copy()
     result = result.rename(columns={"UniProt": "uniprot_id"})
@@ -365,9 +349,8 @@ def _run_mutation_clustering_filter(output_file):
     result.to_csv(output_file, sep="\t", index=False)
 
     print("Done.")
-    print(f"Using case count column: {case_count_col}")
     print(f"Hotspot minimum affected cases: {HOTSPOT_MIN_AFFECTED_CASES}")
-    print(f"TCGA hotspot genes: {tcga['gene'].nunique()}")
+    print(f"COSMIC hotspot genes: {cosmic['gene'].nunique()}")
     print(f"Genes mapped to UniProt: {len(result)}")
     print(f"Genes not mapped to UniProt (excluded): {unmapped}")
     print(f"Output saved to: {output_file}")
@@ -380,8 +363,8 @@ def main():
         choices=["ptm-proximity", "mutation-clustering"],
         default="ptm-proximity",
         help=(
-            "'ptm-proximity' merges PTMD + TCGA and keeps only genes with both PTMs and mutations. "
-            "'mutation-clustering' keeps all recurrent TCGA hotspot mutations regardless of PTMs."
+            "'ptm-proximity' merges PTMD + COSMIC and keeps only genes with both PTMs and mutations. "
+            "'mutation-clustering' keeps all recurrent COSMIC hotspot mutations regardless of PTMs."
         ),
     )
     args = parser.parse_args()
