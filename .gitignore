@@ -13,6 +13,7 @@ data/cache/
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
 
 # macOS
 .DS_Store
