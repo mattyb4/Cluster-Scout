@@ -12,6 +12,30 @@ HOTSPOT_MIN_AFFECTED_CASES = 3
 
 UNMATCHED_GENES_LOG = PROJECT_ROOT / "Output" / "logs" / "ptm_genes_without_cosmic_mutations.tsv"
 
+CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+
+
+def _load_cache(filename, columns):
+    """Load a TSV cache file into a dict keyed by its first column.
+
+    Values are tuples of the remaining columns as strings ('' if blank).
+    Returns {} if the cache file doesn't exist yet.
+    """
+    path = CACHE_DIR / filename
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    key_col, *value_cols = columns
+    return {row[key_col]: tuple(row[c] for c in value_cols) for _, row in df.iterrows()}
+
+
+def _save_cache(filename, cache, columns):
+    """Write a dict keyed by the first column back to a TSV cache file."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key_col, *value_cols = columns
+    rows = [{key_col: key, **dict(zip(value_cols, values))} for key, values in cache.items()]
+    pd.DataFrame(rows, columns=columns).to_csv(CACHE_DIR / filename, sep="\t", index=False)
+
 
 def clean_str_list(values):
     cleaned = []
@@ -70,85 +94,123 @@ def parse_mutation_site(val):
         return re.findall(r"[A-Z]\d+[A-Z*]", text)
 
 
+UNIPROT_GENE_CACHE_FILE = "uniprot_gene_mapping.tsv"
+
+
 def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
-    """Fetch UniProt accession -> primary gene symbol via the UniProt REST API."""
+    """Fetch UniProt accession -> primary gene symbol via the UniProt REST API.
+
+    Results are cached in data/cache/uniprot_gene_mapping.tsv (including accessions
+    with no gene name, recorded as ''), so subsequent runs only query accessions
+    that haven't been looked up before.
+    """
     # Strip variant suffixes (e.g. Q16613_VAR_A129T -> Q16613) — AlphaFold models canonical sequences
     ids = list({uid.split("_")[0] for uid in set(uniprot_ids)})
     if not ids:
         return pd.DataFrame(columns=["UniProt", "gene"])
 
-    rows = []
-    uniprot_release = None
-    total_batches = (len(ids) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(ids), batch_size), desc="Fetching UniProt gene names", total=total_batches):
-        batch = ids[i : i + batch_size]
-        query = " OR ".join(f"accession:{uid}" for uid in batch)
-        url = "https://rest.uniprot.org/uniprotkb/search"
-        params = {"query": query, "fields": "accession,gene_names", "format": "tsv", "size": batch_size}
+    cache = _load_cache(UNIPROT_GENE_CACHE_FILE, ["UniProt", "gene"])
+    missing = [uid for uid in ids if uid not in cache]
+    print(f"{len(ids) - len(missing)}/{len(ids)} UniProt accessions found in cache; fetching {len(missing)} new...")
 
-        while url:
-            resp = requests.get(url, params=params)
-            resp.raise_for_status()
-            if uniprot_release is None:
-                uniprot_release = resp.headers.get("X-UniProt-Release")
-            lines = resp.text.strip().split("\n")
-            for line in lines[1:]:
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    accession = parts[0].strip()
-                    primary_gene = parts[1].strip().split()[0] if parts[1].strip() else None
-                    if primary_gene:
-                        rows.append({"UniProt": accession, "gene": primary_gene})
+    if missing:
+        uniprot_release = None
+        total_batches = (len(missing) + batch_size - 1) // batch_size
+        for i in tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt gene names", total=total_batches):
+            batch = missing[i : i + batch_size]
+            query = " OR ".join(f"accession:{uid}" for uid in batch)
+            url = "https://rest.uniprot.org/uniprotkb/search"
+            params = {"query": query, "fields": "accession,gene_names", "format": "tsv", "size": batch_size}
 
-            link_header = resp.headers.get("Link", "")
-            match = re.search(r'<([^>]+)>; rel="next"', link_header)
-            url = match.group(1) if match else None
-            params = None
+            while url:
+                resp = requests.get(url, params=params)
+                resp.raise_for_status()
+                if uniprot_release is None:
+                    uniprot_release = resp.headers.get("X-UniProt-Release")
+                lines = resp.text.strip().split("\n")
+                for line in lines[1:]:
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        accession = parts[0].strip()
+                        primary_gene = parts[1].strip().split()[0] if parts[1].strip() else ""
+                        cache[accession] = (primary_gene,)
 
-    if uniprot_release:
-        print(f"Using UniProt release: {uniprot_release}")
-    return pd.DataFrame(rows).drop_duplicates(subset=["UniProt"])
+                link_header = resp.headers.get("Link", "")
+                match = re.search(r'<([^>]+)>; rel="next"', link_header)
+                url = match.group(1) if match else None
+                params = None
+
+            for uid in batch:
+                cache.setdefault(uid, ("",))
+
+        if uniprot_release:
+            print(f"Using UniProt release: {uniprot_release}")
+        _save_cache(UNIPROT_GENE_CACHE_FILE, cache, ["UniProt", "gene"])
+
+    rows = [{"UniProt": uid, "gene": cache[uid][0]} for uid in ids if cache.get(uid, ("",))[0]]
+    return pd.DataFrame(rows, columns=["UniProt", "gene"])
+
+
+GENE_TO_UNIPROT_CACHE_FILE = "gene_to_uniprot_mapping.tsv"
 
 
 def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
-    """Fetch primary gene symbol -> reviewed human UniProt accession via the UniProt REST API."""
+    """Fetch primary gene symbol -> reviewed human UniProt accession via the UniProt REST API.
+
+    Results are cached in data/cache/gene_to_uniprot_mapping.tsv (including genes
+    with no reviewed match, recorded as ''), so subsequent runs only query genes
+    that haven't been looked up before.
+    """
     genes = list(set(gene_names))
-    gene_set = set(genes)
-    rows = []
-    total_batches = (len(genes) + batch_size - 1) // batch_size
-    for i in tqdm(range(0, len(genes), batch_size), desc="Fetching UniProt IDs for genes", total=total_batches):
-        batch = genes[i : i + batch_size]
-        gene_query = " OR ".join(f"gene_exact:{g}" for g in batch)
-        query = f"({gene_query}) AND organism_id:9606 AND reviewed:true"
-        url = "https://rest.uniprot.org/uniprotkb/search"
-        params = {
-            "query": query,
-            "fields": "accession,gene_names",
-            "format": "tsv",
-            "size": min(batch_size * 3, 500),
-        }
+    if not genes:
+        return pd.DataFrame(columns=["gene", "UniProt"])
 
-        while url:
-            resp = requests.get(url, params=params)
-            resp.raise_for_status()
-            lines = resp.text.strip().split("\n")
-            for line in lines[1:]:
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    accession = parts[0].strip()
-                    gene_field = parts[1].strip()
-                    primary_gene = gene_field.split()[0] if gene_field else None
-                    if primary_gene and primary_gene in gene_set:
-                        rows.append({"gene": primary_gene, "UniProt": accession})
+    cache = _load_cache(GENE_TO_UNIPROT_CACHE_FILE, ["gene", "UniProt"])
+    missing = [g for g in genes if g not in cache]
+    print(f"{len(genes) - len(missing)}/{len(genes)} genes found in cache; fetching {len(missing)} new...")
 
-            link_header = resp.headers.get("Link", "")
-            match = re.search(r'<([^>]+)>; rel="next"', link_header)
-            url = match.group(1) if match else None
-            params = None
+    if missing:
+        missing_set = set(missing)
+        total_batches = (len(missing) + batch_size - 1) // batch_size
+        for i in tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt IDs for genes", total=total_batches):
+            batch = missing[i : i + batch_size]
+            gene_query = " OR ".join(f"gene_exact:{g}" for g in batch)
+            query = f"({gene_query}) AND organism_id:9606 AND reviewed:true"
+            url = "https://rest.uniprot.org/uniprotkb/search"
+            params = {
+                "query": query,
+                "fields": "accession,gene_names",
+                "format": "tsv",
+                "size": min(batch_size * 3, 500),
+            }
 
+            while url:
+                resp = requests.get(url, params=params)
+                resp.raise_for_status()
+                lines = resp.text.strip().split("\n")
+                for line in lines[1:]:
+                    parts = line.split("\t")
+                    if len(parts) >= 2:
+                        accession = parts[0].strip()
+                        gene_field = parts[1].strip()
+                        primary_gene = gene_field.split()[0] if gene_field else None
+                        if primary_gene and primary_gene in missing_set:
+                            cache[primary_gene] = (accession,)
+
+                link_header = resp.headers.get("Link", "")
+                match = re.search(r'<([^>]+)>; rel="next"', link_header)
+                url = match.group(1) if match else None
+                params = None
+
+            for g in batch:
+                cache.setdefault(g, ("",))
+
+        _save_cache(GENE_TO_UNIPROT_CACHE_FILE, cache, ["gene", "UniProt"])
+
+    rows = [{"gene": g, "UniProt": cache[g][0]} for g in genes if cache.get(g, ("",))[0]]
     if not rows:
         return pd.DataFrame(columns=["gene", "UniProt"])
-    return pd.DataFrame(rows).drop_duplicates(subset=["gene"])
+    return pd.DataFrame(rows, columns=["gene", "UniProt"])
 
 
 COSMIC_SOMATIC_STATUSES = {
@@ -163,14 +225,27 @@ def _load_and_filter_cosmic(cosmic_file):
     The Mutant Census is one row per (mutation, sample) occurrence rather than
     pre-aggregated hotspots, so affected-case counts are computed here by counting
     distinct samples per (gene, amino-acid change).
+
+    Also returns a gene -> Ensembl transcript accession mapping (one per gene),
+    used to detect when COSMIC's mutation numbering follows a different UniProt
+    isoform than the canonical AlphaFold-modeled sequence.
     """
-    cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
+    cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS", "TRANSCRIPT_ACCESSION"]
     cosmic = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
 
     cosmic = cosmic[cosmic["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
 
     cosmic["aa_change"] = cosmic["MUTATION_AA"].str.replace(r"^p\.", "", regex=True)
     cosmic = cosmic[cosmic["aa_change"].apply(is_simple_substitution)].copy()
+
+    gene_to_transcript = cosmic.groupby("GENE_SYMBOL")["TRANSCRIPT_ACCESSION"].first().to_dict()
+
+    # Total distinct patients with any missense mutation in each gene, regardless of
+    # the hotspot recurrence threshold below. Used as a baseline for comparing
+    # nearby/distant mutation patient counts in step 3.
+    gene_to_total_missense_patients = (
+        cosmic.groupby("GENE_SYMBOL")["COSMIC_SAMPLE_ID"].nunique().to_dict()
+    )
 
     cosmic = (
         cosmic.groupby(["GENE_SYMBOL", "aa_change"])["COSMIC_SAMPLE_ID"]
@@ -183,7 +258,94 @@ def _load_and_filter_cosmic(cosmic_file):
     cosmic["mutation"] = cosmic["aa_change"]
     cosmic["mutation_with_count"] = cosmic.apply(format_mutation_with_count, axis=1)
 
-    return cosmic
+    return cosmic, gene_to_transcript, gene_to_total_missense_patients
+
+
+def _fetch_uniprot_sequence(accession):
+    """Fetch a UniProt entry's sequence (canonical or a specific isoform) as a plain string."""
+    resp = requests.get(f"https://rest.uniprot.org/uniprotkb/{accession}.fasta")
+    if resp.status_code != 200:
+        return None
+    lines = resp.text.strip().split("\n")
+    return "".join(lines[1:])
+
+
+ENSEMBL_XREF_RE = re.compile(r"\.\d+\s*\[([A-Za-z0-9\-]+)\]")
+
+
+ISOFORM_SAFE_LENGTH_CACHE_FILE = "isoform_safe_lengths.tsv"
+
+
+def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size=10):
+    """For genes whose COSMIC transcript is annotated against a UniProt isoform with a
+    different sequence than the canonical AlphaFold-modeled accession, compute the
+    length of the longest shared prefix between the two sequences. Mutation positions
+    beyond this point cannot be reliably mapped onto the canonical structure and should
+    be flagged as isoform mismatches in step 3, regardless of whether the residue
+    happens to match.
+
+    Results are cached in data/cache/isoform_safe_lengths.tsv, keyed by gene and the
+    COSMIC transcript accession used to compute them. A gene is only re-checked if it
+    wasn't cached before or its COSMIC transcript accession has changed.
+
+    Returns a DataFrame with columns: gene, isoform_safe_length. Genes not present
+    have no restriction (COSMIC numbering matches the canonical sequence).
+    """
+    genes = [g for g in gene_to_uniprot if g in gene_to_transcript]
+
+    cache = _load_cache(ISOFORM_SAFE_LENGTH_CACHE_FILE, ["gene", "transcript_accession", "isoform_safe_length"])
+    missing = [g for g in genes if cache.get(g, (None, None))[0] != gene_to_transcript[g]]
+    print(f"{len(genes) - len(missing)}/{len(genes)} genes found in cache; checking {len(missing)} new...")
+
+    if missing:
+        total_batches = (len(missing) + batch_size - 1) // batch_size
+
+        for i in tqdm(range(0, len(missing), batch_size), desc="Checking COSMIC transcripts for isoform mismatches", total=total_batches):
+            batch = missing[i : i + batch_size]
+            enst_noversion = [gene_to_transcript[g].split(".")[0] for g in batch]
+            query = " OR ".join(f"xref:ensembl-{e}" for e in enst_noversion)
+            params = {"query": query, "fields": "accession,xref_ensembl,sequence", "format": "tsv", "size": batch_size * 5}
+            resp = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params)
+            resp.raise_for_status()
+            lines = resp.text.strip().split("\n")
+            result_rows = [line.split("\t") for line in lines[1:] if line.strip()]
+
+            for gene, enst in zip(batch, enst_noversion):
+                canonical_acc = gene_to_uniprot[gene]
+                isoform_acc = None
+                xref_acc = None
+                xref_seq = None
+                for parts in result_rows:
+                    if len(parts) < 3:
+                        continue
+                    m = re.search(rf"{re.escape(enst)}{ENSEMBL_XREF_RE.pattern}", parts[1])
+                    if m:
+                        isoform_acc = m.group(1)
+                        xref_acc, xref_seq = parts[0], parts[2]
+                        break
+
+                isoform_safe_length = ""
+                if isoform_acc is not None and isoform_acc != canonical_acc:
+                    canonical_seq = xref_seq if xref_acc == canonical_acc else _fetch_uniprot_sequence(canonical_acc)
+                    isoform_seq = _fetch_uniprot_sequence(isoform_acc)
+                    if canonical_seq and isoform_seq and canonical_seq != isoform_seq:
+                        lcp = 0
+                        for a, b in zip(canonical_seq, isoform_seq):
+                            if a != b:
+                                break
+                            lcp += 1
+                        isoform_safe_length = str(lcp)
+
+                cache[gene] = (gene_to_transcript[gene], isoform_safe_length)
+
+        _save_cache(ISOFORM_SAFE_LENGTH_CACHE_FILE, cache, ["gene", "transcript_accession", "isoform_safe_length"])
+
+    rows = [
+        {"gene": g, "isoform_safe_length": int(cache[g][1])}
+        for g in genes
+        if cache.get(g, (None, ""))[1]
+    ]
+    return pd.DataFrame(rows, columns=["gene", "isoform_safe_length"])
 
 
 def _run_ptm_proximity_filter(output_file):
@@ -192,7 +354,7 @@ def _run_ptm_proximity_filter(output_file):
 
     print("Loading PTMD and COSMIC files...")
     ptmd = pd.read_csv(ptmd_file, sep="\t", low_memory=False)
-    cosmic = _load_and_filter_cosmic(cosmic_file)
+    cosmic, gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
 
     # -----------------------
     # Filter PTMD disruptions
@@ -310,6 +472,21 @@ def _run_ptm_proximity_filter(output_file):
     merged = merged[merged["mutations_on_protein"].notna()].copy()
 
     # -----------------------
+    # Flag genes where COSMIC's mutation numbering follows a different UniProt
+    # isoform than the canonical AlphaFold-modeled sequence.
+    # -----------------------
+    print("Checking for COSMIC/canonical isoform mismatches...")
+    gene_to_uniprot = dict(zip(merged["gene"], merged["uniprot_id"]))
+    isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
+    merged = merged.merge(isoform_lengths, on="gene", how="left")
+
+    # -----------------------
+    # Total COSMIC missense patients per gene, for comparison against the
+    # nearby/distant mutation patient counts computed in step 3.
+    # -----------------------
+    merged["total_cosmic_missense_patients"] = merged["gene"].map(gene_to_total_missense_patients)
+
+    # -----------------------
     # Save result
     # -----------------------
     print("Saving output...")
@@ -327,7 +504,7 @@ def _run_mutation_clustering_filter(output_file):
     cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 
     print("Loading COSMIC file...")
-    cosmic = _load_and_filter_cosmic(cosmic_file)
+    cosmic, gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
 
     print("Aggregating hotspot mutations by gene...")
     cosmic_grouped = (
@@ -344,6 +521,21 @@ def _run_mutation_clustering_filter(output_file):
     result = result[result["UniProt"].notna()].copy()
     result = result.rename(columns={"UniProt": "uniprot_id"})
     result = result[["uniprot_id", "gene", "mutations_on_protein"]]
+
+    # -----------------------
+    # Flag genes where COSMIC's mutation numbering follows a different UniProt
+    # isoform than the canonical AlphaFold-modeled sequence.
+    # -----------------------
+    print("Checking for COSMIC/canonical isoform mismatches...")
+    gene_to_uniprot = dict(zip(result["gene"], result["uniprot_id"]))
+    isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
+    result = result.merge(isoform_lengths, on="gene", how="left")
+
+    # -----------------------
+    # Total COSMIC missense patients per gene, for comparison against the
+    # nearby/distant mutation patient counts computed in step 3.
+    # -----------------------
+    result["total_cosmic_missense_patients"] = result["gene"].map(gene_to_total_missense_patients)
 
     print("Saving output...")
     result.to_csv(output_file, sep="\t", index=False)

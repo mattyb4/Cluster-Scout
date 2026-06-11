@@ -6,6 +6,9 @@ download_report.tsv
 
 # COSMIC Mutant Census (large input file, download separately - see README)
 data/Cosmic_MutantCensus_*.tsv
+
+# UniProt API lookup caches (machine-generated, regenerated/extended automatically)
+data/cache/
 # Python
 __pycache__/
 *.py[cod]

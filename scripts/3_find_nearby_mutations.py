@@ -148,7 +148,22 @@ def parse_gene_name(uniprot):
 
     return ""
 
+
+def parse_isoform_safe_length(uniprot):
+    """Return the position past which COSMIC's mutation numbering for this protein
+    no longer matches the canonical AlphaFold-modeled sequence, or None if COSMIC's
+    numbering matches canonical throughout."""
+    for row in get_ptm_rows():
+        if row.get("uniprot_id") == uniprot:
+            value = row.get("isoform_safe_length", "")
+            if value and value.strip():
+                return int(float(value))
+            return None
+
+    return None
+
 MUT_RE = re.compile(r"([A-Z])(\d+)([A-Z*])")  # e.g., R482H
+MUT_COUNT_RE = re.compile(r"\((\d+)\)")  # e.g., (5) in "R482H (5)"
 #extracts mutation positions from input db and puts them into a list
 def parse_mutation_positions(uniprot=None):
     mutation_entries = set()
@@ -166,6 +181,40 @@ def parse_mutation_positions(uniprot=None):
                     mutation_entries.add((mutation, int(match.group(2))))
 
     return sorted(mutation_entries, key=lambda x: (x[1], x[0]))
+
+
+def parse_mutation_patient_counts(uniprot):
+    """Map each (mutation, position) for this protein to its COSMIC affected-case
+    (patient) count, as recorded in mutations_on_protein, e.g. "R482H (5)" -> 5."""
+    counts: dict[tuple[str, int], int] = {}
+
+    for row in get_ptm_rows():
+        if row.get("uniprot_id") != uniprot:
+            continue
+
+        for token in re.split(r"[;,]", row.get("mutations_on_protein", "")):
+            token = token.strip()
+            mut_match = MUT_RE.search(token)
+            count_match = MUT_COUNT_RE.search(token)
+            if mut_match and count_match:
+                mutation = f"{mut_match.group(1)}{mut_match.group(2)}{mut_match.group(3)}"
+                counts[(mutation, int(mut_match.group(2)))] = int(count_match.group(1))
+
+    return counts
+
+
+def parse_total_cosmic_missense_patients(uniprot):
+    """Return the total number of distinct COSMIC patients with any missense
+    mutation in this protein's gene, regardless of the hotspot recurrence
+    threshold, or None if not available."""
+    for row in get_ptm_rows():
+        if row.get("uniprot_id") == uniprot:
+            value = row.get("total_cosmic_missense_patients", "")
+            if value and value.strip():
+                return int(float(value))
+            return None
+
+    return None
 
 
 def find_model_file(uniprot_dir):
@@ -242,6 +291,15 @@ def unique_mutation_position_count(hits):
 
 def mutation_at_ptm_site(hits, ptm_pos):
     return 'yes' if any(hit['mutation_pos'] == int(ptm_pos) for hit in hits) else 'no'
+
+def total_patient_count(hits, patient_counts):
+    """Sum COSMIC patient counts across all hits, looking each up by its
+    (mutation, position) with any "(isoform?)" tag stripped."""
+    total = 0
+    for hit in hits:
+        mutation = hit["mutation"].replace("(isoform?)", "")
+        total += patient_counts.get((mutation, hit["mutation_pos"]), 0)
+    return total
 
 
 def parse_ptm_diseases(uniprot, ptm_site, ptm_type):
@@ -380,8 +438,13 @@ if args.mode == "mutation-clustering":
                 if atom.res_id not in pos_to_aa:
                     pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
+            safe_length = parse_isoform_safe_length(uniprot)
             mutation_entries = [
-                (mut + "(isoform?)", pos) if (pos not in pos_to_aa or pos_to_aa[pos] != mut[0])
+                (mut + "(isoform?)", pos) if (
+                    pos not in pos_to_aa
+                    or pos_to_aa[pos] != mut[0]
+                    or (safe_length is not None and pos > safe_length)
+                )
                 else (mut, pos)
                 for mut, pos in mutation_entries
             ]
@@ -423,13 +486,16 @@ else:
             "mutations_within_5_positions",
             "mutation_count_within_5_positions",
             "unique_mutation_position_count_within_5_positions",
+            "nearby_muts_total_patient_count",
             "mutations_more_than_5_positions",
             "mutation_count_more_than_5_positions",
             "unique_mutation_position_count_more_than_5_positions",
+            "distant_muts_total_patient_count",
             "morethan5_linear_distance",
             "mutation_at_ptm_site",
             "confirmed_disrupting_mutations",
             "ptm_diseases",
+            "total_cosmic_missense_patients",
         ])
         skip_writer.writerow(SKIP_HEADER)
 
@@ -473,15 +539,23 @@ else:
                 if atom.res_id not in pos_to_aa:
                     pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
-            # Tag mutations whose reference AA does not match this structure.
-            # Mutation positions are gene-level and use canonical-isoform coordinates;
-            # for non-canonical UniProt entries the same position may be a different residue.
+            # Tag mutations whose reference AA does not match this structure, or whose
+            # position is past the point where COSMIC's isoform diverges from canonical
+            # (isoform_safe_length) even if the residue happens to match by coincidence.
             # Tagging rather than dropping preserves the data and makes mismatches visible.
+            safe_length = parse_isoform_safe_length(uniprot)
             mutation_entries = [
-                (mut + "(isoform?)", pos) if (pos not in pos_to_aa or pos_to_aa[pos] != mut[0])
+                (mut + "(isoform?)", pos) if (
+                    pos not in pos_to_aa
+                    or pos_to_aa[pos] != mut[0]
+                    or (safe_length is not None and pos > safe_length)
+                )
                 else (mut, pos)
                 for mut, pos in mutation_entries
             ]
+
+            patient_counts = parse_mutation_patient_counts(uniprot)
+            total_missense_patients = parse_total_cosmic_missense_patients(uniprot)
 
             pae_matrix = load_pae_matrix(uniprot_dir)
 
@@ -516,13 +590,16 @@ else:
                     format_mutations(within_5),
                     len(within_5),
                     unique_mutation_position_count(within_5),
+                    total_patient_count(within_5, patient_counts),
                     format_mutations(beyond_5),
                     len(beyond_5),
                     unique_mutation_position_count(beyond_5),
+                    total_patient_count(beyond_5, patient_counts),
                     linear_distances(beyond_5, ptm_position),
                     mutation_at_ptm_site(within_5, ptm_position),
                     format_mutations(confirmed),
                     parse_ptm_diseases(uniprot, ptm_site, ptm_type),
+                    total_missense_patients,
                 ])
 
     print(f"Wrote nearby mutation data to {OUTPUT_PATH}")
