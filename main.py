@@ -22,6 +22,7 @@ _PTM_PROXIMITY_STEPS = [
     "Download AlphaFold CIF models and PAE files",
     "Find nearby mutations and compute distances",
     "Merge HTP/LTP scores into proximity database",
+    "Annotate 14-3-3-Pred binding-site predictions",
 ]
 
 _MUTATION_CLUSTERING_STEPS = [
@@ -117,8 +118,11 @@ def main() -> None:
     t2 = run_step(STEPS[1], 2, len(STEPS), step2_cmd)
     t3 = run_step(STEPS[2], 3, len(STEPS), step3_cmd)
 
+    step5_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_1433pred.py")]
+
     if mode == "ptm-proximity":
         t4 = run_step(STEPS[3], 4, len(STEPS), step4_cmd)
+        t5 = run_step(STEPS[4], 5, len(STEPS), step5_cmd)
 
     total = time.time() - pipeline_start
     print()
@@ -130,6 +134,7 @@ def main() -> None:
     print(f"  Step 3 ({STEPS[2]}): {t3:.1f}s")
     if mode == "ptm-proximity":
         print(f"  Step 4 ({STEPS[3]}): {t4:.1f}s")
+        print(f"  Step 5 ({STEPS[4]}): {t5:.1f}s")
     print(f"  Total elapsed: {total:.1f}s")
     print(_bar("═"))
     print()
