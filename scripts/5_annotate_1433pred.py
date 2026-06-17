@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -26,9 +26,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 PROXIMITY_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 CACHE_DIR = PROJECT_ROOT / "data" / "cache" / "1433pred"
+CONFIRMED_SITES_FILE = PROJECT_ROOT / "data" / "14-3-3 interactors with known P sites.xlsx"
 
 _API_URL = "https://www.compbio.dundee.ac.uk/1433pred/pid={uid}&out=json"
-_REQUEST_DELAY = 0.5  # seconds between API calls — be polite to the server
+_MAX_WORKERS = 5  # concurrent requests — polite to the Dundee server
 _SITE_RE = re.compile(r"^([A-Z])(\d+)$")
 
 
@@ -105,9 +106,56 @@ def annotate_row(ptm_site: str, score_map: dict[int, float]) -> tuple[str, str]:
     return binding, str(round(score, 3))
 
 
+# ── Confirmed-site lookup ─────────────────────────────────────────────────────
+
+def load_confirmed_sites(path: Path) -> dict[tuple[str, int], str]:
+    """Load the known 14-3-3 interactor dataset.
+
+    Returns {(uniprot_id, position): pmid} for all valid S/T entries.
+    """
+    if not path.exists():
+        print(f"Warning: confirmed-sites file not found: {path}", file=__import__("sys").stderr)
+        return {}
+
+    df = pd.read_excel(path, dtype=str)
+    df.columns = [c.strip() for c in df.columns]
+    df["Residue"] = df["Residue"].str.strip()
+    df["PMID"] = df["PMID"].str.strip().str.lstrip("\xa0")
+
+    confirmed: dict[tuple[str, int], str] = {}
+    for _, row in df.iterrows():
+        uid = str(row.get("Uniprot ID", "")).strip()
+        residue = str(row.get("Residue", "")).strip()
+        pmid = str(row.get("PMID", "")).strip()
+        try:
+            pos = int(float(str(row.get("Site", "")).strip()))
+        except (ValueError, TypeError):
+            continue
+        if residue not in ("S", "T"):
+            continue
+        confirmed[(uid, pos)] = pmid
+
+    return confirmed
+
+
+def annotate_confirmed(uid: str, ptm_site: str, confirmed: dict[tuple[str, int], str]) -> tuple[str, str]:
+    """Return (1433_confirmed_site, 1433_confirmed_pmid) for one row."""
+    m = _SITE_RE.match(ptm_site.strip()) if isinstance(ptm_site, str) else None
+    if not m:
+        return "", ""
+    pos = int(m.group(2))
+    pmid = confirmed.get((uid, pos), "")
+    if pmid:
+        return "Yes", pmid
+    return "", ""
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    confirmed_sites = load_confirmed_sites(CONFIRMED_SITES_FILE)
+    print(f"Loaded {len(confirmed_sites)} confirmed 14-3-3 binding sites")
+
     print(f"Reading proximity DB: {PROXIMITY_DB}")
     df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str)
 
@@ -123,13 +171,13 @@ def main() -> None:
     )
 
     score_maps: dict[str, dict[int, float]] = {}
-    for uid in tqdm(unique_uniprots, desc="Fetching 14-3-3-Pred data"):
-        is_cached = (CACHE_DIR / f"{uid}.json").exists()
-        data = fetch_1433pred(uid)
-        if data is not None:
-            score_maps[uid] = build_site_score_map(data)
-        if not is_cached:
-            time.sleep(_REQUEST_DELAY)
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        futures = {pool.submit(fetch_1433pred, uid): uid for uid in unique_uniprots}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Fetching 14-3-3-Pred data"):
+            uid = futures[future]
+            data = future.result()
+            if data is not None:
+                score_maps[uid] = build_site_score_map(data)
 
     # Annotate each row.
     binding_sites = []
@@ -145,12 +193,27 @@ def main() -> None:
     df["1433pred_binding_site"] = binding_sites
     df["1433pred_consensus"] = consensus_scores
 
+    # Confirmed binding sites from the known interactor dataset
+    confirmed_col: list[str] = []
+    confirmed_pmid_col: list[str] = []
+    for _, row in df.iterrows():
+        uid = row.get("UniProt", "")
+        ptm_site = row.get("ptm_site", "")
+        confirmed, pmid = annotate_confirmed(uid, ptm_site, confirmed_sites)
+        confirmed_col.append(confirmed)
+        confirmed_pmid_col.append(pmid)
+
+    df["1433_confirmed_site"] = confirmed_col
+    df["1433_confirmed_pmid"] = confirmed_pmid_col
+
     predicted = sum(1 for b in binding_sites if b == "Yes")
     not_predicted = sum(1 for b in binding_sites if b == "No")
+    n_confirmed = sum(1 for c in confirmed_col if c == "Yes")
     print(
         f"Annotated {len(df)} rows: "
         f"{predicted} predicted binding sites, {not_predicted} not predicted, "
-        f"{len(df) - predicted - not_predicted} not applicable (non-Ser/Thr or no data)."
+        f"{len(df) - predicted - not_predicted} not applicable (non-Ser/Thr or no data).\n"
+        f"{n_confirmed} experimentally confirmed 14-3-3 binding sites."
     )
 
     df.to_csv(PROXIMITY_DB, sep="\t", index=False, encoding="utf-16")

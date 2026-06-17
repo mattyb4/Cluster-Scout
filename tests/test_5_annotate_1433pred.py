@@ -1,6 +1,8 @@
 """Unit tests for scripts/5_annotate_1433pred.py."""
 import json
+from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from conftest import import_script
@@ -111,3 +113,65 @@ class TestFetch1433pred:
             lambda *a, **k: (_ for _ in ()).throw(mod.requests.RequestException("timeout"))
         )
         assert mod.fetch_1433pred("Q06124") is None
+
+
+class TestLoadConfirmedSites:
+    def _write_excel(self, path: Path, rows: list[dict]) -> None:
+        pd.DataFrame(rows).to_excel(path, index=False)
+
+    def test_loads_valid_ser_thr_entries(self, tmp_path):
+        xls = tmp_path / "sites.xlsx"
+        self._write_excel(xls, [
+            {"Uniprot Name": "X_HUMAN", "Uniprot ID": "P12345", "Site": 100, "Residue": "S", "Motif Sequence": "AAAA", "PMID": "11111111"},
+            {"Uniprot Name": "X_HUMAN", "Uniprot ID": "P12345", "Site": 200, "Residue": "T", "Motif Sequence": "BBBB", "PMID": "22222222"},
+        ])
+        result = mod.load_confirmed_sites(xls)
+        assert result[("P12345", 100)] == "11111111"
+        assert result[("P12345", 200)] == "22222222"
+
+    def test_skips_non_ser_thr_residues(self, tmp_path):
+        xls = tmp_path / "sites.xlsx"
+        self._write_excel(xls, [
+            {"Uniprot Name": "X_HUMAN", "Uniprot ID": "P12345", "Site": 50, "Residue": "Y", "Motif Sequence": "AAAA", "PMID": "11111111"},
+            {"Uniprot Name": "X_HUMAN", "Uniprot ID": "P12345", "Site": 51, "Residue": "1", "Motif Sequence": "BBBB", "PMID": "22222222"},
+        ])
+        result = mod.load_confirmed_sites(xls)
+        assert len(result) == 0
+
+    def test_strips_whitespace_from_residue_and_pmid(self, tmp_path):
+        xls = tmp_path / "sites.xlsx"
+        self._write_excel(xls, [
+            {"Uniprot Name": "X_HUMAN", "Uniprot ID": "P12345", "Site": 75, "Residue": "S ", "Motif Sequence": "AAAA", "PMID": "\xa033333333"},
+        ])
+        result = mod.load_confirmed_sites(xls)
+        assert ("P12345", 75) in result
+        assert result[("P12345", 75)] == "33333333"
+
+    def test_returns_empty_dict_when_file_missing(self, tmp_path):
+        result = mod.load_confirmed_sites(tmp_path / "nonexistent.xlsx")
+        assert result == {}
+
+
+class TestAnnotateConfirmed:
+    def setup_method(self):
+        self.confirmed = {("P12345", 100): "11111111", ("P12345", 200): "22222222"}
+
+    def test_confirmed_site_returns_yes_and_pmid(self):
+        site, pmid = mod.annotate_confirmed("P12345", "S100", self.confirmed)
+        assert site == "Yes"
+        assert pmid == "11111111"
+
+    def test_unmatched_position_returns_blank(self):
+        site, pmid = mod.annotate_confirmed("P12345", "S999", self.confirmed)
+        assert site == ""
+        assert pmid == ""
+
+    def test_wrong_uniprot_returns_blank(self):
+        site, pmid = mod.annotate_confirmed("Q99999", "S100", self.confirmed)
+        assert site == ""
+        assert pmid == ""
+
+    def test_malformed_ptm_site_returns_blank(self):
+        site, pmid = mod.annotate_confirmed("P12345", "", self.confirmed)
+        assert site == ""
+        assert pmid == ""
