@@ -23,12 +23,14 @@ import requests
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import project_root, SITE_RE  # noqa: E402
+from pipeline_utils import (  # noqa: E402
+    project_root, SITE_RE,
+    input_dir, resolve_input_file, INTERACTORS_1433_INPUT_DIR,
+)
 
 PROJECT_ROOT = project_root(__file__)
 PROXIMITY_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 CACHE_DIR = PROJECT_ROOT / "data" / "cache" / "1433pred"
-CONFIRMED_SITES_FILE = PROJECT_ROOT / "data" / "14-3-3 interactors with known P sites.xlsx"
 
 _API_URL = "https://www.compbio.dundee.ac.uk/1433pred/pid={uid}&out=json"
 _MAX_WORKERS = 5
@@ -155,8 +157,14 @@ def annotate_confirmed(uid: str, ptm_site: str, confirmed: dict[tuple[str, int],
 
 def main() -> None:
     """Annotate the proximity DB with 14-3-3 predicted and confirmed binding-site columns."""
-    confirmed_sites = load_confirmed_sites(CONFIRMED_SITES_FILE)
-    print(f"Loaded {len(confirmed_sites)} confirmed 14-3-3 binding sites")
+    interactors_dir = input_dir(PROJECT_ROOT, INTERACTORS_1433_INPUT_DIR)
+    try:
+        confirmed_file = resolve_input_file(interactors_dir, (".xlsx", ".xls"))
+        confirmed_sites = load_confirmed_sites(confirmed_file)
+        print(f"Loaded {len(confirmed_sites)} confirmed 14-3-3 binding sites from {confirmed_file.name}")
+    except FileNotFoundError:
+        confirmed_sites = {}
+        print("No 14-3-3 interactors file found — skipping confirmed-site annotation")
 
     print(f"Reading proximity DB: {PROXIMITY_DB}")
     df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str,

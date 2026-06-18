@@ -4,8 +4,10 @@ cif_models/
 *.json
 download_report.tsv
 
-# COSMIC Mutant Census (large input file, download separately - see README)
-data/Cosmic_MutantCensus_*.tsv
+# User-provided input data files (uploaded via the app or placed manually)
+data/input/cosmic/
+data/input/ptmd/
+data/input/1433_interactors/
 
 # UniProt API lookup caches (machine-generated, regenerated/extended automatically)
 data/cache/

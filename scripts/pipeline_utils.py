@@ -18,6 +18,43 @@ def project_root(script_file: str) -> Path:
     return Path(script_file).resolve().parent.parent
 
 
+# ── Input folder resolution ───────────────────────────────────────────────────
+
+COSMIC_INPUT_DIR = "cosmic"
+PTMD_INPUT_DIR = "ptmd"
+INTERACTORS_1433_INPUT_DIR = "1433_interactors"
+
+
+def input_dir(root: Path, subfolder: str) -> Path:
+    """Return the input folder path for a given input type, creating it if needed."""
+    d = root / "data" / "input" / subfolder
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def resolve_input_file(
+    folder: Path,
+    extensions: tuple[str, ...] = (".tsv", ".csv", ".xlsx", ".xls"),
+) -> Path:
+    """Find the single input file in *folder*, erroring if zero or more than one are found."""
+    if not folder.exists():
+        raise FileNotFoundError(f"Input folder does not exist: {folder}")
+    matches = [f for f in sorted(folder.iterdir())
+               if f.is_file() and f.suffix.lower() in extensions]
+    if len(matches) == 0:
+        raise FileNotFoundError(
+            f"No input file found in {folder}.\n"
+            f"Place a file with one of these extensions in the folder: {', '.join(extensions)}"
+        )
+    if len(matches) > 1:
+        names = [f.name for f in matches]
+        raise RuntimeError(
+            f"Multiple files found in {folder}: {names}\n"
+            "Remove extras so only one input file remains."
+        )
+    return matches[0]
+
+
 # ── Amino-acid codes ──────────────────────────────────────────────────────────
 
 AA3TO1 = {
@@ -100,15 +137,15 @@ def load_pae_matrix(uniprot_dir: Path):
 # ── Pipeline step labels (single source of truth) ────────────────────────────
 
 PTM_PROXIMITY_STEPS = [
-    "Filter and merge PTMD + COSMIC data",
-    "Download AlphaFold CIF models and PAE files",
-    "Find nearby mutations and compute distances",
-    "Annotate 14-3-3-Pred binding-site predictions",
-    "Annotate mutations with PolyPhen-2 scores",
+    "Filtering and merging PTMD + COSMIC data - this may take a moment",
+    "Downloading AlphaFold CIF models and PAE files",
+    "Finding nearby mutations and computing distances",
+    "Annotating 14-3-3-Pred binding-site predictions",
+    "Annotating mutations with PolyPhen-2 scores",
 ]
 
 MUTATION_CLUSTERING_STEPS = [
-    "Filter COSMIC hotspot mutations",
-    "Download AlphaFold CIF models and PAE files",
-    "Find mutation clusters in 3D space",
+    "Filtering COSMIC hotspot mutations",
+    "Downloading AlphaFold CIF models and PAE files",
+    "Finding mutation clusters in 3D space",
 ]

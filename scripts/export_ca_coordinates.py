@@ -26,11 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
     find_canonical_cifs, load_first_chain,
+    input_dir, resolve_input_file, COSMIC_INPUT_DIR,
 )
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-DEFAULT_COSMIC = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
 OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
 
@@ -213,13 +213,16 @@ def main() -> None:
     parser.add_argument("--gene", help="Gene symbol — skips the UniProt API gene lookup")
     parser.add_argument(
         "--cosmic",
-        default=str(DEFAULT_COSMIC),
-        help=f"Path to COSMIC Mutant Census TSV (default: {DEFAULT_COSMIC.name})",
+        default=None,
+        help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
     )
     args = parser.parse_args()
 
     uid = args.uniprot.strip().upper()
-    cosmic_file = Path(args.cosmic)
+    if args.cosmic:
+        cosmic_file = Path(args.cosmic)
+    else:
+        cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
 
     # ── 1. Locate CIF files (download from AlphaFold if not present) ─────────
     uniprot_dir = MODELS_ROOT / uid

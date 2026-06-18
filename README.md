@@ -12,15 +12,17 @@ This is the workflow for our 2026 Senior Bioinformatics Capstone project at Brig
 
 ## First: Downloading data
 
-We downloaded raw data from two websites, the COSMIC Mutant Census from the Sanger Institute (https://cancer.sanger.ac.uk/cosmic) as well as PTM disease associated data (https://ptmd.biocuckoo.cn/download.php).
+The pipeline requires three input data files. Each goes in its own folder under `data/input/`:
 
-The COSMIC Mutant Census shows mutations observed across cancer samples, including how many distinct samples carry each mutation. This data is called **Cosmic_MutantCensus_v104_GRCh38.tsv** and is located in the `data/` directory of this repository. It is a large file (600+ MB) and is not tracked in git — download it from COSMIC and place it in `data/` yourself.
+| Folder | File | Source |
+|---|---|---|
+| `data/input/cosmic/` | COSMIC Mutant Census TSV (600+ MB) | [COSMIC](https://cancer.sanger.ac.uk/cosmic) |
+| `data/input/ptmd/` | PTMD disease-associated PTMs TSV | [PTMD 2.0](https://ptmd.biocuckoo.cn/download.php) |
+| `data/input/1433_interactors/` | 14-3-3 confirmed interactors Excel | Provided in this repository |
 
-The PTM disrupting data shows PTMs across the genome associated with disease. This data is called **PTMD_disease_associated_ptms.tsv** and is located in the `data/` directory of this repository.
+**Using the desktop app:** Click the **Browse** button next to each input file to select it. The app copies it into the correct folder automatically.
 
-A dataset of experimentally confirmed 14-3-3 interactors (**14-3-3 interactors with known P sites.xlsx**) is used in Step 4 to cross-reference predicted 14-3-3 binding sites. This file is also located in the `data/` directory.
-
-Feel free to download these data files directly from this GitHub in the `data/` directory to begin.
+**Manual setup:** Download each file and place it in the corresponding folder above. Each folder should contain exactly one file — the pipeline will error if it finds multiple files or none.
 
 ## Reproducing the Analysis
 

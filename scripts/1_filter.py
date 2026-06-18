@@ -8,7 +8,10 @@ from pathlib import Path
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import project_root, COSMIC_SOMATIC_STATUSES  # noqa: E402
+from pipeline_utils import (  # noqa: E402
+    project_root, COSMIC_SOMATIC_STATUSES,
+    input_dir, resolve_input_file, COSMIC_INPUT_DIR, PTMD_INPUT_DIR,
+)
 
 PROJECT_ROOT = project_root(__file__)
 HOTSPOT_MIN_AFFECTED_CASES = 3
@@ -352,10 +355,11 @@ def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size
 
 def _run_ptm_proximity_filter(output_file):
     """Run the PTM-proximity pipeline mode: merge PTMD disease PTMs with COSMIC hotspots, keeping only genes with both."""
-    ptmd_file = PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv"
-    cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
+    ptmd_file = resolve_input_file(input_dir(PROJECT_ROOT, PTMD_INPUT_DIR), (".tsv",))
+    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
 
-    print("Loading PTMD and COSMIC files...")
+    print(f"PTMD file:   {ptmd_file.name}")
+    print(f"COSMIC file: {cosmic_file.name}")
     ptmd = pd.read_csv(ptmd_file, sep="\t", low_memory=False)
     cosmic, gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
 
@@ -505,7 +509,8 @@ def _run_ptm_proximity_filter(output_file):
 
 def _run_mutation_clustering_filter(output_file):
     """Run the mutation-clustering pipeline mode: keep all recurrent COSMIC hotspots mapped to UniProt, regardless of PTMs."""
-    cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
+    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    print(f"COSMIC file: {cosmic_file.name}")
 
     print("Loading COSMIC file...")
     cosmic, gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
