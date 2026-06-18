@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 from pathlib import Path
 import re
@@ -6,10 +7,14 @@ import json
 import argparse
 from typing import Any
 from tqdm import tqdm
-from biotite.structure.io.pdbx import CIFFile, get_structure  # type: ignore[import-untyped]
 
-SCRIPT_DIR = Path(__file__).parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import (  # noqa: E402
+    project_root, AA3TO1, MUT_RE, SITE_RE,
+    find_canonical_cif, load_first_chain, load_pae_matrix,
+)
+
+PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 OUTPUT_PATH = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 SKIPPED_PATH = PROJECT_ROOT / "Output" / "logs" / "ptm_skipped.tsv"
@@ -25,6 +30,7 @@ _PTM_ROWS: list[dict[str, Any]] | None = None
 DISTANCE_CUTOFF = 10.0  # Angstroms, adjust as needed
 
 def get_ptm_rows():
+    """Lazy-load and cache PTM rows from the intermediate TSV to avoid repeated file I/O."""
     global _PTM_ROWS
     if _PTM_ROWS is None:
         with PTM_TSV_PATH.open("r", encoding="utf-8", newline="") as handle:
@@ -32,17 +38,18 @@ def get_ptm_rows():
     return _PTM_ROWS
 
 def get_ca_coord(chain, residue_number):
+    """Return the alpha-carbon coordinate for a residue number, or None if not found."""
     mask = (chain.res_id == residue_number) & (chain.atom_name == "CA")
     if not np.any(mask):
         return None
     return chain.coord[mask][0]
 
-#compute distance between two 3D points
 def compute_distance(coord1, coord2):
+    """Compute the Euclidean distance between two 3D coordinate arrays."""
     return np.linalg.norm(coord1 - coord2)
 
-#find mutations within cutoff distance of PTM site
 def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF): #adjust cutoff as needed
+    """Find mutations within a distance cutoff of a PTM site, with optional PAE confidence filtering."""
     results = []
 
     ptm_coord = get_ca_coord(chain, ptm_pos)
@@ -111,13 +118,11 @@ def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=DIST
     return results
 
 
-#extracts PTM positions/types from input db
 PTM_RE = re.compile(r"([A-Z])(\d+)")  # e.g., S557
 
 
 def parse_ptm_entries(uniprot):
-    # Returns list of (ptm_site, position, ptm_type) tuples.
-    # ptms_on_protein tokens are formatted as "S516:Phosphorylation".
+    """Extract deduplicated PTM site positions and modification types for a UniProt ID from the input TSV."""
     entries = {}  # (ptm_site, position) -> ptm_type, deduplicates by site+type
 
     for row in get_ptm_rows():
@@ -142,6 +147,7 @@ def parse_ptm_entries(uniprot):
 
 
 def parse_gene_name(uniprot):
+    """Look up the gene symbol for a UniProt ID in the input TSV."""
     for row in get_ptm_rows():
         if row.get("uniprot_id") == uniprot:
             return row.get("gene", "")
@@ -162,10 +168,10 @@ def parse_isoform_safe_length(uniprot):
 
     return None
 
-MUT_RE = re.compile(r"([A-Z])(\d+)([A-Z*])")  # e.g., R482H
 MUT_COUNT_RE = re.compile(r"\((\d+)\)")  # e.g., (5) in "R482H (5)"
-#extracts mutation positions from input db and puts them into a list
+
 def parse_mutation_positions(uniprot=None):
+    """Extract all mutation positions and labels for a protein from the input TSV."""
     mutation_entries = set()
 
     for row in get_ptm_rows():
@@ -217,51 +223,11 @@ def parse_total_cosmic_missense_patients(uniprot):
     return None
 
 
-def find_model_file(uniprot_dir):
-    uid = uniprot_dir.name
-    # Only match canonical files: AF-{acc}-F{N}-model_v{ver}.cif
-    # Isoform files look like AF-{acc}-{M}-F1-model_v{ver}.cif and are excluded.
-    canonical_re = re.compile(rf"^AF-{re.escape(uid)}-F\d+-model_v\d+\.", re.IGNORECASE)
-    candidates = [p for p in sorted(uniprot_dir.glob("*.cif")) if canonical_re.match(p.name)]
-    return candidates[0] if candidates else None
-
-
-def load_pae_matrix(uniprot_dir):
-    uid = uniprot_dir.name
-    canonical_re = re.compile(rf"^AF-{re.escape(uid)}-F\d+-predicted_aligned_error_v\d+\.", re.IGNORECASE)
-    candidates = [p for p in sorted(uniprot_dir.glob("*.json")) if canonical_re.match(p.name)]
-    if not candidates:
-        return None
-    with candidates[0].open() as f:
-        data = json.load(f)
-    if isinstance(data, list):
-        data = data[0]
-    matrix = data.get("predicted_aligned_error")
-    return np.array(matrix) if matrix else None
-
-
-def load_first_chain(model_file):
-    try:
-        cif = CIFFile.read(str(model_file))
-        structure = get_structure(cif, model=1)
-    except Exception as exc:
-        tqdm.write(f"  Skipping {model_file.name}: failed to parse ({exc})")
-        return None
-
-    if structure is None or len(structure) == 0:
-        tqdm.write(f"  Skipping {model_file.name}: no models found")
-        return None
-
-    chain_ids = list(dict.fromkeys(structure.chain_id))
-    if not chain_ids:
-        tqdm.write(f"  Skipping {model_file.name}: no chains found")
-        return None
-
-    chain_id = chain_ids[0]
-    return structure[structure.chain_id == chain_id]
+find_model_file = find_canonical_cif
 
 
 def format_mutations(hits):
+    """Format mutation hits as a comma-separated string with distances and PAE scores."""
     if not hits:
         return ""
     parts = []
@@ -274,6 +240,7 @@ def format_mutations(hits):
 
 
 def linear_distances(hits, ptm_pos):
+    """Compute linear (sequence) distances between unique mutation positions and a PTM site."""
     if not hits:
         return ""
     seen = set()
@@ -287,9 +254,11 @@ def linear_distances(hits, ptm_pos):
 
 
 def unique_mutation_position_count(hits):
+    """Count distinct mutation positions in a list of hits."""
     return len({hit["mutation_pos"] for hit in hits})
 
 def mutation_at_ptm_site(hits, ptm_pos):
+    """Check whether any mutation hit is located at the PTM site itself."""
     return 'yes' if any(hit['mutation_pos'] == int(ptm_pos) for hit in hits) else 'no'
 
 def total_patient_count(hits, patient_counts):
@@ -303,7 +272,7 @@ def total_patient_count(hits, patient_counts):
 
 
 def parse_ptm_diseases(uniprot, ptm_site, ptm_type):
-    # ptm_disease_pairs format: "S516:Phosphorylation | Bladder cancer; K43:Ubiquitination | Lung adenocarcinoma"
+    """Extract cancer-related disease associations for a PTM site from PTMD data."""
     CANCER_KEYWORDS = {
         "cancer", "carcinoma", "sarcoma", "lymphoma", "leukemia", "leukaemia",
         "melanoma", "glioma", "glioblastoma", "myeloma", "blastoma", "tumor",
@@ -349,14 +318,10 @@ def parse_ptm_known_disruptions(uniprot):
     return result
 
 
-AA3TO1 = {
-    "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
-    "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
-    "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","SEC":"U","PYL":"O",
-}
 
 
 def main():
+    """Main entry point: parse CLI args and run the PTM-proximity or mutation-clustering pipeline."""
     parser = argparse.ArgumentParser(description="Scan AFDB models for nearby mutations.")
     parser.add_argument("--uniprot", help="Limit processing to a single UniProt ID.")
     parser.add_argument(
@@ -374,10 +339,12 @@ def main():
     SKIP_HEADER = ["UniProt", "gene", "ptm_site", "ptm_type", "skip_reason", "detail"]
 
     def write_skips(skip_writer, uniprot, gene, ptm_entries, reason, detail):
+        """Log a skip reason for every PTM entry of a protein."""
         for ptm_site, _, ptm_type in ptm_entries:
             skip_writer.writerow([uniprot, gene, ptm_site, ptm_type, reason, detail])
 
     def write_skip(skip_writer, uniprot, gene, ptm_site, ptm_type, reason, detail):
+        """Log a skip reason for a single PTM site."""
         skip_writer.writerow([uniprot, gene, ptm_site, ptm_type, reason, detail])
 
 

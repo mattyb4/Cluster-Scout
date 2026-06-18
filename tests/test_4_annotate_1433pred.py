@@ -1,4 +1,4 @@
-"""Unit tests for scripts/5_annotate_1433pred.py."""
+"""Unit tests for scripts/4_annotate_1433pred.py."""
 import json
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 from conftest import import_script
 
-mod = import_script("5_annotate_1433pred.py")
+mod = import_script("4_annotate_1433pred.py")
 
 
 SAMPLE_API_RESPONSE = [

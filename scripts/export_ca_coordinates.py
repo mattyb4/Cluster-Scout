@@ -21,30 +21,20 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from biotite.structure.io.pdbx import CIFFile, get_structure  # type: ignore[import-untyped]
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import (  # noqa: E402
+    project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
+    find_canonical_cifs, load_first_chain,
+)
+
+PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 DEFAULT_COSMIC = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
 OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
 
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
-
-_SOMATIC_STATUSES = {
-    "Confirmed somatic variant",
-    "Reported in another cancer sample as somatic",
-}
-
-# Standard three-letter → one-letter amino acid codes
-_AA3TO1 = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-    "SEC": "U", "PYL": "O",
-}
 
 
 def _download_cif(uid: str) -> list[Path]:
@@ -112,35 +102,18 @@ def _download_cif(uid: str) -> list[Path]:
     return downloaded
 
 
-def _find_cif_files(uniprot_dir: Path) -> list[Path]:
-    uid = uniprot_dir.name
-    pat = re.compile(rf"^AF-{re.escape(uid)}-F(\d+)-model_v\d+\.", re.IGNORECASE)
-    hits = [(int(pat.match(p.name).group(1)), p) for p in uniprot_dir.glob("*.cif") if pat.match(p.name)]
-    return [p for _, p in sorted(hits)]
-
-
 def _load_ca_from_cif(cif_file: Path) -> list[dict]:
-    try:
-        cif = CIFFile.read(str(cif_file))
-        structure = get_structure(cif, model=1)
-    except Exception as exc:
-        print(f"  Warning: could not parse {cif_file.name}: {exc}", file=sys.stderr)
+    """Extract alpha-carbon coordinates from a CIF file as a list of {residue, position, x, y, z} dicts."""
+    chain = load_first_chain(cif_file)
+    if chain is None:
         return []
 
-    if structure is None or len(structure) == 0:
-        return []
-
-    chain_ids = list(dict.fromkeys(structure.chain_id))
-    if not chain_ids:
-        return []
-
-    chain = structure[structure.chain_id == chain_ids[0]]
     ca_mask = chain.atom_name == "CA"
     ca_atoms = chain[ca_mask]
 
     rows = []
     for i in range(len(ca_atoms)):
-        one_letter = _AA3TO1.get(str(ca_atoms.res_name[i]), "X")
+        one_letter = AA3TO1.get(str(ca_atoms.res_name[i]), "X")
         x, y, z = ca_atoms.coord[i]
         rows.append({
             "residue": one_letter,
@@ -199,12 +172,13 @@ def _lookup_gene(uniprot_id: str) -> str | None:
 def _load_cosmic_mutations(
     gene: str, cosmic_file: Path
 ) -> tuple[dict[int, list[str]], dict[int, int]]:
+    """Load somatic missense mutations from COSMIC for a single gene, returning per-position mutation labels and patient counts."""
     """Return position-level dicts: {pos: [mutations]} and {pos: patient_count}."""
     cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
     print(f"Scanning COSMIC for gene {gene} ...")
     df = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
     df = df[df["GENE_SYMBOL"] == gene].copy()
-    df = df[df["MUTATION_SOMATIC_STATUS"].isin(_SOMATIC_STATUSES)].copy()
+    df = df[df["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
     df["aa_change"] = df["MUTATION_AA"].str.replace(r"^p\.", "", regex=True)
     df = df[df["aa_change"].str.match(r"^[A-Z]\d+[A-Z]$", na=False)].copy()
 
@@ -229,6 +203,7 @@ def _load_cosmic_mutations(
 
 
 def main() -> None:
+    """Export all alpha-carbon coordinates and mutation-site coordinates for a given UniProt protein."""
     parser = argparse.ArgumentParser(
         description=(
             "Export alpha-carbon coordinates for all residues and COSMIC missense-mutation sites."
@@ -248,11 +223,11 @@ def main() -> None:
 
     # ── 1. Locate CIF files (download from AlphaFold if not present) ─────────
     uniprot_dir = MODELS_ROOT / uid
-    cif_files = _find_cif_files(uniprot_dir) if uniprot_dir.is_dir() else []
+    cif_files = find_canonical_cifs(uniprot_dir) if uniprot_dir.is_dir() else []
 
     if not cif_files:
         _download_cif(uid)
-        cif_files = _find_cif_files(uniprot_dir)
+        cif_files = find_canonical_cifs(uniprot_dir)
 
     if not cif_files:
         sys.exit(f"Error: no canonical AlphaFold CIF files found in {uniprot_dir}")
@@ -279,6 +254,11 @@ def main() -> None:
 
     # ── 3. Gene symbol ────────────────────────────────────────────────────────
     gene = args.gene or _lookup_gene(uid)
+    if gene is None:
+        sys.exit(
+            f"Error: could not determine gene symbol for {uid}.\n"
+            "Use --gene SYMBOL to provide it directly."
+        )
     print(f"Gene: {gene}")
 
     # ── 4. COSMIC missense mutations ──────────────────────────────────────────

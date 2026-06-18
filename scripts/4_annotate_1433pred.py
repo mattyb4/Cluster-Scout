@@ -14,7 +14,7 @@ subsequent runs do not re-query the server.
 from __future__ import annotations
 
 import json
-import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -22,15 +22,16 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import project_root, SITE_RE  # noqa: E402
+
+PROJECT_ROOT = project_root(__file__)
 PROXIMITY_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 CACHE_DIR = PROJECT_ROOT / "data" / "cache" / "1433pred"
 CONFIRMED_SITES_FILE = PROJECT_ROOT / "data" / "14-3-3 interactors with known P sites.xlsx"
 
 _API_URL = "https://www.compbio.dundee.ac.uk/1433pred/pid={uid}&out=json"
-_MAX_WORKERS = 5  # concurrent requests — polite to the Dundee server
-_SITE_RE = re.compile(r"^([A-Z])(\d+)$")
+_MAX_WORKERS = 5
 
 
 # ── API / cache helpers ───────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ def annotate_row(ptm_site: str, score_map: dict[int, float]) -> tuple[str, str]:
     if not isinstance(ptm_site, str):
         return "", ""
 
-    m = _SITE_RE.match(ptm_site.strip())
+    m = SITE_RE.match(ptm_site.strip())
     if not m:
         return "", ""
 
@@ -140,7 +141,7 @@ def load_confirmed_sites(path: Path) -> dict[tuple[str, int], str]:
 
 def annotate_confirmed(uid: str, ptm_site: str, confirmed: dict[tuple[str, int], str]) -> tuple[str, str]:
     """Return (1433_confirmed_site, 1433_confirmed_pmid) for one row."""
-    m = _SITE_RE.match(ptm_site.strip()) if isinstance(ptm_site, str) else None
+    m = SITE_RE.match(ptm_site.strip()) if isinstance(ptm_site, str) else None
     if not m:
         return "", ""
     pos = int(m.group(2))
@@ -153,11 +154,13 @@ def annotate_confirmed(uid: str, ptm_site: str, confirmed: dict[tuple[str, int],
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Annotate the proximity DB with 14-3-3 predicted and confirmed binding-site columns."""
     confirmed_sites = load_confirmed_sites(CONFIRMED_SITES_FILE)
     print(f"Loaded {len(confirmed_sites)} confirmed 14-3-3 binding sites")
 
     print(f"Reading proximity DB: {PROXIMITY_DB}")
-    df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str)
+    df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str,
+                     keep_default_na=False)
 
     unique_uniprots = df["UniProt"].dropna().unique().tolist()
 
@@ -179,30 +182,23 @@ def main() -> None:
             if data is not None:
                 score_maps[uid] = build_site_score_map(data)
 
-    # Annotate each row.
-    binding_sites = []
-    consensus_scores = []
+    binding_sites, consensus_scores = [], []
+    confirmed_col, confirmed_pmid_col = [], []
     for _, row in df.iterrows():
         uid = row.get("UniProt", "")
         ptm_site = row.get("ptm_site", "")
+
         smap = score_maps.get(uid, {})
         binding, score = annotate_row(ptm_site, smap)
         binding_sites.append(binding)
         consensus_scores.append(score)
 
-    df["1433pred_binding_site"] = binding_sites
-    df["1433pred_consensus"] = consensus_scores
-
-    # Confirmed binding sites from the known interactor dataset
-    confirmed_col: list[str] = []
-    confirmed_pmid_col: list[str] = []
-    for _, row in df.iterrows():
-        uid = row.get("UniProt", "")
-        ptm_site = row.get("ptm_site", "")
-        confirmed, pmid = annotate_confirmed(uid, ptm_site, confirmed_sites)
-        confirmed_col.append(confirmed)
+        conf, pmid = annotate_confirmed(uid, ptm_site, confirmed_sites)
+        confirmed_col.append(conf)
         confirmed_pmid_col.append(pmid)
 
+    df["1433pred_binding_site"] = binding_sites
+    df["1433pred_consensus"] = consensus_scores
     df["1433_confirmed_site"] = confirmed_col
     df["1433_confirmed_pmid"] = confirmed_pmid_col
 

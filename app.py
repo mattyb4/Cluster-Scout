@@ -19,18 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 OUTPUT_DIR = PROJECT_ROOT / "Output"
 
-_PTM_STEPS = [
-    "Filter and merge PTMD + COSMIC data",
-    "Download AlphaFold CIF models and PAE files",
-    "Find nearby mutations and compute distances",
-    "Annotate 14-3-3-Pred binding-site predictions",
-    "Annotate mutations with PolyPhen-2 scores",
-]
-_CLUSTER_STEPS = [
-    "Filter COSMIC hotspot mutations",
-    "Download AlphaFold CIF models and PAE files",
-    "Find mutation clusters in 3D space",
-]
+sys.path.insert(0, str(SCRIPTS_DIR))
+from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS  # noqa: E402
 
 _REQUIRED_FILES: dict[str, Path] = {
     "PTMD": PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv",
@@ -219,7 +209,7 @@ class App(ctk.CTk):
             w.destroy()
         self._step_status_labels = []
 
-        steps = _PTM_STEPS if self._mode.get() == "ptm-proximity" else _CLUSTER_STEPS
+        steps = PTM_PROXIMITY_STEPS if self._mode.get() == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
 
         ctk.CTkLabel(
             self._steps_outer,
@@ -316,16 +306,16 @@ class App(ctk.CTk):
             [python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
         ]
         if mode == "ptm-proximity":
-            cmds.append([python, str(SCRIPTS_DIR / "5_annotate_1433pred.py")])
-            cmds.append([python, str(SCRIPTS_DIR / "6_annotate_polyphen.py")])
+            cmds.append([python, str(SCRIPTS_DIR / "4_annotate_1433pred.py")])
+            cmds.append([python, str(SCRIPTS_DIR / "5_annotate_polyphen.py")])
 
-        steps = _PTM_STEPS if mode == "ptm-proximity" else _CLUSTER_STEPS
+        steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         run_type = _detect_run_type()
         self._q("pipeline_start", len(steps), mode, run_type)
 
         if run_type == "cold" and _load_runtimes(mode, "cold") is None:
             self._q("log", "Note: CIF files and API caches are not yet built.")
-            self._q("log", "Step 2 (structure download) and Step 5 (14-3-3 predictions)")
+            self._q("log", f"Step 2 ({steps[1]}) and Step 4 ({steps[3]})")
             self._q("log", "may each take 20+ minutes on a first run. Subsequent runs")
             self._q("log", "will be much faster once these are cached.\n")
 

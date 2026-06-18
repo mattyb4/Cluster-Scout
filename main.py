@@ -6,30 +6,15 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 INPUT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
 MODELS_DIR = PROJECT_ROOT / "cif_models"
 
-
-# Optional: set this to a UniProt ID like "O00571" to limit step 3.
 RUN_ONLY_UNIPROT: str | None = None
-
-
-_PTM_PROXIMITY_STEPS = [
-    "Filter and merge PTMD + TCGA data",
-    "Download AlphaFold CIF models and PAE files",
-    "Find nearby mutations and compute distances",
-    "Annotate 14-3-3-Pred binding-site predictions",
-    "Annotate mutations with PolyPhen-2 scores",
-]
-
-_MUTATION_CLUSTERING_STEPS = [
-    "Filter TCGA hotspot mutations",
-    "Download AlphaFold CIF models and PAE files",
-    "Find mutation clusters in 3D space",
-]
 
 
 def _bar(char: str = "─", width: int = 60) -> str:
@@ -72,7 +57,7 @@ def main() -> None:
     args = parser.parse_args()
     mode = args.mode
 
-    STEPS = _PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else _MUTATION_CLUSTERING_STEPS
+    STEPS = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
 
     print()
     print(_bar("═"))
@@ -116,8 +101,8 @@ def main() -> None:
     t2 = run_step(STEPS[1], 2, len(STEPS), step2_cmd)
     t3 = run_step(STEPS[2], 3, len(STEPS), step3_cmd)
 
-    step4_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_1433pred.py")]
-    step5_cmd = [python_exe, str(SCRIPTS_DIR / "6_annotate_polyphen.py")]
+    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate_1433pred.py")]
+    step5_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_polyphen.py")]
 
     if mode == "ptm-proximity":
         t4 = run_step(STEPS[3], 4, len(STEPS), step4_cmd)

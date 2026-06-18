@@ -16,6 +16,7 @@ ACC_RE = re.compile(r"^(?:[A-NR-Z0-9][A-Z0-9]{5}|[OPQ][0-9][A-Z0-9]{3}[0-9])(?:-
 
 
 def clean_accession(cell: Any) -> Optional[str]:
+    """Extract the first valid UniProt accession from a cell that may contain delimiters or junk."""
     if cell is None:
         return None
     s = str(cell).strip()
@@ -30,6 +31,7 @@ def clean_accession(cell: Any) -> Optional[str]:
 
 
 def pick_urls(record: dict, prefer: str = "cif") -> dict[str, str]:
+    """Select the best structure and PAE download URLs from an AlphaFold prediction record."""
     urls = [v for v in record.values() if isinstance(v, str) and v.startswith("http")]
 
     def pick_by_priority(priorities):
@@ -63,6 +65,7 @@ def pick_urls(record: dict, prefer: str = "cif") -> dict[str, str]:
     return {"structure_url": structure_url, "pae_url": pae_url}
 
 def fetch_prediction(acc: str, session: requests.Session, retries: int = 4) -> Optional[Any]:
+    """Query the AlphaFold DB API for prediction metadata, with retry and backoff."""
     url = AF_PRED_ENDPOINT.format(acc)
     backoff = 1.6
     for attempt in range(retries):
@@ -76,6 +79,7 @@ def fetch_prediction(acc: str, session: requests.Session, retries: int = 4) -> O
     return None
 
 def download(url: str, outpath: Path, session: requests.Session, retries: int = 4) -> None:
+    """Download a file via streaming GET with retry, using an atomic temp-file rename."""
     outpath.parent.mkdir(parents=True, exist_ok=True)
     if outpath.exists() and outpath.stat().st_size > 0:
         return
@@ -114,6 +118,7 @@ def _is_cached(acc_dir: Path, acc: str, also_pae: bool) -> bool:
 
 
 def read_table(path: str) -> pd.DataFrame:
+    """Read a tabular input file, auto-detecting format from the file extension."""
     p = Path(path)
     if p.suffix.lower() in (".xlsx", ".xls"):
         return pd.read_excel(p)
@@ -129,6 +134,7 @@ DEFAULT_LOGS_DIR = PROJECT_ROOT / "Output" / "logs"
 
 
 def main(in_path: str, id_column: str, out_dir: str, prefer: str, also_pae: bool, delay: float, logs_dir: Path) -> None:
+    """Download AlphaFold CIF structures (and optionally PAE files) for all UniProt IDs in the input table."""
     df = read_table(in_path)
     if id_column not in df.columns:
         raise ValueError(f"Column '{id_column}' not found. Columns: {list(df.columns)}")

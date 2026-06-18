@@ -34,11 +34,6 @@ def nearby_module():
     return import_script("3_find_nearby_mutations.py")
 
 
-@pytest.fixture(scope="session")
-def merge_module():
-    return import_script("4_merge_htp_ltp.py")
-
-
 class FakeResponse:
     """Minimal stand-in for requests.Response used to mock UniProt API calls."""
 

@@ -14,6 +14,7 @@ already-queried (gene, mutation) pairs.
 from __future__ import annotations
 
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21,24 +22,20 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import project_root, MUT_RE  # noqa: E402
+
+PROJECT_ROOT = project_root(__file__)
 PROXIMITY_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "polyphen.tsv"
 
 _API_URL = "https://myvariant.info/v1/query"
 _MAX_WORKERS = 10
 
-# Columns that contain formatted mutation strings to be re-tagged
 _MUTATION_COLS = ["mutations_within_5_positions", "mutations_more_than_5_positions"]
 
-# Parses one entry: base mutation + existing tags + distance/PAE info
-# e.g. "R175H(isoform?)-3.52Å(PAE:2.1)"  →  groups: "R175H", "(isoform?)", "-3.52Å(PAE:2.1)"
 _ENTRY_RE = re.compile(r"^([A-Z]\d+[A-Z*])((?:\([^)]+\))*)(-.+)$")
 
-_MUT_RE = re.compile(r"^([A-Z])(\d+)([A-Z*])$")
-
-# Severity order for picking the worst prediction when multiple transcripts exist
 _SEVERITY = {"D": 2, "P": 1, "B": 0}
 
 
@@ -54,6 +51,7 @@ def _load_cache() -> dict[tuple[str, str], tuple[str, str]]:
 
 
 def _save_cache(cache: dict[tuple[str, str], tuple[str, str]]) -> None:
+    """Persist the (gene, mutation) -> (pred, score) cache to a TSV file."""
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     rows = [{"gene": g, "mutation": m, "pred": p, "score": s}
             for (g, m), (p, s) in cache.items()]
@@ -70,21 +68,31 @@ def _best_prediction(hits: list[dict]) -> tuple[str, str]:
     best_score = -1.0
 
     for hit in hits:
-        hdiv = hit.get("dbnsfp", {}).get("polyphen2", {}).get("hdiv", {})
-        preds = hdiv.get("pred", [])
-        scores = hdiv.get("score", [])
+        dbnsfp = hit.get("dbnsfp", {})
+        polyphen2 = dbnsfp.get("polyphen2", {})
+        if isinstance(polyphen2, list):
+            pp2_entries = polyphen2
+        elif isinstance(polyphen2, dict):
+            pp2_entries = [polyphen2]
+        else:
+            continue
 
-        if isinstance(preds, str):
-            preds = [preds]
-        if isinstance(scores, (int, float)):
-            scores = [scores]
+        for pp2 in pp2_entries:
+            hdiv = pp2.get("hdiv", {}) if isinstance(pp2, dict) else {}
+            preds = hdiv.get("pred", [])
+            scores = hdiv.get("score", [])
 
-        for pred, score in zip(preds, scores):
-            if pred not in _SEVERITY:
-                continue
-            if _SEVERITY[pred] > _SEVERITY.get(best_pred, -1):
-                best_pred = pred
-                best_score = float(score) if isinstance(score, (int, float)) else -1.0
+            if isinstance(preds, str):
+                preds = [preds]
+            if isinstance(scores, (int, float)):
+                scores = [scores]
+
+            for pred, score in zip(preds, scores):
+                if pred not in _SEVERITY:
+                    continue
+                if _SEVERITY[pred] > _SEVERITY.get(best_pred, -1):
+                    best_pred = pred
+                    best_score = float(score) if isinstance(score, (int, float)) else -1.0
 
     if not best_pred:
         return "", ""
@@ -98,7 +106,7 @@ def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str]:
     Returns (pred, score) where pred is 'D', 'P', 'B', or '' if not found.
     Empty strings are also cached to avoid re-querying missing variants.
     """
-    m = _MUT_RE.match(mutation)
+    m = MUT_RE.match(mutation)
     if not m:
         return "", ""
     ref, pos, alt = m.group(1), m.group(2), m.group(3)
@@ -155,6 +163,7 @@ def annotate_mutation_string(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Tag mutations in the proximity DB with PolyPhen-2 predictions from myvariant.info."""
     print(f"Reading proximity DB: {PROXIMITY_DB}")
     df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str,
                      keep_default_na=False)
@@ -179,11 +188,9 @@ def main() -> None:
                 if "(PP:" not in m.group(2) and (gene, base) not in cache:
                     needed.add((gene, base))
 
-    already_cached = sum(1 for k in needed if k in cache)
-    to_fetch = [(g, mut) for g, mut in needed if (g, mut) not in cache]
-    print(f"{len(needed)} unique (gene, mutation) pairs — "
-          f"{len(cache) - already_cached + len(to_fetch)} new to fetch, "
-          f"{len(cache)} already cached")
+    to_fetch = list(needed)
+    print(f"{len(to_fetch)} unique (gene, mutation) pairs to fetch "
+          f"({len(cache)} already in cache from prior runs)")
 
     if to_fetch:
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
@@ -198,20 +205,18 @@ def main() -> None:
         _save_cache(cache)
         print("Cache saved.")
 
-    # Re-annotate mutation strings
+    tagged = 0
     for col in _MUTATION_COLS:
         if col not in df.columns:
             continue
-        df[col] = [
-            annotate_mutation_string(row[col], row.get("gene", ""), cache)
-            for _, row in df.iterrows()
-        ]
+        new_values = []
+        for _, row in df.iterrows():
+            annotated = annotate_mutation_string(row[col], row.get("gene", ""), cache)
+            if "(PP:" in annotated:
+                tagged += 1
+            new_values.append(annotated)
+        df[col] = new_values
 
-    tagged = sum(
-        1 for _, row in df.iterrows()
-        for col in _MUTATION_COLS
-        if "(PP:" in str(row.get(col, ""))
-    )
     print(f"Tagged {tagged} mutation entries with PolyPhen-2 predictions.")
 
     df.to_csv(PROXIMITY_DB, sep="\t", index=False, encoding="utf-16")

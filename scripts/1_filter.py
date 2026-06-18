@@ -1,13 +1,16 @@
 import argparse
 import ast
 import re
+import sys
 import requests
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
-SCRIPT_DIR = Path(__file__).parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import project_root, COSMIC_SOMATIC_STATUSES  # noqa: E402
+
+PROJECT_ROOT = project_root(__file__)
 HOTSPOT_MIN_AFFECTED_CASES = 3
 
 UNMATCHED_GENES_LOG = PROJECT_ROOT / "Output" / "logs" / "ptm_genes_without_cosmic_mutations.tsv"
@@ -38,6 +41,7 @@ def _save_cache(filename, cache, columns):
 
 
 def clean_str_list(values):
+    """Deduplicate and join a Series of strings into a semicolon-separated list, preserving order."""
     cleaned = []
     seen = set()
 
@@ -51,6 +55,7 @@ def clean_str_list(values):
 
 
 def is_simple_substitution(change):
+    """Return True if the amino-acid change is a single-residue missense substitution (e.g. 'V600E')."""
     if pd.isna(change):
         return False
 
@@ -59,6 +64,7 @@ def is_simple_substitution(change):
 
 
 def build_ptm_site(row):
+    """Build a compact PTM site label like 'S473:Phosphorylation' from a PTMD row's residue, position, and type."""
     residue = str(row["Residue"]).strip() if pd.notna(row["Residue"]) else ""
 
     position = ""
@@ -75,6 +81,7 @@ def build_ptm_site(row):
 
 
 def format_mutation_with_count(row):
+    """Format a mutation and its affected-case count as 'V600E (42)' for display in output columns."""
     return f'{row["mutation"]} ({int(row["affected_cases"])})'
 
 
@@ -213,11 +220,6 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
     return pd.DataFrame(rows, columns=["gene", "UniProt"])
 
 
-COSMIC_SOMATIC_STATUSES = {
-    "Confirmed somatic variant",
-    "Reported in another cancer sample as somatic",
-}
-
 
 def _load_and_filter_cosmic(cosmic_file):
     """Shared COSMIC Mutant Census loading and filtering logic used by both pipeline modes.
@@ -349,6 +351,7 @@ def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size
 
 
 def _run_ptm_proximity_filter(output_file):
+    """Run the PTM-proximity pipeline mode: merge PTMD disease PTMs with COSMIC hotspots, keeping only genes with both."""
     ptmd_file = PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv"
     cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 
@@ -501,6 +504,7 @@ def _run_ptm_proximity_filter(output_file):
 
 
 def _run_mutation_clustering_filter(output_file):
+    """Run the mutation-clustering pipeline mode: keep all recurrent COSMIC hotspots mapped to UniProt, regardless of PTMs."""
     cosmic_file = PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv"
 
     print("Loading COSMIC file...")
@@ -549,6 +553,7 @@ def _run_mutation_clustering_filter(output_file):
 
 
 def main():
+    """Parse CLI arguments and dispatch to the selected pipeline filter mode (ptm-proximity or mutation-clustering)."""
     parser = argparse.ArgumentParser(description="Filter and prepare input data for the pipeline.")
     parser.add_argument(
         "--mode",
