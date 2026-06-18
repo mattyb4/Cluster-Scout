@@ -4,6 +4,7 @@ Run with:  uv run app.py
 """
 from __future__ import annotations
 
+import json
 import platform
 import queue
 import subprocess
@@ -22,8 +23,8 @@ _PTM_STEPS = [
     "Filter and merge PTMD + COSMIC data",
     "Download AlphaFold CIF models and PAE files",
     "Find nearby mutations and compute distances",
-    "Merge HTP/LTP scores into proximity database",
     "Annotate 14-3-3-Pred binding-site predictions",
+    "Annotate mutations with PolyPhen-2 scores",
 ]
 _CLUSTER_STEPS = [
     "Filter COSMIC hotspot mutations",
@@ -34,7 +35,6 @@ _CLUSTER_STEPS = [
 _REQUIRED_FILES: dict[str, Path] = {
     "PTMD": PROJECT_ROOT / "data" / "PTMD_disease_associated_ptms.tsv",
     "COSMIC": PROJECT_ROOT / "data" / "Cosmic_MutantCensus_v104_GRCh38.tsv",
-    "HTP/LTP": PROJECT_ROOT / "data" / "htp_ltp_scores.tsv",
 }
 
 ctk.set_appearance_mode("dark")
@@ -47,6 +47,45 @@ _RED = "#e74c3c"
 _YELLOW = "#f1c40f"
 
 
+def _fmt_time(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60:02d}s"
+
+
+RUNTIMES_FILE = OUTPUT_DIR / "logs" / "pipeline_runtimes.json"
+_CIF_DIR = PROJECT_ROOT / "cif_models"
+_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+
+
+def _detect_run_type() -> str:
+    """Return 'cold' if key resources are missing, 'warm' if they are cached."""
+    has_cifs = _CIF_DIR.exists() and any(_CIF_DIR.glob("*/*.cif"))
+    has_cache = (_CACHE_DIR / "uniprot_gene_mapping.tsv").exists()
+    return "warm" if (has_cifs and has_cache) else "cold"
+
+
+def _load_runtimes(mode: str, run_type: str) -> list[float] | None:
+    try:
+        data = json.loads(RUNTIMES_FILE.read_text())
+        return data.get(mode, {}).get(run_type)
+    except Exception:
+        return None
+
+
+def _save_runtimes(mode: str, run_type: str, times: list[float]) -> None:
+    try:
+        data: dict = {}
+        if RUNTIMES_FILE.exists():
+            data = json.loads(RUNTIMES_FILE.read_text())
+        data.setdefault(mode, {})[run_type] = times
+        RUNTIMES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIMES_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -57,6 +96,12 @@ class App(ctk.CTk):
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._running = False
         self._step_status_labels: list[ctk.CTkLabel] = []
+        self._pipeline_start: float | None = None
+        self._step_start: float | None = None
+        self._steps_done = 0
+        self._total_steps = 0
+        self._step_times: list[float] = []
+        self._historical_times: list[float] | None = None
 
         self._build_ui()
         self._refresh_file_status()
@@ -147,6 +192,14 @@ class App(ctk.CTk):
         )
         self._open_btn.pack(side="left")
 
+        self._timer_label = ctk.CTkLabel(
+            btn_frame,
+            text="",
+            text_color=_GRAY,
+            font=ctk.CTkFont(size=13),
+        )
+        self._timer_label.pack(side="right", padx=12)
+
         # Log
         ctk.CTkLabel(
             self, text="Log", font=ctk.CTkFont(weight="bold")
@@ -191,6 +244,27 @@ class App(ctk.CTk):
             status.grid(row=i, column=2, padx=12, pady=5, sticky="e")
             self._step_status_labels.append(status)
 
+    # ── Timer ────────────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        if not self._running or self._pipeline_start is None:
+            return
+        elapsed = time.time() - self._pipeline_start
+
+        text = f"Elapsed: {_fmt_time(elapsed)}"
+
+        hist = self._historical_times
+        if hist and len(hist) == self._total_steps:
+            est_total = sum(hist)
+            text += f"  |  Est. total: ~{_fmt_time(est_total)}"
+        elif self._step_times:
+            avg = sum(self._step_times) / len(self._step_times)
+            est_total = avg * self._total_steps
+            text += f"  |  Est. total: ~{_fmt_time(est_total)}"
+
+        self._timer_label.configure(text=text)
+        self.after(1000, self._tick)
+
     # ── File-status bar ──────────────────────────────────────────────────────
 
     def _refresh_file_status(self):
@@ -210,6 +284,7 @@ class App(ctk.CTk):
         self._running = True
         self._run_btn.configure(state="disabled")
         self._open_btn.configure(state="disabled")
+        self._timer_label.configure(text="")
 
         self._log.configure(state="normal")
         self._log.delete("1.0", "end")
@@ -241,32 +316,45 @@ class App(ctk.CTk):
             [python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
         ]
         if mode == "ptm-proximity":
-            cmds.append([python, str(SCRIPTS_DIR / "4_merge_htp_ltp.py")])
             cmds.append([python, str(SCRIPTS_DIR / "5_annotate_1433pred.py")])
+            cmds.append([python, str(SCRIPTS_DIR / "6_annotate_polyphen.py")])
 
         steps = _PTM_STEPS if mode == "ptm-proximity" else _CLUSTER_STEPS
+        run_type = _detect_run_type()
+        self._q("pipeline_start", len(steps), mode, run_type)
+
+        if run_type == "cold" and _load_runtimes(mode, "cold") is None:
+            self._q("log", "Note: CIF files and API caches are not yet built.")
+            self._q("log", "Step 2 (structure download) and Step 5 (14-3-3 predictions)")
+            self._q("log", "may each take 20+ minutes on a first run. Subsequent runs")
+            self._q("log", "will be much faster once these are cached.\n")
 
         all_ok = True
+        step_times: list[float] = []
         for i, (label, cmd) in enumerate(zip(steps, cmds)):
             self._q("status", i, "▶  Running…", _BLUE)
             self._q("log", f"\n{'─' * 56}")
             self._q("log", f"Step {i + 1}/{len(steps)}: {label}")
             self._q("log", f"{'─' * 56}")
+            self._q("step_start")
 
             t0 = time.time()
             ok = self._stream_cmd(cmd)
             elapsed = time.time() - t0
 
             if ok:
-                self._q("status", i, f"✓  {elapsed:.0f}s", _GREEN)
-                self._q("log", f"\n✓  Step {i + 1} completed in {elapsed:.1f}s")
+                step_times.append(elapsed)
+                self._q("status", i, f"✓  {_fmt_time(elapsed)}", _GREEN)
+                self._q("log", f"\n✓  Step {i + 1} completed in {_fmt_time(elapsed)}")
+                self._q("step_complete", elapsed)
             else:
                 self._q("status", i, "✗  Failed", _RED)
-                self._q("log", f"\n✗  Step {i + 1} FAILED after {elapsed:.1f}s — pipeline stopped")
+                self._q("log", f"\n✗  Step {i + 1} FAILED after {_fmt_time(elapsed)} — pipeline stopped")
                 all_ok = False
                 break
 
         if all_ok:
+            self._q("save_runtimes", mode, run_type, step_times)
             self._q("log", f"\n{'═' * 56}")
             self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
             self._q("log", f"{'═' * 56}")
@@ -304,11 +392,35 @@ class App(ctk.CTk):
                     _, idx, text, color = msg
                     if 0 <= idx < len(self._step_status_labels):
                         self._step_status_labels[idx].configure(text=text, text_color=color)
+                elif kind == "pipeline_start":
+                    _, total, mode, run_type = msg
+                    self._pipeline_start = time.time()
+                    self._step_start = None
+                    self._total_steps = total
+                    self._steps_done = 0
+                    self._step_times = []
+                    self._historical_times = _load_runtimes(mode, run_type)
+                    self._tick()
+                elif kind == "step_start":
+                    self._step_start = time.time()
+                elif kind == "step_complete":
+                    _, elapsed = msg
+                    self._steps_done += 1
+                    self._step_times.append(elapsed)
+                    self._step_start = None
+                elif kind == "save_runtimes":
+                    _, mode, run_type, times = msg
+                    _save_runtimes(mode, run_type, times)
                 elif kind == "enable_open":
                     self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
                 elif kind == "finished":
                     self._running = False
                     self._run_btn.configure(state="normal")
+                    if self._pipeline_start is not None:
+                        total = time.time() - self._pipeline_start
+                        self._timer_label.configure(
+                            text=f"Total: {_fmt_time(total)}", text_color=_GREEN
+                        )
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)

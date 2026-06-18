@@ -21,8 +21,8 @@ _PTM_PROXIMITY_STEPS = [
     "Filter and merge PTMD + TCGA data",
     "Download AlphaFold CIF models and PAE files",
     "Find nearby mutations and compute distances",
-    "Merge HTP/LTP scores into proximity database",
     "Annotate 14-3-3-Pred binding-site predictions",
+    "Annotate mutations with PolyPhen-2 scores",
 ]
 
 _MUTATION_CLUSTERING_STEPS = [
@@ -110,15 +110,14 @@ def main() -> None:
     if RUN_ONLY_UNIPROT:
         step3_cmd.extend(["--uniprot", RUN_ONLY_UNIPROT])
 
-    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_merge_htp_ltp.py")]
-
     pipeline_start = time.time()
 
     t1 = run_step(STEPS[0], 1, len(STEPS), step1_cmd)
     t2 = run_step(STEPS[1], 2, len(STEPS), step2_cmd)
     t3 = run_step(STEPS[2], 3, len(STEPS), step3_cmd)
 
-    step5_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_1433pred.py")]
+    step4_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_1433pred.py")]
+    step5_cmd = [python_exe, str(SCRIPTS_DIR / "6_annotate_polyphen.py")]
 
     if mode == "ptm-proximity":
         t4 = run_step(STEPS[3], 4, len(STEPS), step4_cmd)
