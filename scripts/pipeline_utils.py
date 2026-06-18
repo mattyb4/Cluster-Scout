@@ -55,6 +55,20 @@ def resolve_input_file(
     return matches[0]
 
 
+# ── CIF metadata extraction ───────────────────────────────────────────────────
+
+def extract_uniprot_from_cif(cif_path: Path) -> str | None:
+    """Read the UniProt accession embedded in an AlphaFold CIF file, or None if not found."""
+    try:
+        with open(cif_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("_ma_target_ref_db_details.db_accession"):
+                    return line.split()[-1].strip()
+    except OSError:
+        pass
+    return None
+
+
 # ── Amino-acid codes ──────────────────────────────────────────────────────────
 
 AA3TO1 = {

@@ -27,7 +27,7 @@ OUTPUT_DIR = PROJECT_ROOT / "Output"
 sys.path.insert(0, str(SCRIPTS_DIR))
 from pipeline_utils import (  # noqa: E402
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    input_dir, resolve_input_file,
+    input_dir, resolve_input_file, extract_uniprot_from_cif,
     COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
 )
 
@@ -174,20 +174,18 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(12, 8), pady=10)
 
         self._mode = ctk.StringVar(value="ptm-proximity")
-        ctk.CTkRadioButton(
-            mode_frame,
-            text="PTM Proximity",
-            variable=self._mode,
-            value="ptm-proximity",
-            command=self._rebuild_step_rows,
-        ).pack(side="left", padx=8, pady=10)
-        ctk.CTkRadioButton(
-            mode_frame,
-            text="Mutation Clustering",
-            variable=self._mode,
-            value="mutation-clustering",
-            command=self._rebuild_step_rows,
-        ).pack(side="left", padx=8, pady=10)
+        for label, value in [
+            ("PTM Proximity", "ptm-proximity"),
+            ("Mutation Clustering", "mutation-clustering"),
+            ("Single Protein", "single-protein"),
+        ]:
+            ctk.CTkRadioButton(
+                mode_frame,
+                text=label,
+                variable=self._mode,
+                value=value,
+                command=self._rebuild_step_rows,
+            ).pack(side="left", padx=8, pady=10)
 
         # Steps panel
         self._steps_outer = ctk.CTkFrame(self)
@@ -269,9 +267,15 @@ class App(ctk.CTk):
             w.destroy()
         self._step_status_labels = []
         self._step_progress_bars: list[ctk.CTkProgressBar] = []
-
-        steps = PTM_PROXIMITY_STEPS if self._mode.get() == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         self._steps_outer.grid_columnconfigure(1, weight=1)
+
+        mode = self._mode.get()
+
+        if mode == "single-protein":
+            self._build_single_protein_panel()
+            return
+
+        steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
 
         ctk.CTkLabel(
             self._steps_outer,
@@ -302,6 +306,69 @@ class App(ctk.CTk):
             )
             status.grid(row=i, column=3, padx=12, pady=5, sticky="e")
             self._step_status_labels.append(status)
+
+    def _build_single_protein_panel(self):
+        """Build the input fields for single-protein analysis mode."""
+        ctk.CTkLabel(
+            self._steps_outer,
+            text="Single Protein Analysis",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
+
+        # CIF file picker
+        ctk.CTkLabel(self._steps_outer, text="CIF file:", anchor="w").grid(
+            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        self._single_cif_var = ctk.StringVar(value="")
+        self._single_cif_entry = ctk.CTkEntry(
+            self._steps_outer, textvariable=self._single_cif_var, width=400,
+        )
+        self._single_cif_entry.grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+        ctk.CTkButton(
+            self._steps_outer, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_cif,
+        ).grid(row=1, column=2, padx=12, pady=6, sticky="e")
+
+        # UniProt ID
+        ctk.CTkLabel(self._steps_outer, text="UniProt ID:", anchor="w").grid(
+            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        self._single_uniprot_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._single_uniprot_var, width=200,
+            placeholder_text="Edit if CIF is not in a UniProt-named folder",
+        ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+
+        # Status label (reuse the step status pattern so the pipeline runner can update it)
+        status = ctk.CTkLabel(
+            self._steps_outer, text="●  Ready", width=100,
+            anchor="e", text_color=_GRAY,
+        )
+        status.grid(row=3, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        self._step_status_labels.append(status)
+
+        bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
+        bar.set(0)
+        bar.grid(row=3, column=0, padx=12, pady=6, sticky="w")
+        bar.grid_remove()
+        self._step_progress_bars.append(bar)
+
+    def _browse_cif(self):
+        """Open a file dialog for selecting a CIF file and auto-fill the UniProt ID."""
+        path = filedialog.askopenfilename(
+            title="Select CIF structure file",
+            filetypes=[("CIF files", "*.cif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self._single_cif_var.set(path)
+        uid = extract_uniprot_from_cif(Path(path))
+        if uid:
+            self._single_uniprot_var.set(uid)
+        else:
+            parent_name = Path(path).parent.name
+            self._single_uniprot_var.set(parent_name)
 
     # ── Timer ────────────────────────────────────────────────────────────────
 
@@ -403,6 +470,14 @@ class App(ctk.CTk):
         if self._running:
             return
 
+        mode = self._mode.get()
+        if mode == "single-protein":
+            cif = getattr(self, "_single_cif_var", None)
+            if not cif or not cif.get().strip():
+                from tkinter import messagebox
+                messagebox.showwarning("Missing input", "Please select a CIF file first.")
+                return
+
         self._running = True
         self._stop_requested = False
         self._suspended = False
@@ -496,14 +571,18 @@ class App(ctk.CTk):
             bar.grid_remove()
 
     def _run_pipeline(self, mode: str):
-        python = sys.executable
+        if mode == "single-protein":
+            self._run_single_protein()
+            return
+
+        python = [sys.executable, "-u"]
         input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
         models_dir = PROJECT_ROOT / "cif_models"
 
         cmds = [
-            [python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode],
+            [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode],
             [
-                python, str(SCRIPTS_DIR / "2_download_structures.py"),
+                *python, str(SCRIPTS_DIR / "2_download_structures.py"),
                 str(input_tsv),
                 "--id_column", "uniprot_id",
                 "--out_dir", str(models_dir),
@@ -512,11 +591,11 @@ class App(ctk.CTk):
                 "--also_pae",
                 "--logs_dir", str(OUTPUT_DIR / "logs"),
             ],
-            [python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
+            [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
         ]
         if mode == "ptm-proximity":
-            cmds.append([python, str(SCRIPTS_DIR / "4_annotate_1433pred.py")])
-            cmds.append([python, str(SCRIPTS_DIR / "5_annotate_polyphen.py")])
+            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate_1433pred.py")])
+            cmds.append([*python, str(SCRIPTS_DIR / "5_annotate_polyphen.py")])
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         run_type = _detect_run_type()
@@ -582,6 +661,62 @@ class App(ctk.CTk):
 
         self._q("finished")
 
+    def _run_single_protein(self):
+        """Run the single-protein CIF analysis in the background thread."""
+        cif_path = self._single_cif_var.get().strip()
+        uniprot = self._single_uniprot_var.get().strip()
+
+        if not cif_path:
+            self._q("log", "Error: no CIF file selected.")
+            self._q("finished")
+            return
+
+        cmd = [sys.executable, "-u", str(SCRIPTS_DIR / "analyze_single_cif_nearby_mutations.py"), cif_path]
+        if uniprot:
+            cmd.extend(["--uniprot", uniprot])
+
+        self._q("pipeline_start", 1, "single-protein", "warm")
+        self._q("show_log")
+        self._q("status", 0, "▶  Analyzing…", _BLUE)
+        self._q("show_progress", 0)
+        self._q("log", f"Analyzing CIF: {Path(cif_path).name}")
+        if uniprot:
+            self._q("log", f"UniProt ID: {uniprot}")
+        self._q("log", "")
+
+        t0 = time.time()
+        ok = self._stream_cmd(cmd, 0)
+        elapsed = time.time() - t0
+
+        if self._stop_requested:
+            self._q("hide_progress", 0)
+            self._q("status", 0, "■  Stopped", _YELLOW)
+            self._q("finished")
+            return
+
+        if not ok:
+            self._q("hide_progress", 0)
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Analysis failed after {_fmt_time(elapsed)}")
+            self._q("finished")
+            return
+
+        self._q("progress", 0, 1.0, "Done")
+        self._q("hide_progress", 0)
+        self._q("status", 0, f"✓  {_fmt_time(elapsed)}", _GREEN)
+        self._q("log", "")
+        self._q("log", f"Analysis complete in {_fmt_time(elapsed)}.")
+
+        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        if output_db.exists():
+            self._q("log", "Review the results above, then choose whether to append to the existing database.")
+            self._q("offer_append", cif_path, uniprot)
+        else:
+            self._q("log", "No existing proximity database found — results printed above.")
+
+        self._q("enable_open")
+        self._q("finished")
+
     _TQDM_RE = re.compile(r"^(.*?):\s+(\d+)%\|[^|]*\|\s+(\d+)/(\d+)")
 
     def _parse_tqdm(self, text: str, step_idx: int) -> bool:
@@ -608,8 +743,8 @@ class App(ctk.CTk):
                 continue
             if byte == b"\r":
                 text = buf.decode("utf-8", errors="replace")
-                self._parse_tqdm(text, step_idx)
-                buf = b""
+                if self._parse_tqdm(text, step_idx):
+                    buf = b""
             elif byte == b"\n":
                 text = buf.decode("utf-8", errors="replace").strip()
                 if text and not self._parse_tqdm(text, step_idx):
@@ -638,6 +773,9 @@ class App(ctk.CTk):
                 kind = msg[0]
                 if kind == "log":
                     self._append_log(msg[1])
+                elif kind == "show_log":
+                    if not self._log_visible:
+                        self._toggle_log()
                 elif kind == "status":
                     _, idx, text, color = msg
                     if 0 <= idx < len(self._step_status_labels):
@@ -679,6 +817,9 @@ class App(ctk.CTk):
                 elif kind == "save_runtimes":
                     _, mode, run_type, times = msg
                     _save_runtimes(mode, run_type, times)
+                elif kind == "offer_append":
+                    _, cif_path, uniprot = msg
+                    self._show_append_dialog(cif_path, uniprot)
                 elif kind == "enable_open":
                     self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
                 elif kind == "finished":
@@ -695,6 +836,7 @@ class App(ctk.CTk):
                         command=self._start_pipeline,
                     )
                     self._stop_btn.configure(state="disabled", fg_color="gray30")
+                    self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
                     if was_cancelled:
                         for lbl in self._step_status_labels:
                             lbl.configure(text="●  Waiting", text_color=_GRAY)
@@ -726,6 +868,120 @@ class App(ctk.CTk):
         self._log.see("end")
         self._log.configure(state="disabled")
         self._last_log_was_progress = True
+
+    # ── Single-protein append dialog ────────────────────────────────────────
+
+    def _check_existing_uniprot(self, uniprot: str) -> int:
+        """Return the number of rows in the proximity DB that match this UniProt ID."""
+        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        if not output_db.exists() or not uniprot:
+            return 0
+        try:
+            import pandas as pd
+            df = pd.read_csv(output_db, sep="\t", encoding="utf-16", usecols=["UniProt"],
+                             dtype=str, keep_default_na=False)
+            return int((df["UniProt"] == uniprot).sum())
+        except Exception:
+            return 0
+
+    def _remove_uniprot_rows(self, uniprot: str) -> None:
+        """Remove all rows for a UniProt ID from the proximity DB."""
+        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        if not output_db.exists():
+            return
+        try:
+            import pandas as pd
+            df = pd.read_csv(output_db, sep="\t", encoding="utf-16", dtype=str,
+                             keep_default_na=False)
+            before = len(df)
+            df = df[df["UniProt"] != uniprot]
+            df.to_csv(output_db, sep="\t", index=False, encoding="utf-16")
+            self._q("log", f"Removed {before - len(df)} existing row(s) for {uniprot}.")
+        except Exception as exc:
+            self._q("log", f"Warning: could not remove existing rows: {exc}")
+
+    def _show_append_dialog(self, cif_path: str, uniprot: str):
+        """Ask the user whether to append, replace, or skip based on existing data."""
+        existing_count = self._check_existing_uniprot(uniprot)
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Save to Database?")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        dialog.geometry("500x190")
+
+        if existing_count > 0:
+            msg = (f"The output database already contains {existing_count} row(s) "
+                   f"for {uniprot}.\nHow would you like to proceed?")
+        else:
+            msg = (f"The output database has no existing data for {uniprot}.\n"
+                   f"How would you like to proceed?")
+
+        ctk.CTkLabel(
+            dialog, text=msg, font=ctk.CTkFont(size=14), justify="center",
+        ).pack(pady=(20, 16))
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack()
+
+        def do_replace():
+            dialog.destroy()
+            threading.Thread(
+                target=self._replace_and_append, args=(cif_path, uniprot),
+                daemon=True,
+            ).start()
+
+        def do_append():
+            dialog.destroy()
+            threading.Thread(
+                target=self._append_single_protein, args=(cif_path, uniprot),
+                daemon=True,
+            ).start()
+
+        if existing_count > 0:
+            ctk.CTkButton(
+                btn_frame, text="Replace existing", width=140,
+                command=do_replace,
+            ).pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            btn_frame, text="Append to database", width=140,
+            command=do_append,
+        ).pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            btn_frame, text="Skip", width=100,
+            fg_color="gray30", hover_color="gray40",
+            command=dialog.destroy,
+        ).pack(side="left", padx=6)
+
+    def _replace_and_append(self, cif_path: str, uniprot: str):
+        """Remove existing rows for this UniProt ID, then append new results."""
+        self._remove_uniprot_rows(uniprot)
+        self._append_single_protein(cif_path, uniprot)
+
+    def _append_single_protein(self, cif_path: str, uniprot: str):
+        """Re-run the single-protein script with --append-to-db."""
+        cmd = [
+            sys.executable, "-u",
+            str(SCRIPTS_DIR / "analyze_single_cif_nearby_mutations.py"),
+            cif_path, "--append-to-db",
+        ]
+        if uniprot:
+            cmd.extend(["--uniprot", uniprot])
+        self._q("log", "Appending results to proximity database...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        for line in proc.stdout:
+            self._q("log", line.rstrip())
+        proc.wait()
+        if proc.returncode == 0:
+            self._q("log", "Results appended successfully.")
+        else:
+            self._q("log", "Failed to append results.")
 
     # ── Output folder ────────────────────────────────────────────────────────
 
