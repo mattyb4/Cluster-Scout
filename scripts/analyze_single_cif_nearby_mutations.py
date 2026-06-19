@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import sys
 from Bio.PDB import MMCIFParser
 import numpy as np
 from pathlib import Path
@@ -7,6 +8,9 @@ import argparse
 import re
 import csv
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pipeline_utils import AA3TO1  # noqa: E402
 
 parser = MMCIFParser(QUIET=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -180,6 +184,56 @@ def parse_mutation_positions(ptm_pos, tsv_path, uniprot=None):
     return dict(sorted(mutation_map.items()))
 
 
+def parse_isoform_safe_length(uniprot, tsv_path):
+    """Return the residue position past which COSMIC numbering diverges from canonical, or None."""
+    with tsv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if get_uniprot_value(row) == uniprot:
+                value = row.get("isoform_safe_length", "")
+                if value and value.strip():
+                    return int(float(value))
+                return None
+    return None
+
+
+def build_pos_to_aa(chain) -> dict[int, str]:
+    """Build a {residue_number: one_letter_aa} dict from a Bio.PDB chain."""
+    pos_to_aa = {}
+    for residue in chain:
+        res_id = residue.get_id()
+        if res_id[0] != " ":
+            continue
+        pos = res_id[1]
+        one_letter = AA3TO1.get(residue.get_resname(), "?")
+        pos_to_aa[pos] = one_letter
+    return pos_to_aa
+
+
+def tag_isoform_mutations(mutation_map: dict, pos_to_aa: dict, safe_length) -> dict:
+    """Return a new mutation_map with (isoform?) tags on mismatched mutations."""
+    tagged = {}
+    for pos, labels in mutation_map.items():
+        new_labels = set()
+        for label in labels:
+            m = MUT_RE.match(label)
+            if m:
+                ref_aa = m.group(1)
+                mismatch = (
+                    pos not in pos_to_aa
+                    or pos_to_aa[pos] != ref_aa
+                    or (safe_length is not None and pos > safe_length)
+                )
+                if mismatch:
+                    new_labels.add(label + "(isoform?)")
+                else:
+                    new_labels.add(label)
+            else:
+                new_labels.add(label)
+        tagged[pos] = new_labels
+    return tagged
+
+
 def parse_gene_name(uniprot, tsv_path):
     with tsv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
@@ -348,6 +402,9 @@ def main():
     model = structure[0]   # First (and only) model
     chain = list(model.get_chains())[0]  # AlphaFold usually has one chain
 
+    pos_to_aa = build_pos_to_aa(chain)
+    safe_length = parse_isoform_safe_length(target_uniprot, tsv_path)
+
     ptm_entries = parse_ptm_entries(target_uniprot, tsv_path)
     if not ptm_entries:
         raise ValueError(f"No PTM positions found in TSV for UniProt {target_uniprot}.")
@@ -356,6 +413,7 @@ def main():
 
     for ptm_label, ptm_position, ptm_type in ptm_entries:
         mutation_positions = parse_mutation_positions(ptm_position, tsv_path, uniprot=target_uniprot)
+        mutation_positions = tag_isoform_mutations(mutation_positions, pos_to_aa, safe_length)
         nearby = find_nearby_mutations(chain, ptm_position, mutation_positions, cutoff=args.cutoff)
 
         print(f"\nPTM {ptm_label} ({target_uniprot}):")

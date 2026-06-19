@@ -1,4 +1,4 @@
-"""Unit tests for scripts/4_annotate_1433pred.py."""
+"""Unit tests for 14-3-3 annotation functions in scripts/4_annotate.py."""
 import json
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 from conftest import import_script
 
-mod = import_script("4_annotate_1433pred.py")
+mod = import_script("4_annotate.py")
 
 
 SAMPLE_API_RESPONSE = [
@@ -39,43 +39,43 @@ class TestAnnotateRow:
         self.scores = mod.build_site_score_map(SAMPLE_API_RESPONSE)
 
     def test_positive_consensus_is_yes(self):
-        binding, consensus = mod.annotate_row("S76", self.scores)
+        binding, consensus = mod.annotate_1433_row("S76", self.scores)
         assert binding == "Yes"
         assert float(consensus) == pytest.approx(1.046)
 
     def test_negative_consensus_is_no(self):
-        binding, consensus = mod.annotate_row("T59", self.scores)
+        binding, consensus = mod.annotate_1433_row("T59", self.scores)
         assert binding == "No"
         assert float(consensus) == pytest.approx(-0.026)
 
     def test_zero_consensus_is_no(self):
-        binding, _ = mod.annotate_row("S100", self.scores)
+        binding, _ = mod.annotate_1433_row("S100", self.scores)
         assert binding == "No"
 
     def test_non_ser_thr_is_blank(self):
-        binding, consensus = mod.annotate_row("Y62", self.scores)
+        binding, consensus = mod.annotate_1433_row("Y62", self.scores)
         assert binding == ""
         assert consensus == ""
 
     def test_lysine_is_blank(self):
-        binding, consensus = mod.annotate_row("K43", self.scores)
+        binding, consensus = mod.annotate_1433_row("K43", self.scores)
         assert binding == ""
         assert consensus == ""
 
     def test_position_not_in_response_is_blank(self):
-        binding, consensus = mod.annotate_row("T999", self.scores)
+        binding, consensus = mod.annotate_1433_row("T999", self.scores)
         assert binding == ""
         assert consensus == ""
 
     def test_malformed_ptm_site_is_blank(self):
-        binding, consensus = mod.annotate_row("", self.scores)
+        binding, consensus = mod.annotate_1433_row("", self.scores)
         assert binding == ""
         assert consensus == ""
 
 
 class TestFetch1433pred:
     def test_caches_response_and_serves_from_cache_on_second_call(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(mod, "_1433_CACHE_DIR", tmp_path)
         calls = []
 
         def fake_get(url, timeout=30):
@@ -96,7 +96,7 @@ class TestFetch1433pred:
         assert len(calls) == 1  # second call served from cache
 
     def test_returns_none_on_non_200(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(mod, "_1433_CACHE_DIR", tmp_path)
 
         def fake_get(url, timeout=30):
             class R:
@@ -107,7 +107,7 @@ class TestFetch1433pred:
         assert mod.fetch_1433pred("NOTANID") is None
 
     def test_returns_none_on_network_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "CACHE_DIR", tmp_path)
+        monkeypatch.setattr(mod, "_1433_CACHE_DIR", tmp_path)
         monkeypatch.setattr(
             mod.requests, "get",
             lambda *a, **k: (_ for _ in ()).throw(mod.requests.RequestException("timeout"))

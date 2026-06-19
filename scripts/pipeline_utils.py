@@ -150,16 +150,25 @@ def load_pae_matrix(uniprot_dir: Path):
 
 # ── Pipeline step labels (single source of truth) ────────────────────────────
 
+# Each step is (panel_label, log_label):
+#   panel_label — declarative, shown in the app's steps panel
+#   log_label   — present tense, shown in the log while running
 PTM_PROXIMITY_STEPS = [
-    "Filtering and merging PTMD + COSMIC data - this may take a moment",
-    "Downloading AlphaFold CIF models and PAE files",
-    "Finding nearby mutations and computing distances",
-    "Annotating 14-3-3-Pred binding-site predictions",
-    "Annotating mutations with PolyPhen-2 scores",
+    ("Filter and merge PTMD + COSMIC data",
+     "Filtering and merging PTMD + COSMIC data - this may take a moment"),
+    ("Download AlphaFold CIF models and PAE files",
+     "Downloading AlphaFold CIF models and PAE files"),
+    ("Find nearby mutations and compute distances",
+     "Finding nearby mutations and computing distances"),
+    ("Annotate results (14-3-3, PolyPhen-2, kinase predictions)",
+     "Annotating results (14-3-3, PolyPhen-2, kinase predictions)"),
 ]
 
 MUTATION_CLUSTERING_STEPS = [
-    "Filtering COSMIC hotspot mutations",
-    "Downloading AlphaFold CIF models and PAE files",
-    "Finding mutation clusters in 3D space",
+    ("Filter COSMIC hotspot mutations",
+     "Filtering COSMIC hotspot mutations"),
+    ("Download AlphaFold CIF models and PAE files",
+     "Downloading AlphaFold CIF models and PAE files"),
+    ("Find mutation clusters in 3D space",
+     "Finding mutation clusters in 3D space"),
 ]

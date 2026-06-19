@@ -71,8 +71,8 @@ def main() -> None:
         print(f"  Limiting step 3 to UniProt: {RUN_ONLY_UNIPROT}")
     print()
     print("  Steps to run:")
-    for i, label in enumerate(STEPS, 1):
-        print(f"    {i}. {label}")
+    for i, (panel_label, _) in enumerate(STEPS, 1):
+        print(f"    {i}. {panel_label}")
     print(_bar("═"))
 
     python_exe = sys.executable
@@ -97,28 +97,25 @@ def main() -> None:
 
     pipeline_start = time.time()
 
-    t1 = run_step(STEPS[0], 1, len(STEPS), step1_cmd)
-    t2 = run_step(STEPS[1], 2, len(STEPS), step2_cmd)
-    t3 = run_step(STEPS[2], 3, len(STEPS), step3_cmd)
+    t1 = run_step(STEPS[0][1], 1, len(STEPS), step1_cmd)
+    t2 = run_step(STEPS[1][1], 2, len(STEPS), step2_cmd)
+    t3 = run_step(STEPS[2][1], 3, len(STEPS), step3_cmd)
 
-    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate_1433pred.py")]
-    step5_cmd = [python_exe, str(SCRIPTS_DIR / "5_annotate_polyphen.py")]
+    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate.py")]
 
     if mode == "ptm-proximity":
-        t4 = run_step(STEPS[3], 4, len(STEPS), step4_cmd)
-        t5 = run_step(STEPS[4], 5, len(STEPS), step5_cmd)
+        t4 = run_step(STEPS[3][1], 4, len(STEPS), step4_cmd)
 
     total = time.time() - pipeline_start
     print()
     print(_bar("═"))
     print("  Pipeline complete!")
     print()
-    print(f"  Step 1 ({STEPS[0]}): {t1:.1f}s")
-    print(f"  Step 2 ({STEPS[1]}): {t2:.1f}s")
-    print(f"  Step 3 ({STEPS[2]}): {t3:.1f}s")
+    print(f"  Step 1 ({STEPS[0][0]}): {t1:.1f}s")
+    print(f"  Step 2 ({STEPS[1][0]}): {t2:.1f}s")
+    print(f"  Step 3 ({STEPS[2][0]}): {t3:.1f}s")
     if mode == "ptm-proximity":
-        print(f"  Step 4 ({STEPS[3]}): {t4:.1f}s")
-        print(f"  Step 5 ({STEPS[4]}): {t5:.1f}s")
+        print(f"  Step 4 ({STEPS[3][0]}): {t4:.1f}s")
     print(f"  Total elapsed: {total:.1f}s")
     print(_bar("═"))
     print()

@@ -226,9 +226,6 @@ class App(ctk.CTk):
             command=self._open_output_folder,
             width=180,
             height=44,
-            state="disabled",
-            fg_color="gray30",
-            hover_color="gray40",
         )
         self._open_btn.pack(side="left")
 
@@ -283,11 +280,11 @@ class App(ctk.CTk):
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=4, padx=12, pady=(8, 2), sticky="w")
 
-        for i, label in enumerate(steps, 1):
+        for i, (panel_label, _log_label) in enumerate(steps, 1):
             ctk.CTkLabel(self._steps_outer, text=f"  {i}.", width=28).grid(
                 row=i, column=0, padx=(12, 0), pady=5, sticky="w"
             )
-            ctk.CTkLabel(self._steps_outer, text=label, anchor="w").grid(
+            ctk.CTkLabel(self._steps_outer, text=panel_label, anchor="w").grid(
                 row=i, column=1, padx=6, pady=5, sticky="ew"
             )
 
@@ -456,15 +453,17 @@ class App(ctk.CTk):
     def _restore_backups(backups: list[Path]) -> None:
         """Restore .bak files over their originals (undo a partial pipeline run)."""
         for bak in backups:
-            original = bak.with_suffix("")  # strip .bak
-            shutil.copy2(bak, original)
-            bak.unlink()
-
-    @staticmethod
-    def _remove_backups(backups: list[Path]) -> None:
-        for bak in backups:
             if bak.exists():
-                bak.unlink()
+                original = bak.with_suffix("")  # strip .bak
+                shutil.copy2(bak, original)
+
+    def _remove_backups(self, backups: list[Path]) -> None:
+        for bak in backups:
+            try:
+                if bak.exists():
+                    bak.unlink()
+            except Exception as exc:
+                self._q("log", f"Warning: could not delete {bak.name}: {exc}")
 
     def _start_pipeline(self):
         if self._running:
@@ -483,7 +482,6 @@ class App(ctk.CTk):
         self._suspended = False
         self._run_btn.configure(state="disabled")
         self._stop_btn.configure(state="normal", fg_color=_RED)
-        self._open_btn.configure(state="disabled")
         self._timer_label.configure(text="")
 
         self._log.configure(state="normal")
@@ -504,28 +502,31 @@ class App(ctk.CTk):
         if not self._running:
             return
         proc = self._current_proc
+        actually_suspended = False
         if proc and proc.poll() is None:
             try:
                 psutil.Process(proc.pid).suspend()
                 self._suspended = True
+                actually_suspended = True
             except psutil.NoSuchProcess:
-                return
+                pass
         self._stop_btn.configure(state="disabled", fg_color="gray30")
-        self._run_btn.configure(
-            state="normal", text="▶  Resume", command=self._resume_pipeline,
-        )
-        self._cancel_btn_ref = ctk.CTkButton(
-            self._run_btn.master,
-            text="✗  Cancel",
-            command=self._cancel_pipeline,
-            width=110,
-            height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            fg_color=_RED,
-            hover_color="#b82020",
-        )
-        self._cancel_btn_ref.pack(side="left", padx=(8, 0))
-        self._q("log", "Pipeline paused.")
+        if actually_suspended:
+            self._run_btn.configure(
+                state="normal", text="▶  Resume", command=self._resume_pipeline,
+            )
+            self._cancel_btn_ref = ctk.CTkButton(
+                self._run_btn.master,
+                text="✗  Cancel",
+                command=self._cancel_pipeline,
+                width=110,
+                height=44,
+                font=ctk.CTkFont(size=15, weight="bold"),
+                fg_color=_RED,
+                hover_color="#b82020",
+            )
+            self._cancel_btn_ref.pack(side="left", padx=(8, 0))
+            self._q("log", "Pipeline paused.")
 
     def _resume_pipeline(self):
         """Resume the suspended subprocess."""
@@ -561,9 +562,10 @@ class App(ctk.CTk):
             self._cancel_btn_ref.destroy()
             del self._cancel_btn_ref
         self._run_btn.configure(
-            state="disabled", text="▶  Run Pipeline", command=self._start_pipeline,
+            state="normal", text="▶  Run Pipeline", command=self._start_pipeline,
         )
         self._stop_btn.configure(state="disabled", fg_color="gray30")
+        self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
         for lbl in self._step_status_labels:
             lbl.configure(text="●  Waiting", text_color=_GRAY)
         for bar in self._step_progress_bars:
@@ -594,8 +596,7 @@ class App(ctk.CTk):
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
         ]
         if mode == "ptm-proximity":
-            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate_1433pred.py")])
-            cmds.append([*python, str(SCRIPTS_DIR / "5_annotate_polyphen.py")])
+            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py")])
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         run_type = _detect_run_type()
@@ -603,63 +604,80 @@ class App(ctk.CTk):
 
         if run_type == "cold" and _load_runtimes(mode, "cold") is None:
             self._q("log", "Note: CIF files and API caches are not yet built.")
-            self._q("log", f"Step 2 ({steps[1]}) and Step 4 ({steps[3]})")
+            self._q("log", f"Step 2 ({steps[1][0]}) and Step 4 ({steps[3][0]})")
             self._q("log", "may each take 20+ minutes on a first run. Subsequent runs")
             self._q("log", "will be much faster once these are cached.\n")
 
         backups = self._backup_outputs()
 
-        all_ok = True
-        cancelled = False
-        step_times: list[float] = []
-        for i, (label, cmd) in enumerate(zip(steps, cmds)):
-            if self._stop_requested:
-                self._q("status", i, "●  Cancelled", _YELLOW)
-                cancelled = True
-                break
+        try:
+            all_ok = True
+            cancelled = False
+            step_times: list[float] = []
+            for i, (step_def, cmd) in enumerate(zip(steps, cmds)):
+                _panel_label, log_label = step_def
+                if self._stop_requested:
+                    self._q("status", i, "●  Cancelled", _YELLOW)
+                    cancelled = True
+                    break
 
-            self._q("status", i, "▶  Running…", _BLUE)
-            self._q("show_progress", i)
-            self._q("log", f"Step {i + 1}/{len(steps)}: {label}")
-            self._q("step_start")
+                self._q("status", i, "▶  Running…", _BLUE)
+                self._q("show_progress", i)
+                self._q("log", f"Step {i + 1}/{len(steps)}: {log_label}")
+                self._q("step_start")
 
-            t0 = time.time()
-            ok = self._stream_cmd(cmd, i)
-            elapsed = time.time() - t0
+                t0 = time.time()
+                ok = self._stream_cmd(cmd, i)
+                elapsed = time.time() - t0
 
-            if self._stop_requested:
-                self._q("hide_progress", i)
-                self._q("status", i, "■  Stopped", _YELLOW)
-                self._q("log", f"Step {i + 1} stopped by user")
-                cancelled = True
-                break
+                if self._stop_requested:
+                    self._q("hide_progress", i)
+                    self._q("status", i, "■  Stopped", _YELLOW)
+                    self._q("log", f"Step {i + 1} stopped by user")
+                    cancelled = True
+                    break
 
-            if ok:
-                step_times.append(elapsed)
-                self._q("progress", i, 1.0, "Done")
-                self._q("hide_progress", i)
-                self._q("status", i, f"✓  {_fmt_time(elapsed)}", _GREEN)
-                self._q("step_complete", elapsed)
+                if ok:
+                    step_times.append(elapsed)
+                    self._q("progress", i, 1.0, "Done")
+                    self._q("hide_progress", i)
+                    self._q("status", i, f"✓  {_fmt_time(elapsed)}", _GREEN)
+                    self._q("step_complete", elapsed)
+                else:
+                    self._q("hide_progress", i)
+                    self._q("status", i, "✗  Failed", _RED)
+                    self._q("log", f"Step {i + 1} FAILED after {_fmt_time(elapsed)}")
+                    all_ok = False
+                    break
+
+            restore_ok = False
+            if cancelled:
+                try:
+                    self._restore_backups(backups)
+                    self._q("log", "Pipeline cancelled — previous output restored.")
+                    restore_ok = True
+                except Exception:
+                    self._q("log", "Pipeline cancelled. Output file may be locked — "
+                            "close it and rename the .bak file to restore your previous output.")
+            elif not all_ok:
+                try:
+                    self._restore_backups(backups)
+                    self._q("log", "Pipeline failed — previous output restored.")
+                    restore_ok = True
+                except Exception:
+                    self._q("log", "Pipeline failed. Output file may be locked — "
+                            "close it and rename the .bak file to restore your previous output.")
             else:
-                self._q("hide_progress", i)
-                self._q("status", i, "✗  Failed", _RED)
-                self._q("log", f"Step {i + 1} FAILED after {_fmt_time(elapsed)}")
-                all_ok = False
-                break
-
-        if cancelled:
-            self._restore_backups(backups)
-            self._q("log", "Pipeline cancelled — previous output restored.")
-        elif not all_ok:
-            self._restore_backups(backups)
-            self._q("log", "Pipeline failed — previous output restored.")
-        else:
-            self._remove_backups(backups)
-            self._q("save_runtimes", mode, run_type, step_times)
-            self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
-            self._q("enable_open")
-
-        self._q("finished")
+                restore_ok = True
+                self._q("save_runtimes", mode, run_type, step_times)
+                self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
+        except Exception as exc:
+            restore_ok = False
+            self._q("log", f"Pipeline error: {exc}")
+        finally:
+            if restore_ok:
+                self._remove_backups(backups)
+            self._q("finished")
 
     def _run_single_protein(self):
         """Run the single-protein CIF analysis in the background thread."""
@@ -718,12 +736,24 @@ class App(ctk.CTk):
         self._q("finished")
 
     _TQDM_RE = re.compile(r"^(.*?):\s+(\d+)%\|[^|]*\|\s+(\d+)/(\d+)")
+    _OVERALL_RE = re.compile(r"^##PROGRESS##\s+(\d+)\s+(.+)$")
+    _using_overall_progress = False
 
     def _parse_tqdm(self, text: str, step_idx: int) -> bool:
-        """Try to parse a tqdm progress line. Returns True if it was a tqdm line."""
+        """Try to parse a progress line (custom ##PROGRESS## or tqdm). Returns True if matched."""
+        m_overall = self._OVERALL_RE.search(text)
+        if m_overall:
+            self._using_overall_progress = True
+            pct = int(m_overall.group(1))
+            desc = m_overall.group(2)
+            self._q("progress", step_idx, pct / 100, f"{pct}%")
+            self._q("progress_log", desc)
+            return True
         m = self._TQDM_RE.search(text)
         if not m:
             return False
+        if self._using_overall_progress:
+            return True
         desc, pct, current, total = m.group(1), int(m.group(2)), m.group(3), m.group(4)
         self._q("progress", step_idx, pct / 100, f"{pct}% ({current}/{total})")
         self._q("progress_log", f"{desc}: {current}/{total}")
@@ -731,7 +761,8 @@ class App(ctk.CTk):
 
     def _stream_cmd(self, cmd: list[str], step_idx: int) -> bool:
         """Run a subprocess, parsing tqdm output for progress bar updates."""
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        env = {**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         self._current_proc = proc
         buf = b""
         while True:
@@ -791,6 +822,7 @@ class App(ctk.CTk):
                     self._update_progress_line(msg[1])
                 elif kind == "show_progress":
                     _, idx = msg
+                    self._using_overall_progress = False
                     if 0 <= idx < len(self._step_progress_bars):
                         self._step_progress_bars[idx].set(0)
                         self._step_progress_bars[idx].grid()
