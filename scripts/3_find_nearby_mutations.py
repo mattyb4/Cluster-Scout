@@ -16,13 +16,7 @@ from pipeline_utils import (  # noqa: E402
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-OUTPUT_PATH = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
-SKIPPED_PATH = PROJECT_ROOT / "Output" / "logs" / "ptm_skipped.tsv"
-CLUSTER_OUTPUT_PATH = PROJECT_ROOT / "Output" / "mutation_cluster_db.tsv"
-CLUSTER_SKIPPED_PATH = PROJECT_ROOT / "Output" / "logs" / "mutation_cluster_skipped.tsv"
-
-OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-SKIPPED_PATH.parent.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
 
 _PTM_ROWS: list[dict[str, Any]] | None = None
@@ -334,7 +328,20 @@ def main():
             "space, with no PTM anchor."
         ),
     )
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Directory for output files (default: Output/)",
+    )
     args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    OUTPUT_PATH = output_dir / "ptm_mutation_proximity_db.tsv"
+    SKIPPED_PATH = output_dir / "logs" / "ptm_skipped.tsv"
+    CLUSTER_OUTPUT_PATH = output_dir / "mutation_cluster_db.tsv"
+    CLUSTER_SKIPPED_PATH = output_dir / "logs" / "mutation_cluster_skipped.tsv"
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SKIPPED_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     SKIP_HEADER = ["UniProt", "gene", "ptm_site", "ptm_type", "skip_reason", "detail"]
 
@@ -353,7 +360,6 @@ def main():
     # ── Mutation-clustering mode ──────────────────────────────────────────────────
     if args.mode == "mutation-clustering":
         CLUSTER_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CLUSTER_SKIPPED_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         all_cluster_uniprots = {row["uniprot_id"] for row in get_ptm_rows() if row.get("uniprot_id")}
 

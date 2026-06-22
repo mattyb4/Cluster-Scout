@@ -33,7 +33,7 @@ from pipeline_utils import (  # noqa: E402
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-PROXIMITY_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 _NUM_PHASES = 3
 
@@ -508,8 +508,18 @@ def run_kinase_phase(df: pd.DataFrame) -> None:
 
 def main() -> None:
     """Run all three annotation phases on the proximity database."""
-    print(f"Reading proximity DB: {PROXIMITY_DB}")
-    df = pd.read_csv(PROXIMITY_DB, sep="\t", encoding="utf-16", dtype=str,
+    import argparse
+    parser = argparse.ArgumentParser(description="Annotate the proximity database.")
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Directory containing the proximity DB (default: Output/)",
+    )
+    args = parser.parse_args()
+
+    proximity_db = Path(args.output_dir) / "ptm_mutation_proximity_db.tsv"
+    print(f"Reading proximity DB: {proximity_db}")
+    df = pd.read_csv(proximity_db, sep="\t", encoding="utf-16", dtype=str,
                      keep_default_na=False)
     print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
 
@@ -517,8 +527,8 @@ def main() -> None:
     run_polyphen_phase(df)
     run_kinase_phase(df)
 
-    df.to_csv(PROXIMITY_DB, sep="\t", index=False, encoding="utf-16")
-    print(f"\nUpdated proximity DB written to: {PROXIMITY_DB}")
+    df.to_csv(proximity_db, sep="\t", index=False, encoding="utf-16")
+    print(f"\nUpdated proximity DB written to: {proximity_db}")
 
 
 if __name__ == "__main__":

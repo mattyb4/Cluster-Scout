@@ -126,17 +126,29 @@ class App(ctk.CTk):
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Tab view
+        self._tabview = ctk.CTkTabview(self)
+        self._tabview.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
+        pipeline_tab = self._tabview.add("Pipeline")
+        help_tab = self._tabview.add("Help / Documentation")
+
+        # ── Pipeline tab ──
+        pipeline_tab.grid_columnconfigure(0, weight=1)
+        pipeline_tab.grid_rowconfigure(7, weight=1)
 
         # Title
         ctk.CTkLabel(
-            self,
+            pipeline_tab,
             text="Mutation Cluster Proximity Pipeline",
             font=ctk.CTkFont(size=22, weight="bold"),
-        ).grid(row=0, column=0, padx=24, pady=(20, 4), sticky="w")
+        ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
+
+        p = pipeline_tab  # shorthand
 
         # Data-file status bar with Browse buttons
-        self._file_frame = ctk.CTkFrame(self)
+        self._file_frame = ctk.CTkFrame(p)
         self._file_frame.grid(row=1, column=0, padx=24, pady=4, sticky="ew")
         self._file_frame.grid_columnconfigure(1, weight=1)
         self._file_indicators: dict[str, ctk.CTkLabel] = {}
@@ -166,7 +178,7 @@ class App(ctk.CTk):
             self._file_buttons[name] = btn
 
         # Mode selection
-        mode_frame = ctk.CTkFrame(self)
+        mode_frame = ctk.CTkFrame(p)
         mode_frame.grid(row=2, column=0, padx=24, pady=4, sticky="ew")
 
         ctk.CTkLabel(
@@ -187,15 +199,42 @@ class App(ctk.CTk):
                 command=self._rebuild_step_rows,
             ).pack(side="left", padx=8, pady=10)
 
+        # Output folder selector
+        out_frame = ctk.CTkFrame(p)
+        out_frame.grid(row=3, column=0, padx=24, pady=4, sticky="ew")
+        out_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            out_frame, text="Output folder:", font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, padx=(12, 6), pady=8, sticky="w")
+
+        self._output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR))
+        self._output_dir_entry = ctk.CTkEntry(
+            out_frame, textvariable=self._output_dir_var, state="readonly",
+        )
+        self._output_dir_entry.grid(row=0, column=1, padx=6, pady=8, sticky="ew")
+
+        ctk.CTkButton(
+            out_frame, text="Change", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_output_dir,
+        ).grid(row=0, column=2, padx=(6, 4), pady=8, sticky="e")
+
+        ctk.CTkButton(
+            out_frame, text="Reset", width=60, height=26,
+            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            command=lambda: self._output_dir_var.set(str(OUTPUT_DIR)),
+        ).grid(row=0, column=3, padx=(0, 12), pady=8, sticky="e")
+
         # Steps panel
-        self._steps_outer = ctk.CTkFrame(self)
-        self._steps_outer.grid(row=3, column=0, padx=24, pady=4, sticky="ew")
+        self._steps_outer = ctk.CTkFrame(p)
+        self._steps_outer.grid(row=4, column=0, padx=24, pady=4, sticky="ew")
         self._steps_outer.grid_columnconfigure(1, weight=1)
         self._rebuild_step_rows()
 
         # Buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=4, column=0, padx=24, pady=8, sticky="ew")
+        btn_frame = ctk.CTkFrame(p, fg_color="transparent")
+        btn_frame.grid(row=5, column=0, padx=24, pady=8, sticky="ew")
 
         self._run_btn = ctk.CTkButton(
             btn_frame,
@@ -240,7 +279,7 @@ class App(ctk.CTk):
         # Log (collapsible)
         self._log_visible = False
         self._log_toggle = ctk.CTkButton(
-            self,
+            p,
             text="Show Details",
             width=120,
             height=28,
@@ -249,15 +288,63 @@ class App(ctk.CTk):
             hover_color="gray40",
             command=self._toggle_log,
         )
-        self._log_toggle.grid(row=5, column=0, padx=24, pady=(8, 0), sticky="w")
+        self._log_toggle.grid(row=6, column=0, padx=24, pady=(8, 0), sticky="w")
 
         self._log = ctk.CTkTextbox(
-            self,
+            p,
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
         )
-        self.grid_rowconfigure(6, weight=1)
+        p.grid_rowconfigure(7, weight=1)
+
+        # ── Help / Documentation tab ──
+        self._build_help_tab(help_tab)
+
+    def _build_help_tab(self, tab):
+        """Load docs/help.md, convert to HTML, and display in the Help tab."""
+        import markdown
+
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        help_md = PROJECT_ROOT / "docs" / "help.md"
+        try:
+            md_text = help_md.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            md_text = "# Help\n\nDocumentation file not found at `docs/help.md`."
+
+        html_body = markdown.markdown(md_text, extensions=["tables", "fenced_code"])
+        css = """
+        <style>
+            body { font-family: Segoe UI, Arial, sans-serif; padding: 24px;
+                   background: #2b2b2b; color: #dcdcdc; line-height: 1.6; }
+            h1 { color: #3a86ff; border-bottom: 2px solid #3a86ff; padding-bottom: 6px; }
+            h2 { color: #6cb4ee; margin-top: 28px; }
+            h3 { color: #a0cfff; margin-top: 20px; }
+            table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+            th, td { border: 1px solid #555; padding: 6px 10px; text-align: left; }
+            th { background: #3a3a3a; color: #dcdcdc; }
+            tr:nth-child(even) { background: #333; }
+            code { background: #3a3a3a; padding: 2px 5px; border-radius: 3px; }
+            hr { border: 1px solid #555; margin: 20px 0; }
+            strong { color: #f0f0f0; }
+            ul, ol { padding-left: 24px; }
+            li { margin: 4px 0; }
+        </style>
+        """
+        full_html = f"<html><head>{css}</head><body>{html_body}</body></html>"
+
+        try:
+            from tkinterweb import HtmlFrame
+            frame = HtmlFrame(tab, messages_enabled=False)
+            frame.load_html(full_html)
+            frame.grid(row=0, column=0, sticky="nsew")
+        except ImportError:
+            fallback = ctk.CTkTextbox(tab, wrap="word", font=ctk.CTkFont(size=13))
+            fallback.insert("1.0", md_text)
+            fallback.configure(state="disabled")
+            fallback.grid(row=0, column=0, sticky="nsew")
 
     def _rebuild_step_rows(self):
         for w in self._steps_outer.winfo_children():
@@ -376,14 +463,15 @@ class App(ctk.CTk):
 
         text = f"Elapsed: {_fmt_time(elapsed)}"
 
+        est = getattr(self, "_precheck_estimate", None)
         hist = self._historical_times
-        if hist and len(hist) == self._total_steps:
-            est_total = sum(hist)
-            text += f"  |  Est. total: ~{_fmt_time(est_total)}"
+        if est is not None:
+            text += f"  |  Est. total: ~{_fmt_time(est)}"
+        elif hist and len(hist) == self._total_steps:
+            text += f"  |  Est. total: ~{_fmt_time(sum(hist))}"
         elif self._step_times:
             avg = sum(self._step_times) / len(self._step_times)
-            est_total = avg * self._total_steps
-            text += f"  |  Est. total: ~{_fmt_time(est_total)}"
+            text += f"  |  Est. total: ~{_fmt_time(avg * self._total_steps)}"
 
         self._timer_label.configure(text=text)
         self.after(1000, self._tick)
@@ -428,21 +516,38 @@ class App(ctk.CTk):
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log.grid(row=6, column=0, padx=24, pady=(4, 20), sticky="nsew")
+            self._log.grid(row=7, column=0, padx=24, pady=(4, 20), sticky="nsew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 
+    def _browse_output_dir(self):
+        """Let the user pick a custom output folder."""
+        path = filedialog.askdirectory(
+            title="Select output folder",
+            initialdir=self._output_dir_var.get(),
+        )
+        if path:
+            self._output_dir_var.set(path)
+
+    @property
+    def _output_dir(self) -> Path:
+        return Path(self._output_dir_var.get())
+
     # ── Pipeline execution ───────────────────────────────────────────────────
 
-    _OUTPUT_FILES = [
-        PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv",
-        PROJECT_ROOT / "Output" / "mutation_cluster_db.tsv",
+    _DEFAULT_OUTPUT_FILES = [
+        "ptm_mutation_proximity_db.tsv",
+        "mutation_cluster_db.tsv",
     ]
+
+    @property
+    def _output_files(self) -> list[Path]:
+        return [self._output_dir / name for name in self._DEFAULT_OUTPUT_FILES]
 
     def _backup_outputs(self) -> list[Path]:
         """Copy existing output files to .bak before the pipeline overwrites them."""
         backups = []
-        for path in self._OUTPUT_FILES:
+        for path in self._output_files:
             if path.exists():
                 bak = path.with_suffix(path.suffix + ".bak")
                 shutil.copy2(path, bak)
@@ -572,6 +677,103 @@ class App(ctk.CTk):
             bar.set(0)
             bar.grid_remove()
 
+    # Per-item time estimates (seconds) for runtime calculation
+    _TIME_PER_CIF_DOWNLOAD = 2.5
+    _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch
+    _TIME_PER_1433_FETCH = 0.2          # 5 concurrent workers
+    _TIME_PER_PP_FETCH = 0.05           # 10 concurrent workers
+    _TIME_PER_KINASE_PREDICT = 0.5
+    _TIME_PER_PROTEIN_STEP3 = 0.35
+    _TIME_STEP1_BASE = 40               # base time for filtering/merging
+    _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
+
+    def _run_precheck(self, mode: str) -> float:
+        """Analyze caches and data to estimate total pipeline runtime. Returns seconds."""
+        import pandas as pd
+
+        self._q("log", "Initializing pipeline...")
+        self._q("log", "")
+
+        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+        cache_dir = PROJECT_ROOT / "data" / "cache"
+        models_dir = PROJECT_ROOT / "cif_models"
+
+        # Count proteins from intermediate TSV (if exists) or estimate from input
+        n_proteins = 0
+        if input_tsv.exists():
+            try:
+                df = pd.read_csv(input_tsv, sep="\t", usecols=["uniprot_id"], dtype=str)
+                n_proteins = df["uniprot_id"].nunique()
+            except Exception:
+                pass
+
+        # Step 1: UniProt API cache
+        gene_cache = cache_dir / "uniprot_gene_mapping.tsv"
+        cached_genes = 0
+        if gene_cache.exists():
+            try:
+                cached_genes = len(pd.read_csv(gene_cache, sep="\t", dtype=str))
+            except Exception:
+                pass
+        uncached_batches = max(0, (n_proteins - cached_genes)) // 100 + 1 if n_proteins > cached_genes else 0
+        step1_est = self._TIME_STEP1_BASE + uncached_batches * self._TIME_PER_UNIPROT_BATCH
+        self._q("log", f"Step 1: {cached_genes} UniProt gene mappings cached")
+
+        # Step 2: CIF downloads
+        cifs_present = 0
+        if models_dir.exists():
+            cifs_present = sum(1 for d in models_dir.iterdir()
+                               if d.is_dir() and any(d.glob("*.cif")))
+        cifs_needed = max(0, n_proteins - cifs_present)
+        step2_est = cifs_needed * self._TIME_PER_CIF_DOWNLOAD + 5
+        self._q("log", f"Step 2: {cifs_present} CIF files present"
+                + (f", ~{cifs_needed} to download" if cifs_needed else " (all cached)"))
+
+        # Step 3: local computation
+        step3_est = n_proteins * self._TIME_PER_PROTEIN_STEP3 if n_proteins else 60
+        self._q("log", f"Step 3: {n_proteins} proteins to process")
+
+        # Step 4: annotation caches (only for ptm-proximity)
+        step4_est = 0
+        if mode == "ptm-proximity":
+            # 14-3-3
+            cache_1433 = cache_dir / "1433pred"
+            cached_1433 = len(list(cache_1433.glob("*.json"))) if cache_1433.exists() else 0
+            uncached_1433 = max(0, n_proteins - cached_1433)
+
+            # PolyPhen
+            pp_cache = cache_dir / "polyphen.tsv"
+            cached_pp = 0
+            if pp_cache.exists():
+                try:
+                    cached_pp = len(pd.read_csv(pp_cache, sep="\t", dtype=str))
+                except Exception:
+                    pass
+
+            # Kinase
+            kin_cache = cache_dir / "kinase_predictions.tsv"
+            cached_kin = 0
+            if kin_cache.exists():
+                try:
+                    cached_kin = len(pd.read_csv(kin_cache, sep="\t", dtype=str))
+                except Exception:
+                    pass
+
+            self._q("log", f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
+                    f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached")
+
+            step4_est = (uncached_1433 * self._TIME_PER_1433_FETCH
+                         + max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
+                         + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT
+                         + self._TIME_STEP4_BASE)
+
+        total_est = step1_est + step2_est + step3_est + step4_est
+        self._q("log", "")
+        self._q("log", f"Estimated runtime: ~{_fmt_time(total_est)}")
+        self._q("log", "")
+
+        return total_est
+
     def _run_pipeline(self, mode: str):
         if mode == "single-protein":
             self._run_single_protein()
@@ -591,22 +793,21 @@ class App(ctk.CTk):
                 "--prefer", "cif",
                 "--delay", "0.1",
                 "--also_pae",
-                "--logs_dir", str(OUTPUT_DIR / "logs"),
+                "--logs_dir", str(self._output_dir / "logs"),
             ],
-            [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode],
+            [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
+             "--output-dir", str(self._output_dir)],
         ]
         if mode == "ptm-proximity":
-            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py")])
+            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),
+                         "--output-dir", str(self._output_dir)])
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         run_type = _detect_run_type()
         self._q("pipeline_start", len(steps), mode, run_type)
 
-        if run_type == "cold" and _load_runtimes(mode, "cold") is None:
-            self._q("log", "Note: CIF files and API caches are not yet built.")
-            self._q("log", f"Step 2 ({steps[1][0]}) and Step 4 ({steps[3][0]})")
-            self._q("log", "may each take 20+ minutes on a first run. Subsequent runs")
-            self._q("log", "will be much faster once these are cached.\n")
+        estimated_total = self._run_precheck(mode)
+        self._q("set_estimate", estimated_total)
 
         backups = self._backup_outputs()
 
@@ -725,7 +926,7 @@ class App(ctk.CTk):
         self._q("log", "")
         self._q("log", f"Analysis complete in {_fmt_time(elapsed)}.")
 
-        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        output_db = self._output_dir / "ptm_mutation_proximity_db.tsv"
         if output_db.exists():
             self._q("log", "Review the results above, then choose whether to append to the existing database.")
             self._q("offer_append", cif_path, uniprot)
@@ -838,7 +1039,10 @@ class App(ctk.CTk):
                     self._steps_done = 0
                     self._step_times = []
                     self._historical_times = _load_runtimes(mode, run_type)
+                    self._precheck_estimate = None
                     self._tick()
+                elif kind == "set_estimate":
+                    self._precheck_estimate = msg[1]
                 elif kind == "step_start":
                     self._step_start = time.time()
                 elif kind == "step_complete":
@@ -905,7 +1109,7 @@ class App(ctk.CTk):
 
     def _check_existing_uniprot(self, uniprot: str) -> int:
         """Return the number of rows in the proximity DB that match this UniProt ID."""
-        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        output_db = self._output_dir / "ptm_mutation_proximity_db.tsv"
         if not output_db.exists() or not uniprot:
             return 0
         try:
@@ -918,7 +1122,7 @@ class App(ctk.CTk):
 
     def _remove_uniprot_rows(self, uniprot: str) -> None:
         """Remove all rows for a UniProt ID from the proximity DB."""
-        output_db = OUTPUT_DIR / "ptm_mutation_proximity_db.tsv"
+        output_db = self._output_dir / "ptm_mutation_proximity_db.tsv"
         if not output_db.exists():
             return
         try:
@@ -1018,13 +1222,14 @@ class App(ctk.CTk):
     # ── Output folder ────────────────────────────────────────────────────────
 
     def _open_output_folder(self):
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out = self._output_dir
+        out.mkdir(parents=True, exist_ok=True)
         if platform.system() == "Windows":
-            subprocess.run(["explorer", str(OUTPUT_DIR)], check=False)
+            subprocess.run(["explorer", str(out)], check=False)
         elif platform.system() == "Darwin":
-            subprocess.run(["open", str(OUTPUT_DIR)], check=False)
+            subprocess.run(["open", str(out)], check=False)
         else:
-            subprocess.run(["xdg-open", str(OUTPUT_DIR)], check=False)
+            subprocess.run(["xdg-open", str(out)], check=False)
 
 
 if __name__ == "__main__":
