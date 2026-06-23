@@ -559,6 +559,8 @@ def _run_mutation_clustering_filter(output_file):
 
 def main():
     """Parse CLI arguments and dispatch to the selected pipeline filter mode (ptm-proximity or mutation-clustering)."""
+    global HOTSPOT_MIN_AFFECTED_CASES
+
     parser = argparse.ArgumentParser(description="Filter and prepare input data for the pipeline.")
     parser.add_argument(
         "--mode",
@@ -569,7 +571,14 @@ def main():
             "'mutation-clustering' keeps all recurrent COSMIC hotspot mutations regardless of PTMs."
         ),
     )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=HOTSPOT_MIN_AFFECTED_CASES,
+        help=f"Minimum distinct COSMIC samples for a mutation to be a hotspot (default: {HOTSPOT_MIN_AFFECTED_CASES})",
+    )
     args = parser.parse_args()
+    HOTSPOT_MIN_AFFECTED_CASES = args.min_samples
 
     output_file = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
     output_file.parent.mkdir(parents=True, exist_ok=True)

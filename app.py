@@ -136,7 +136,7 @@ class App(ctk.CTk):
 
         # ── Pipeline tab ──
         pipeline_tab.grid_columnconfigure(0, weight=1)
-        pipeline_tab.grid_rowconfigure(7, weight=1)
+        pipeline_tab.grid_rowconfigure(8, weight=1)
 
         # Title
         ctk.CTkLabel(
@@ -226,15 +226,35 @@ class App(ctk.CTk):
             command=lambda: self._output_dir_var.set(str(OUTPUT_DIR)),
         ).grid(row=0, column=3, padx=(0, 12), pady=8, sticky="e")
 
+        # Pipeline settings
+        settings_frame = ctk.CTkFrame(p)
+        settings_frame.grid(row=4, column=0, padx=24, pady=4, sticky="ew")
+
+        ctk.CTkLabel(
+            settings_frame, text="Settings:", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(12, 8), pady=8)
+
+        ctk.CTkLabel(settings_frame, text="Distance cutoff (A):").pack(side="left", padx=(8, 4), pady=8)
+        self._cutoff_var = ctk.StringVar(value="10.0")
+        ctk.CTkEntry(
+            settings_frame, textvariable=self._cutoff_var, width=60,
+        ).pack(side="left", padx=(0, 16), pady=8)
+
+        ctk.CTkLabel(settings_frame, text="Min COSMIC samples:").pack(side="left", padx=(8, 4), pady=8)
+        self._min_samples_var = ctk.StringVar(value="3")
+        ctk.CTkEntry(
+            settings_frame, textvariable=self._min_samples_var, width=60,
+        ).pack(side="left", padx=(0, 12), pady=8)
+
         # Steps panel
         self._steps_outer = ctk.CTkFrame(p)
-        self._steps_outer.grid(row=4, column=0, padx=24, pady=4, sticky="ew")
+        self._steps_outer.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
         self._steps_outer.grid_columnconfigure(1, weight=1)
         self._rebuild_step_rows()
 
         # Buttons
         btn_frame = ctk.CTkFrame(p, fg_color="transparent")
-        btn_frame.grid(row=5, column=0, padx=24, pady=8, sticky="ew")
+        btn_frame.grid(row=6, column=0, padx=24, pady=8, sticky="ew")
 
         self._run_btn = ctk.CTkButton(
             btn_frame,
@@ -288,7 +308,7 @@ class App(ctk.CTk):
             hover_color="gray40",
             command=self._toggle_log,
         )
-        self._log_toggle.grid(row=6, column=0, padx=24, pady=(8, 0), sticky="w")
+        self._log_toggle.grid(row=7, column=0, padx=24, pady=(8, 0), sticky="w")
 
         self._log = ctk.CTkTextbox(
             p,
@@ -296,7 +316,7 @@ class App(ctk.CTk):
             wrap="word",
             state="disabled",
         )
-        p.grid_rowconfigure(7, weight=1)
+        p.grid_rowconfigure(8, weight=1)
 
         # ── Help / Documentation tab ──
         self._build_help_tab(help_tab)
@@ -516,7 +536,7 @@ class App(ctk.CTk):
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log.grid(row=7, column=0, padx=24, pady=(4, 20), sticky="nsew")
+            self._log.grid(row=8, column=0, padx=24, pady=(4, 20), sticky="nsew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 
@@ -783,8 +803,12 @@ class App(ctk.CTk):
         input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
         models_dir = PROJECT_ROOT / "cif_models"
 
+        cutoff = self._cutoff_var.get().strip() or "10.0"
+        min_samples = self._min_samples_var.get().strip() or "3"
+
         cmds = [
-            [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode],
+            [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode,
+             "--min-samples", min_samples],
             [
                 *python, str(SCRIPTS_DIR / "2_download_structures.py"),
                 str(input_tsv),
@@ -796,7 +820,7 @@ class App(ctk.CTk):
                 "--logs_dir", str(self._output_dir / "logs"),
             ],
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
-             "--output-dir", str(self._output_dir)],
+             "--output-dir", str(self._output_dir), "--cutoff", cutoff],
         ]
         if mode == "ptm-proximity":
             cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),

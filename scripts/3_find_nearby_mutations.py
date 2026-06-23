@@ -333,7 +333,14 @@ def main():
         default=str(DEFAULT_OUTPUT_DIR),
         help="Directory for output files (default: Output/)",
     )
+    parser.add_argument(
+        "--cutoff",
+        type=float,
+        default=DISTANCE_CUTOFF,
+        help=f"Distance cutoff in Angstroms (default: {DISTANCE_CUTOFF})",
+    )
     args = parser.parse_args()
+    DISTANCE_CUTOFF = args.cutoff
 
     output_dir = Path(args.output_dir)
     OUTPUT_PATH = output_dir / "ptm_mutation_proximity_db.tsv"
@@ -427,7 +434,7 @@ def main():
                     continue
 
                 pae_matrix = load_pae_matrix(uniprot_dir)
-                clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix)
+                clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF)
 
                 for (anchor_mut, anchor_pos), nearby in sorted(clusters.items(), key=lambda x: (x[0][1], x[0][0])):
                     writer.writerow([
@@ -549,7 +556,7 @@ def main():
                                    f"PTMD={ptm_aa}{ptm_position} but canonical structure has {struct_aa}{ptm_position}")
                         continue
 
-                    nearby = find_nearby_mutations(chain, ptm_position, mutation_entries, pae_matrix=pae_matrix)
+                    nearby = find_nearby_mutations(chain, ptm_position, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF)
                     if not nearby:
                         continue
                     within_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) <= 5]
