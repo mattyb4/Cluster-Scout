@@ -29,3 +29,12 @@ ptm_skipped.tsv
 
 #Coordinate data
 Output/coordinates/
+
+#CIF variance analysis
+Output/cif_variance/
+
+#CIF comparison input files
+data/cif_comparison/
+
+#Radius sweep
+Output/radius_sweep.*
