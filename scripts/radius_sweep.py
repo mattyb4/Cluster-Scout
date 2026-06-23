@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, find_canonical_cif, load_first_chain,
+    COSMIC_SOMATIC_STATUSES, input_dir, resolve_input_file, COSMIC_INPUT_DIR,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -40,7 +42,7 @@ def get_ca_coord(chain, residue_number):
 
 
 def load_protein_data(gene: str, df: pd.DataFrame, chain):
-    """Extract PTM positions and mutation positions with their CA coordinates.
+    """Extract PTM positions and hotspot-filtered mutation positions with their CA coordinates.
 
     Returns (ptm_coords, mutation_coords) where each is a list of (position, coord).
     """
@@ -56,7 +58,6 @@ def load_protein_data(gene: str, df: pd.DataFrame, chain):
         token = token.strip()
         if not token:
             continue
-        import re
         m = re.search(r"([A-Z])(\d+)", token)
         if m:
             pos = int(m.group(2))
@@ -64,12 +65,11 @@ def load_protein_data(gene: str, df: pd.DataFrame, chain):
             if coord is not None:
                 ptm_coords.append((pos, coord))
 
-    # Parse mutation positions
+    # Parse mutation positions (hotspot-filtered from intermediate TSV)
     mutation_coords = []
     seen_positions = set()
     for token in str(row.get("mutations_on_protein", "")).split(";"):
         token = token.strip()
-        import re
         m = re.search(r"([A-Z])(\d+)([A-Z*])", token)
         if m:
             pos = int(m.group(2))
@@ -80,6 +80,44 @@ def load_protein_data(gene: str, df: pd.DataFrame, chain):
                     seen_positions.add(pos)
 
     return ptm_coords, mutation_coords
+
+
+_cosmic_cache: pd.DataFrame | None = None
+
+
+def _load_cosmic_df() -> pd.DataFrame:
+    """Load and filter the raw COSMIC file once, caching it for reuse across genes."""
+    global _cosmic_cache
+    if _cosmic_cache is not None:
+        return _cosmic_cache
+    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    print(f"  Loading COSMIC file: {cosmic_file.name}")
+    cols = ["GENE_SYMBOL", "MUTATION_AA", "MUTATION_SOMATIC_STATUS"]
+    cosmic = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
+    cosmic = cosmic[cosmic["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
+    cosmic["aa_change"] = cosmic["MUTATION_AA"].str.replace(r"^p\.", "", regex=True)
+    cosmic = cosmic[cosmic["aa_change"].str.match(r"^[A-Z]\d+[A-Z]$", na=False)]
+    _cosmic_cache = cosmic
+    return cosmic
+
+
+def load_unfiltered_mutations(gene: str, chain) -> list[tuple[int, np.ndarray]]:
+    """Load ALL somatic missense mutation positions from raw COSMIC for a gene."""
+    cosmic = _load_cosmic_df()
+    gene_cosmic = cosmic[cosmic["GENE_SYMBOL"] == gene]
+
+    positions = set()
+    for aa in gene_cosmic["aa_change"].unique():
+        m = re.match(r"[A-Z](\d+)[A-Z]", aa)
+        if m:
+            positions.add(int(m.group(1)))
+
+    mutation_coords = []
+    for pos in sorted(positions):
+        coord = get_ca_coord(chain, pos)
+        if coord is not None:
+            mutation_coords.append((pos, coord))
+    return mutation_coords
 
 
 def get_all_ca_coords(chain) -> list[tuple[int, np.ndarray]]:
@@ -147,6 +185,10 @@ def main():
         "--output", default=str(PROJECT_ROOT / "Output" / "radius_sweep.png"),
         help="Output plot path (default: Output/radius_sweep.png)",
     )
+    parser.add_argument(
+        "--unfiltered", action="store_true",
+        help="Also run the sweep with ALL COSMIC mutations (not just hotspots) for comparison",
+    )
     args = parser.parse_args()
 
     radii = list(np.arange(args.radii[0], args.radii[1] + args.radii[2] / 2, args.radii[2]))
@@ -202,27 +244,56 @@ def main():
             results.append({
                 "protein": gene,
                 "radius": r,
+                "dataset": "hotspot",
                 "avg_mutation_count": avg_counts[r],
                 "random_baseline": baseline[r],
                 "avg_normalized": avg_counts[r] / protein_length * 1000,
                 "random_normalized": baseline[r] / protein_length * 1000,
                 "protein_length": protein_length,
+                "n_mutations": len(mutation_coords),
             })
-        print(f"  Sweep complete: {avg_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
+        print(f"  Hotspot: {avg_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
               f"-> {avg_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
+
+        if args.unfiltered:
+            print(f"  Loading unfiltered COSMIC mutations for {gene}...")
+            unfiltered_coords = load_unfiltered_mutations(gene, chain)
+            print(f"  {len(unfiltered_coords)} unfiltered mutation positions")
+
+            uf_counts = sweep_radii(ptm_coords, unfiltered_coords, radii)
+            print("  Computing unfiltered random baseline...")
+            uf_baseline = random_baseline(ptm_coords, all_ca, len(unfiltered_coords), radii)
+
+            for r in radii:
+                results.append({
+                    "protein": gene,
+                    "radius": r,
+                    "dataset": "unfiltered",
+                    "avg_mutation_count": uf_counts[r],
+                    "random_baseline": uf_baseline[r],
+                    "avg_normalized": uf_counts[r] / protein_length * 1000,
+                    "random_normalized": uf_baseline[r] / protein_length * 1000,
+                    "protein_length": protein_length,
+                    "n_mutations": len(unfiltered_coords),
+                })
+            print(f"  Unfiltered: {uf_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
+                  f"-> {uf_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
 
     if not results:
         sys.exit("No data collected. Check that CIF files are downloaded for the target genes.")
 
     result_df = pd.DataFrame(results)
 
-    # Elbow detection
+    # Elbow detection (on hotspot data)
     from kneed import KneeLocator
 
-    print("\n-- Elbow Detection --")
+    hotspot_df = result_df[result_df["dataset"] == "hotspot"]
+    proteins = hotspot_df["protein"].unique()
+
+    print("\n-- Elbow Detection (hotspot-filtered) --")
     elbows: dict[str, float | None] = {}
-    for gene in result_df["protein"].unique():
-        gene_data = result_df[result_df["protein"] == gene].sort_values("radius")
+    for gene in proteins:
+        gene_data = hotspot_df[hotspot_df["protein"] == gene].sort_values("radius")
         try:
             kn = KneeLocator(
                 gene_data["radius"].values,
@@ -250,24 +321,28 @@ def main():
     result_df.to_csv(tsv_path, sep="\t", index=False)
     print(f"\nData saved to: {tsv_path}")
 
-    # Plot: 2-panel figure
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10), sharex=True)
+    # Determine layout: 2 panels if hotspot-only, 4 panels if unfiltered comparison
+    has_unfiltered = "unfiltered" in result_df["dataset"].values
+    if has_unfiltered:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=False)
+        (ax1, ax3), (ax2, ax4) = axes
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
 
-    proteins = result_df["protein"].unique()
     colors = {}
 
-    # Top panel: raw counts + random baselines
+    # ── Left/top panel: hotspot raw counts + random baselines ──
     for gene in proteins:
-        gene_data = result_df[result_df["protein"] == gene]
+        gene_data = hotspot_df[hotspot_df["protein"] == gene]
+        n_muts = int(gene_data.iloc[0]["n_mutations"])
         line, = ax1.plot(gene_data["radius"], gene_data["avg_mutation_count"],
-                         marker="o", markersize=4, linewidth=2, label=gene)
+                         marker="o", markersize=4, linewidth=2,
+                         label=f"{gene} ({n_muts} muts)")
         colors[gene] = line.get_color()
 
-        # Random baseline as dashed line (same color)
         ax1.plot(gene_data["radius"], gene_data["random_baseline"],
                  linestyle="--", linewidth=1, alpha=0.5, color=colors[gene])
 
-        # Elbow diamond
         elbow_r = elbows.get(gene)
         if elbow_r is not None:
             elbow_row = gene_data[gene_data["radius"] == elbow_r]
@@ -276,25 +351,21 @@ def main():
                             s=120, zorder=6, marker="D", color=colors[gene],
                             edgecolors="black", linewidths=1.0)
 
-    ax1.axvline(x=10, color="gray", linestyle="--", alpha=0.5, label="Current cutoff (10 A)")
-    ax1.set_ylabel("Avg Mutations per PTM Site", fontsize=13)
-    ax1.set_title("Mutation Capture vs. Distance Cutoff", fontsize=15)
-    ax1.legend(loc="upper left", fontsize=9, ncol=2)
-    ax1.grid(True, alpha=0.3)
-
-    # Add a single label for the dashed random baselines
+    ax1.axvline(x=10, color="gray", linestyle="--", alpha=0.5)
     ax1.plot([], [], linestyle="--", color="gray", alpha=0.5, label="Random baseline")
-    ax1.legend(loc="upper left", fontsize=9, ncol=2)
-
+    ax1.set_xlabel("Radius (A)", fontsize=12)
+    ax1.set_ylabel("Avg Mutations per PTM Site", fontsize=12)
+    ax1.set_title("Hotspot-Filtered Mutations (>=3 samples)", fontsize=14)
+    ax1.legend(loc="upper left", fontsize=8, ncol=2)
+    ax1.grid(True, alpha=0.3)
     if detected:
         ax1.axvline(x=avg_elbow, color="red", linestyle=":", alpha=0.6)
         ax1.text(avg_elbow + 0.3, ax1.get_ylim()[1] * 0.95,
-                 f"Avg elbow: {avg_elbow:.1f} A",
-                 color="red", fontsize=10, va="top")
+                 f"Avg elbow: {avg_elbow:.1f} A", color="red", fontsize=10, va="top")
 
-    # Bottom panel: normalized by protein length (per 1000 residues)
+    # ── Left/bottom panel: hotspot normalized ──
     for gene in proteins:
-        gene_data = result_df[result_df["protein"] == gene]
+        gene_data = hotspot_df[hotspot_df["protein"] == gene]
         plen = int(gene_data.iloc[0]["protein_length"])
         ax2.plot(gene_data["radius"], gene_data["avg_normalized"],
                  marker="o", markersize=4, linewidth=2,
@@ -303,14 +374,93 @@ def main():
                  linestyle="--", linewidth=1, alpha=0.5, color=colors[gene])
 
     ax2.axvline(x=10, color="gray", linestyle="--", alpha=0.5)
-    ax2.set_xlabel("Radius (A)", fontsize=13)
-    ax2.set_ylabel("Avg Mutations per PTM (per 1000 residues)", fontsize=13)
-    ax2.set_title("Size-Normalized Mutation Capture", fontsize=15)
-    ax2.legend(loc="upper left", fontsize=9, ncol=2)
+    ax2.set_xlabel("Radius (A)", fontsize=12)
+    ax2.set_ylabel("Avg Muts per PTM (per 1000 res)", fontsize=12)
+    ax2.set_title("Hotspot - Size Normalized", fontsize=14)
+    ax2.legend(loc="upper left", fontsize=8, ncol=2)
     ax2.grid(True, alpha=0.3)
-
     if detected:
         ax2.axvline(x=avg_elbow, color="red", linestyle=":", alpha=0.6)
+
+    # ── Right panels: unfiltered (if --unfiltered) ──
+    if has_unfiltered:
+        unfiltered_df = result_df[result_df["dataset"] == "unfiltered"]
+
+        # Elbow detection for unfiltered
+        print("\n-- Elbow Detection (unfiltered) --")
+        uf_elbows: dict[str, float | None] = {}
+        for gene in proteins:
+            gene_data = unfiltered_df[unfiltered_df["protein"] == gene].sort_values("radius")
+            if gene_data.empty:
+                continue
+            try:
+                kn = KneeLocator(
+                    gene_data["radius"].values,
+                    gene_data["avg_mutation_count"].values,
+                    curve="convex",
+                    direction="increasing",
+                    interp_method="interp1d",
+                )
+                uf_elbows[gene] = kn.knee
+                if kn.knee is not None:
+                    print(f"  {gene}: optimal radius = {kn.knee:.0f} A")
+                else:
+                    print(f"  {gene}: no elbow detected")
+            except Exception:
+                uf_elbows[gene] = None
+                print(f"  {gene}: could not compute elbow")
+
+        uf_detected = [v for v in uf_elbows.values() if v is not None]
+        if uf_detected:
+            uf_avg_elbow = np.mean(uf_detected)
+            print(f"\n  Average optimal radius (unfiltered): {uf_avg_elbow:.1f} A")
+
+        for gene in proteins:
+            gene_data = unfiltered_df[unfiltered_df["protein"] == gene]
+            if gene_data.empty:
+                continue
+            n_muts = int(gene_data.iloc[0]["n_mutations"])
+            ax3.plot(gene_data["radius"], gene_data["avg_mutation_count"],
+                     marker="o", markersize=4, linewidth=2,
+                     label=f"{gene} ({n_muts} muts)", color=colors[gene])
+            ax3.plot(gene_data["radius"], gene_data["random_baseline"],
+                     linestyle="--", linewidth=1, alpha=0.5, color=colors[gene])
+
+            elbow_r = uf_elbows.get(gene)
+            if elbow_r is not None:
+                elbow_row = gene_data[gene_data["radius"] == elbow_r]
+                if not elbow_row.empty:
+                    ax3.scatter([elbow_r], [elbow_row.iloc[0]["avg_mutation_count"]],
+                                s=120, zorder=6, marker="D", color=colors[gene],
+                                edgecolors="black", linewidths=1.0)
+
+            plen = int(gene_data.iloc[0]["protein_length"])
+            ax4.plot(gene_data["radius"], gene_data["avg_normalized"],
+                     marker="o", markersize=4, linewidth=2,
+                     label=f"{gene} ({plen} aa)", color=colors[gene])
+            ax4.plot(gene_data["radius"], gene_data["random_normalized"],
+                     linestyle="--", linewidth=1, alpha=0.5, color=colors[gene])
+
+        ax3.axvline(x=10, color="gray", linestyle="--", alpha=0.5)
+        ax3.plot([], [], linestyle="--", color="gray", alpha=0.5, label="Random baseline")
+        ax3.set_xlabel("Radius (A)", fontsize=12)
+        ax3.set_ylabel("Avg Mutations per PTM Site", fontsize=12)
+        ax3.set_title("All COSMIC Mutations (unfiltered)", fontsize=14)
+        ax3.legend(loc="upper left", fontsize=8, ncol=2)
+        ax3.grid(True, alpha=0.3)
+        if uf_detected:
+            ax3.axvline(x=uf_avg_elbow, color="red", linestyle=":", alpha=0.6)
+            ax3.text(uf_avg_elbow + 0.3, ax3.get_ylim()[1] * 0.95,
+                     f"Avg elbow: {uf_avg_elbow:.1f} A", color="red", fontsize=10, va="top")
+
+        ax4.axvline(x=10, color="gray", linestyle="--", alpha=0.5)
+        ax4.set_xlabel("Radius (A)", fontsize=12)
+        ax4.set_ylabel("Avg Muts per PTM (per 1000 res)", fontsize=12)
+        ax4.set_title("Unfiltered - Size Normalized", fontsize=14)
+        ax4.legend(loc="upper left", fontsize=8, ncol=2)
+        ax4.grid(True, alpha=0.3)
+        if uf_detected:
+            ax4.axvline(x=uf_avg_elbow, color="red", linestyle=":", alpha=0.6)
 
     plt.tight_layout()
     plt.savefig(args.output, dpi=150)
