@@ -102,7 +102,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Mutation Cluster Proximity Pipeline")
-        self.geometry("960x720")
+        self.geometry("960x820")
         self.minsize(760, 560)
 
         self._queue: queue.Queue[tuple] = queue.Queue()
@@ -136,16 +136,20 @@ class App(ctk.CTk):
 
         # ── Pipeline tab ──
         pipeline_tab.grid_columnconfigure(0, weight=1)
-        pipeline_tab.grid_rowconfigure(8, weight=1)
+        pipeline_tab.grid_rowconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(pipeline_tab, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+
+        p = scroll  # all pipeline widgets go in the scrollable frame
 
         # Title
         ctk.CTkLabel(
-            pipeline_tab,
+            p,
             text="Mutation Cluster Proximity Pipeline",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
-
-        p = pipeline_tab  # shorthand
 
         # Data-file status bar with Browse buttons
         self._file_frame = ctk.CTkFrame(p)
@@ -244,6 +248,18 @@ class App(ctk.CTk):
         self._min_samples_var = ctk.StringVar(value="3")
         ctk.CTkEntry(
             settings_frame, textvariable=self._min_samples_var, width=60,
+        ).pack(side="left", padx=(0, 16), pady=8)
+
+        ctk.CTkLabel(settings_frame, text="Min pLDDT:").pack(side="left", padx=(8, 4), pady=8)
+        self._min_plddt_var = ctk.StringVar(value="70")
+        ctk.CTkEntry(
+            settings_frame, textvariable=self._min_plddt_var, width=60,
+        ).pack(side="left", padx=(0, 16), pady=8)
+
+        ctk.CTkLabel(settings_frame, text="Max PAE:").pack(side="left", padx=(8, 4), pady=8)
+        self._max_pae_var = ctk.StringVar(value="5.0")
+        ctk.CTkEntry(
+            settings_frame, textvariable=self._max_pae_var, width=60,
         ).pack(side="left", padx=(0, 12), pady=8)
 
         # Steps panel
@@ -315,8 +331,8 @@ class App(ctk.CTk):
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
+            height=300,
         )
-        p.grid_rowconfigure(8, weight=1)
 
         # ── Help / Documentation tab ──
         self._build_help_tab(help_tab)
@@ -805,6 +821,8 @@ class App(ctk.CTk):
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
         min_samples = self._min_samples_var.get().strip() or "3"
+        min_plddt = self._min_plddt_var.get().strip() or "0"
+        max_pae = self._max_pae_var.get().strip() or "0"
 
         cmds = [
             [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode,
@@ -820,7 +838,8 @@ class App(ctk.CTk):
                 "--logs_dir", str(self._output_dir / "logs"),
             ],
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
-             "--output-dir", str(self._output_dir), "--cutoff", cutoff],
+             "--output-dir", str(self._output_dir), "--cutoff", cutoff,
+             "--min-plddt", min_plddt, "--max-pae", max_pae],
         ]
         if mode == "ptm-proximity":
             cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),

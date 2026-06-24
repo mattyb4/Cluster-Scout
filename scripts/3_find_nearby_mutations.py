@@ -11,7 +11,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, MUT_RE, SITE_RE,
-    find_canonical_cif, load_first_chain, load_pae_matrix,
+    find_canonical_cif, load_first_chain, load_pae_matrix, get_plddt_map,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -42,8 +42,8 @@ def compute_distance(coord1, coord2):
     """Compute the Euclidean distance between two 3D coordinate arrays."""
     return np.linalg.norm(coord1 - coord2)
 
-def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF): #adjust cutoff as needed
-    """Find mutations within a distance cutoff of a PTM site, with optional PAE confidence filtering."""
+def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF, max_pae=None):
+    """Find mutations within a distance cutoff of a PTM site, with optional PAE filtering."""
     results = []
 
     ptm_coord = get_ca_coord(chain, ptm_pos)
@@ -65,6 +65,8 @@ def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cut
                 i, j = ptm_pos - 1, mut_pos - 1
                 if 0 <= i < pae_matrix.shape[0] and 0 <= j < pae_matrix.shape[1]:
                     pae = (pae_matrix[i, j] + pae_matrix[j, i]) / 2
+            if max_pae is not None and pae is not None and pae > max_pae:
+                continue
             results.append({
                 "mutation": mutation,
                 "mutation_pos": mut_pos,
@@ -75,7 +77,7 @@ def find_nearby_mutations(chain, ptm_pos, mutation_entries, pae_matrix=None, cut
     return results
 
 
-def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF):
+def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=DISTANCE_CUTOFF, max_pae=None):
     """For each mutation, find other mutations within cutoff Angstroms in 3D space."""
     mut_list = list(mutation_entries)
     results = {}
@@ -99,6 +101,8 @@ def find_mutation_clusters(chain, mutation_entries, pae_matrix=None, cutoff=DIST
                     ii, jj = anchor_pos - 1, other_pos - 1
                     if 0 <= ii < pae_matrix.shape[0] and 0 <= jj < pae_matrix.shape[1]:
                         pae = (pae_matrix[ii, jj] + pae_matrix[jj, ii]) / 2
+                if max_pae is not None and pae is not None and pae > max_pae:
+                    continue
                 nearby.append({
                     "mutation": other_mut,
                     "mutation_pos": other_pos,
@@ -316,6 +320,8 @@ def parse_ptm_known_disruptions(uniprot):
 
 def main():
     """Main entry point: parse CLI args and run the PTM-proximity or mutation-clustering pipeline."""
+    global DISTANCE_CUTOFF
+
     parser = argparse.ArgumentParser(description="Scan AFDB models for nearby mutations.")
     parser.add_argument("--uniprot", help="Limit processing to a single UniProt ID.")
     parser.add_argument(
@@ -339,8 +345,26 @@ def main():
         default=DISTANCE_CUTOFF,
         help=f"Distance cutoff in Angstroms (default: {DISTANCE_CUTOFF})",
     )
+    parser.add_argument(
+        "--min-plddt",
+        type=float,
+        default=0,
+        help="Exclude positions with pLDDT below this threshold (default: 0 = no filter)",
+    )
+    parser.add_argument(
+        "--max-pae",
+        type=float,
+        default=0,
+        help="Exclude mutation pairs with PAE above this threshold (default: 0 = no filter)",
+    )
     args = parser.parse_args()
     DISTANCE_CUTOFF = args.cutoff
+    MIN_PLDDT = args.min_plddt
+    MAX_PAE = args.max_pae if args.max_pae > 0 else None
+    if MIN_PLDDT > 0:
+        print(f"pLDDT filter: excluding positions below {MIN_PLDDT}")
+    if MAX_PAE is not None:
+        print(f"PAE filter: excluding pairs above {MAX_PAE}")
 
     output_dir = Path(args.output_dir)
     OUTPUT_PATH = output_dir / "ptm_mutation_proximity_db.tsv"
@@ -420,6 +444,8 @@ def main():
                     if atom.res_id not in pos_to_aa:
                         pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
+                plddt_map = get_plddt_map(chain) if MIN_PLDDT > 0 else {}
+
                 safe_length = parse_isoform_safe_length(uniprot)
                 mutation_entries = [
                     (mut + "(isoform?)", pos) if (
@@ -430,11 +456,19 @@ def main():
                     else (mut, pos)
                     for mut, pos in mutation_entries
                 ]
+                if MIN_PLDDT > 0:
+                    before = len(mutation_entries)
+                    mutation_entries = [(m, p) for m, p in mutation_entries
+                                        if plddt_map.get(p, 0) >= MIN_PLDDT]
+                    if before != len(mutation_entries):
+                        tqdm.write(f"  {uniprot}: filtered {before - len(mutation_entries)} "
+                                   f"mutations below pLDDT {MIN_PLDDT}")
+
                 if len(mutation_entries) < 2:
                     continue
 
                 pae_matrix = load_pae_matrix(uniprot_dir)
-                clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF)
+                clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF, max_pae=MAX_PAE)
 
                 for (anchor_mut, anchor_pos), nearby in sorted(clusters.items(), key=lambda x: (x[0][1], x[0][0])):
                     writer.writerow([
@@ -521,6 +555,8 @@ def main():
                     if atom.res_id not in pos_to_aa:
                         pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
+                plddt_map = get_plddt_map(chain) if MIN_PLDDT > 0 else {}
+
                 # Tag mutations whose reference AA does not match this structure, or whose
                 # position is past the point where COSMIC's isoform diverges from canonical
                 # (isoform_safe_length) even if the residue happens to match by coincidence.
@@ -535,6 +571,18 @@ def main():
                     else (mut, pos)
                     for mut, pos in mutation_entries
                 ]
+
+                if MIN_PLDDT > 0:
+                    before_muts = len(mutation_entries)
+                    mutation_entries = [(m, p) for m, p in mutation_entries
+                                        if plddt_map.get(p, 0) >= MIN_PLDDT]
+                    before_ptms = len(ptm_entries)
+                    ptm_entries = [(s, p, t) for s, p, t in ptm_entries
+                                   if plddt_map.get(p, 0) >= MIN_PLDDT]
+                    filtered = (before_muts - len(mutation_entries)) + (before_ptms - len(ptm_entries))
+                    if filtered:
+                        tqdm.write(f"  {uniprot}: filtered {before_muts - len(mutation_entries)} mutations, "
+                                   f"{before_ptms - len(ptm_entries)} PTMs below pLDDT {MIN_PLDDT}")
 
                 patient_counts = parse_mutation_patient_counts(uniprot)
                 total_missense_patients = parse_total_cosmic_missense_patients(uniprot)
@@ -556,7 +604,7 @@ def main():
                                    f"PTMD={ptm_aa}{ptm_position} but canonical structure has {struct_aa}{ptm_position}")
                         continue
 
-                    nearby = find_nearby_mutations(chain, ptm_position, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF)
+                    nearby = find_nearby_mutations(chain, ptm_position, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF, max_pae=MAX_PAE)
                     if not nearby:
                         continue
                     within_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) <= 5]

@@ -115,10 +115,13 @@ def find_canonical_cifs(uniprot_dir: Path) -> list[Path]:
 
 
 def load_first_chain(model_file: Path):
-    """Parse a CIF file and return the first chain as a biotite AtomArray, or None."""
+    """Parse a CIF file and return the first chain as a biotite AtomArray, or None.
+
+    Includes per-atom pLDDT in the ``b_factor`` attribute.
+    """
     try:
         cif = CIFFile.read(str(model_file))
-        structure = get_structure(cif, model=1)
+        structure = get_structure(cif, model=1, extra_fields=["b_factor"])
     except Exception:
         return None
 
@@ -130,6 +133,13 @@ def load_first_chain(model_file: Path):
         return None
 
     return structure[structure.chain_id == chain_ids[0]]
+
+
+def get_plddt_map(chain) -> dict[int, float]:
+    """Build a {residue_position: pLDDT} dict from a chain's CA atoms."""
+    ca_mask = chain.atom_name == "CA"
+    ca = chain[ca_mask]
+    return {int(ca.res_id[i]): float(ca.b_factor[i]) for i in range(len(ca))}
 
 
 def load_pae_matrix(uniprot_dir: Path):
