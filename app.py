@@ -251,15 +251,17 @@ class App(ctk.CTk):
         ).pack(side="left", padx=(0, 16), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Min pLDDT:").pack(side="left", padx=(8, 4), pady=8)
-        self._min_plddt_var = ctk.StringVar(value="70")
+        self._min_plddt_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             settings_frame, textvariable=self._min_plddt_var, width=60,
+            placeholder_text="off",
         ).pack(side="left", padx=(0, 16), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Max PAE:").pack(side="left", padx=(8, 4), pady=8)
-        self._max_pae_var = ctk.StringVar(value="5.0")
+        self._max_pae_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             settings_frame, textvariable=self._max_pae_var, width=60,
+            placeholder_text="off",
         ).pack(side="left", padx=(0, 12), pady=8)
 
         # Steps panel
@@ -311,6 +313,19 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         self._timer_label.pack(side="right", padx=12)
+
+        import tkinter as tk
+        self._activity_width = 40
+        self._activity_height = 6
+        self._activity_chunk = 12
+        self._activity_canvas = tk.Canvas(
+            btn_frame, width=self._activity_width, height=self._activity_height,
+            highlightthickness=0, bg="#333333", bd=0,
+        )
+        self._activity_canvas.pack(side="right", padx=(0, 4))
+        self._activity_canvas.pack_forget()
+        self._activity_animating = False
+        self._activity_pos = -self._activity_chunk
 
         # Log (collapsible)
         self._log_visible = False
@@ -495,6 +510,8 @@ class App(ctk.CTk):
     def _tick(self) -> None:
         if not self._running or self._pipeline_start is None:
             return
+        if self._suspended:
+            return
         elapsed = time.time() - self._pipeline_start
 
         text = f"Elapsed: {_fmt_time(elapsed)}"
@@ -511,6 +528,33 @@ class App(ctk.CTk):
 
         self._timer_label.configure(text=text)
         self.after(1000, self._tick)
+
+    # ── Activity animation ─────────────────────────────────────────────────
+
+    def _start_activity_animation(self):
+        self._activity_animating = True
+        self._activity_pos = -self._activity_chunk
+        self._animate_activity()
+
+    def _stop_activity_animation(self):
+        self._activity_animating = False
+        self._activity_canvas.delete("chunk")
+
+    def _animate_activity(self):
+        if not self._activity_animating:
+            return
+        self._activity_canvas.delete("chunk")
+        x1 = max(0, self._activity_pos)
+        x2 = min(self._activity_width, self._activity_pos + self._activity_chunk)
+        if x2 > x1:
+            self._activity_canvas.create_rectangle(
+                x1, 0, x2, self._activity_height,
+                fill=_BLUE, outline="", tags="chunk",
+            )
+        self._activity_pos += 1
+        if self._activity_pos > self._activity_width:
+            self._activity_pos = -self._activity_chunk
+        self.after(25, self._animate_activity)
 
     # ── File-status bar ──────────────────────────────────────────────────────
 
@@ -653,6 +697,9 @@ class App(ctk.CTk):
                 pass
         self._stop_btn.configure(state="disabled", fg_color="gray30")
         if actually_suspended:
+            self._paused_elapsed = time.time() - self._pipeline_start
+            self._stop_activity_animation()
+            self._activity_canvas.pack_forget()
             self._run_btn.configure(
                 state="normal", text="▶  Resume", command=self._resume_pipeline,
             )
@@ -673,6 +720,9 @@ class App(ctk.CTk):
         """Resume the suspended subprocess."""
         proc = self._current_proc
         if proc and self._suspended:
+            # Adjust start time so elapsed doesn't include the pause duration
+            pause_duration = time.time() - (self._pipeline_start + self._paused_elapsed)
+            self._pipeline_start += pause_duration
             try:
                 psutil.Process(proc.pid).resume()
             except psutil.NoSuchProcess:
@@ -685,6 +735,9 @@ class App(ctk.CTk):
             state="disabled", text="▶  Run Pipeline", command=self._start_pipeline,
         )
         self._stop_btn.configure(state="normal", fg_color=_RED)
+        self._activity_canvas.pack(side="right", padx=(0, 4))
+        self._start_activity_animation()
+        self._tick()
         self._q("log", "Pipeline resumed.")
 
     def _cancel_pipeline(self):
@@ -821,8 +874,8 @@ class App(ctk.CTk):
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
         min_samples = self._min_samples_var.get().strip() or "3"
-        min_plddt = self._min_plddt_var.get().strip() or "0"
-        max_pae = self._max_pae_var.get().strip() or "0"
+        min_plddt = self._min_plddt_var.get().strip()
+        max_pae = self._max_pae_var.get().strip()
 
         cmds = [
             [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode,
@@ -839,7 +892,8 @@ class App(ctk.CTk):
             ],
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
              "--output-dir", str(self._output_dir), "--cutoff", cutoff,
-             "--min-plddt", min_plddt, "--max-pae", max_pae],
+             *(["--min-plddt", min_plddt] if min_plddt else []),
+             *(["--max-pae", max_pae] if max_pae else [])],
         ]
         if mode == "ptm-proximity":
             cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),
@@ -1083,6 +1137,8 @@ class App(ctk.CTk):
                     self._step_times = []
                     self._historical_times = _load_runtimes(mode, run_type)
                     self._precheck_estimate = None
+                    self._activity_canvas.pack(side="right", padx=(0, 8))
+                    self._start_activity_animation()
                     self._tick()
                 elif kind == "set_estimate":
                     self._precheck_estimate = msg[1]
@@ -1107,6 +1163,8 @@ class App(ctk.CTk):
                     self._stop_requested = False
                     self._suspended = False
                     self._current_proc = None
+                    self._stop_activity_animation()
+                    self._activity_canvas.pack_forget()
                     if hasattr(self, "_cancel_btn_ref"):
                         self._cancel_btn_ref.destroy()
                         del self._cancel_btn_ref

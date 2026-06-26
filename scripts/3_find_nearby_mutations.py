@@ -348,19 +348,19 @@ def main():
     parser.add_argument(
         "--min-plddt",
         type=float,
-        default=0,
-        help="Exclude positions with pLDDT below this threshold (default: 0 = no filter)",
+        default=None,
+        help="Exclude positions with pLDDT below this threshold (default: disabled)",
     )
     parser.add_argument(
         "--max-pae",
         type=float,
-        default=0,
-        help="Exclude mutation pairs with PAE above this threshold (default: 0 = no filter)",
+        default=None,
+        help="Exclude mutation pairs with PAE above this threshold (default: disabled)",
     )
     args = parser.parse_args()
     DISTANCE_CUTOFF = args.cutoff
-    MIN_PLDDT = args.min_plddt
-    MAX_PAE = args.max_pae if args.max_pae > 0 else None
+    MIN_PLDDT = args.min_plddt or 0
+    MAX_PAE = args.max_pae
     if MIN_PLDDT > 0:
         print(f"pLDDT filter: excluding positions below {MIN_PLDDT}")
     if MAX_PAE is not None:

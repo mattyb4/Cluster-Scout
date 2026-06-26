@@ -199,7 +199,8 @@ def run_1433_phase(df: pd.DataFrame) -> None:
 
 _PP_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "polyphen.tsv"
 _PP_API_URL = "https://myvariant.info/v1/query"
-_PP_MAX_WORKERS = 10
+_PP_MAX_WORKERS = 30
+_pp_session = requests.Session()
 _PP_SEVERITY = {"D": 2, "P": 1, "B": 0}
 
 _MUTATION_COLS = ["mutations_within_5_positions", "mutations_more_than_5_positions"]
@@ -256,7 +257,7 @@ def _pp_best_prediction(hits: list[dict]) -> tuple[str, str]:
 
 
 def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str]:
-    """Query myvariant.info for PolyPhen-2 HDIV prediction."""
+    """Query myvariant.info for PolyPhen-2 HDIV prediction using a shared session."""
     m = MUT_RE.match(mutation)
     if not m:
         return "", ""
@@ -266,9 +267,9 @@ def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str]:
     q = (f"dbnsfp.genename:{gene} AND dbnsfp.aa.ref:{ref} "
          f"AND dbnsfp.aa.alt:{alt} AND dbnsfp.aa.pos:{pos}")
     try:
-        resp = requests.get(
+        resp = _pp_session.get(
             _PP_API_URL,
-            params={"q": q, "fields": "dbnsfp.polyphen2,dbnsfp.aa", "size": 10},
+            params={"q": q, "fields": "dbnsfp.polyphen2", "size": 10},
             timeout=15,
         )
         resp.raise_for_status()

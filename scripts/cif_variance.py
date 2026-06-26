@@ -99,17 +99,18 @@ def align_to_reference(ref_coords: np.ndarray, mobile_coords: np.ndarray,
 def iterative_average_alignment(
     all_coords: list[np.ndarray],
     all_positions: list[list[int]],
+    align_positions: set[int] | None = None,
     max_iterations: int = 10,
     convergence: float = 1e-4,
 ) -> list[np.ndarray]:
     """Align all structures to an iteratively refined average reference.
 
-    1. Align everything to the first structure.
-    2. Compute the average of the aligned coordinates.
-    3. Re-align everything to that average.
-    4. Repeat until the average stops moving (converges).
+    If *align_positions* is given, only those residues are used to compute
+    the superposition — but the resulting rotation/translation is applied
+    to ALL coordinates, so variance can be reported on a wider range.
     """
-    shared = sorted(set.intersection(*(set(p) for p in all_positions)))
+    all_shared = sorted(set.intersection(*(set(p) for p in all_positions)))
+    shared = [p for p in all_shared if p in align_positions] if align_positions else all_shared
     n_structs = len(all_coords)
 
     # Index maps for extracting shared positions from each structure
@@ -221,7 +222,13 @@ def main():
     )
     parser.add_argument(
         "--range", nargs=2, type=int, default=None, metavar=("START", "END"),
-        help="Restrict analysis to residue positions START-END (e.g. --range 0 630)",
+        help="Restrict reported output to residue positions START-END (e.g. --range 0 630)",
+    )
+    parser.add_argument(
+        "--align-range", nargs=2, type=int, default=None, metavar=("START", "END"),
+        help="Use only these residues for structural alignment (e.g. --align-range 0 630). "
+             "Defaults to --range if not specified. Useful for excluding disordered regions "
+             "from alignment while still reporting their variance.",
     )
     parser.add_argument(
         "--uniprot", default=None,
@@ -272,22 +279,36 @@ def main():
         all_names.append(res_names)
         file_names.append(cif.stem)
 
-    # Apply range filter before alignment so all analysis uses the same subset
-    if args.range:
-        rng_start, rng_end = args.range
-        print(f"\nFiltering to residue range {rng_start}-{rng_end}")
+    # Determine alignment range (stable core) vs reporting range
+    align_range = args.align_range or args.range
+    report_range = args.range
+
+    if align_range:
+        a_start, a_end = align_range
+        align_set = {p for pos_list in all_positions for p in pos_list
+                     if a_start <= p <= a_end}
+        print(f"\nAlignment range: residues {a_start}-{a_end}")
+    else:
+        align_set = None
+        print("\nAlignment range: all residues")
+
+    # Iterative alignment using only the alignment residues
+    print("Aligning all structures to iterative average reference...")
+    aligned_coords = iterative_average_alignment(all_coords, all_positions,
+                                                  align_positions=align_set)
+
+    # Apply reporting range filter AFTER alignment
+    if report_range:
+        rng_start, rng_end = report_range
+        print(f"Reporting range: residues {rng_start}-{rng_end}")
         for i in range(len(all_positions)):
             mask = [(rng_start <= p <= rng_end) for p in all_positions[i]]
             all_positions[i] = [p for p, keep in zip(all_positions[i], mask) if keep]
-            all_coords[i] = all_coords[i][mask]
+            aligned_coords[i] = aligned_coords[i][mask]
             all_plddts[i] = all_plddts[i][mask]
             all_names[i] = [n for n, keep in zip(all_names[i], mask) if keep]
 
-    # Iterative alignment to average structure
-    print("\nAligning all structures to iterative average reference...")
-    aligned_coords = iterative_average_alignment(all_coords, all_positions)
-
-    # Compute pairwise RMSD (using aligned coordinates)
+    # Compute pairwise RMSD (on aligned + filtered coordinates)
     print("\nComputing pairwise RMSD matrix...")
     rmsd_df = compute_pairwise_rmsd(aligned_coords, all_positions, file_names)
     rmsd_path = output_dir / "pairwise_rmsd.tsv"
@@ -298,7 +319,7 @@ def main():
     # Compute per-residue variance and pLDDT stats
     shared_positions = sorted(set.intersection(*(set(p) for p in all_positions)))
     print(f"\n{len(shared_positions)} shared residue positions"
-          + (f" in range {rng_start}-{rng_end}" if args.range else ""))
+          + (f" in reporting range {rng_start}-{rng_end}" if report_range else ""))
 
     # Build aligned coordinate arrays for shared positions
     coord_stack = []  # (n_structures, n_shared, 3)
@@ -372,25 +393,25 @@ def main():
     ax1.plot(positions_arr, per_residue_variance, linewidth=0.8, color="#3a86ff", alpha=0.8)
     ax1.fill_between(positions_arr, per_residue_variance, alpha=0.2, color="#3a86ff")
 
-    # Mark PTM sites
-    for pos in ptm_positions:
-        if pos in shared_positions:
-            idx = shared_positions.index(pos)
-            ax1.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
+    # Mark PTM and mutation sites
+    shared_set = set(shared_positions)
+    ptm_in_range = [p for p in ptm_positions if p in shared_set]
+    mut_in_range = [p for p in mutation_positions if p in shared_set]
 
-    # Mark mutation sites
-    for pos in mutation_positions:
-        if pos in shared_positions:
-            idx = shared_positions.index(pos)
-            ax1.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
+    for pos in ptm_in_range:
+        ax1.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
+    for pos in mut_in_range:
+        ax1.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
 
-    # Legend entries for markers
-    ax1.axvline(x=-999, color="#2ecc71", alpha=0.5, linewidth=1.5, label="PTM site")
-    ax1.axvline(x=-999, color="#e74c3c", alpha=0.5, linewidth=1.5, label="Mutation site")
+    if ptm_in_range or mut_in_range:
+        ax1.plot([], [], color="#2ecc71", linewidth=2, label=f"PTM site ({len(ptm_in_range)})")
+        ax1.plot([], [], color="#e74c3c", linewidth=2, label=f"Mutation site ({len(mut_in_range)})")
+
+    print(f"  {len(ptm_in_range)} PTM sites and {len(mut_in_range)} mutation sites in plotted range")
 
     ax1.set_xlabel("Residue Position", fontsize=12)
     ax1.set_ylabel("Positional Variance (A^2)", fontsize=12)
-    ax1.set_xlim(0, max(shared_positions) + 1)
+    ax1.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
     ax1.set_title(f"Per-Residue Structural Variance ({len(cif_files)} structures"
                   + (f", {uniprot})" if uniprot else ")"), fontsize=14)
     ax1.legend(loc="upper right", fontsize=10)
@@ -401,16 +422,14 @@ def main():
     ax2.fill_between(positions_arr, plddt_mean - plddt_std, plddt_mean + plddt_std,
                      alpha=0.25, color="#f39c12")
 
-    for pos in ptm_positions:
-        if pos in shared_positions:
-            ax2.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
-    for pos in mutation_positions:
-        if pos in shared_positions:
-            ax2.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
+    for pos in ptm_in_range:
+        ax2.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
+    for pos in mut_in_range:
+        ax2.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
 
     ax2.set_xlabel("Residue Position", fontsize=12)
     ax2.set_ylabel("pLDDT (mean +/- std)", fontsize=12)
-    ax2.set_xlim(0, max(shared_positions) + 1)
+    ax2.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
     ax2.set_title("AlphaFold Confidence (pLDDT)", fontsize=14)
     ax2.set_ylim(0, 100)
     ax2.grid(True, alpha=0.3)

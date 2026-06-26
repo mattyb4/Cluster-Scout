@@ -104,7 +104,7 @@ class TestFetchPolyphen:
                     return {"hits": SAMPLE_HITS}
             return R()
 
-        monkeypatch.setattr(mod.requests, "get", fake_get)
+        monkeypatch.setattr(mod._pp_session, "get", fake_get)
 
         p1, s1 = mod.fetch_polyphen("TP53", "R175H")
         assert p1 == "D"
@@ -116,7 +116,7 @@ class TestFetchPolyphen:
     def test_returns_blanks_on_network_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
         monkeypatch.setattr(
-            mod.requests, "get",
+            mod._pp_session, "get",
             lambda *a, **k: (_ for _ in ()).throw(mod.requests.RequestException("timeout"))
         )
         assert mod.fetch_polyphen("TP53", "R175H") == ("", "")
