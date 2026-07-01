@@ -19,6 +19,7 @@ from tkinter import filedialog
 import psutil
 
 import customtkinter as ctk
+from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
@@ -57,6 +58,36 @@ _BLUE = "#3a86ff"
 _GREEN = "#2ecc71"
 _RED = "#e74c3c"
 _YELLOW = "#f1c40f"
+
+_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+_CACHE_ITEMS = [
+    # (step_label, display_name, path, is_dir)
+    ("Step 1", "UniProt gene mapping",   _CACHE_DIR / "uniprot_gene_mapping.tsv",    False),
+    ("Step 1", "Gene → UniProt mapping", _CACHE_DIR / "gene_to_uniprot_mapping.tsv", False),
+    ("Step 1", "Isoform safe lengths",   _CACHE_DIR / "isoform_safe_lengths.tsv",    False),
+    ("Step 4", "14-3-3 predictions",     _CACHE_DIR / "1433pred",                    True),
+    ("Step 4", "PolyPhen-2 scores",      _CACHE_DIR / "polyphen.tsv",                False),
+    ("Step 4", "Kinase predictions",     _CACHE_DIR / "kinase_predictions.tsv",      False),
+    ("Step 4", "AIUPred disorder",       _CACHE_DIR / "aiupred_disorder.tsv",        False),
+]
+
+
+def _cache_entry_count(path: Path, is_dir: bool) -> str:
+    """Return a human-readable entry count string for a cache path."""
+    if is_dir:
+        if not path.is_dir():
+            return "empty"
+        n = sum(1 for f in path.iterdir() if f.is_file())
+        return f"{n:,} entries" if n else "empty"
+    if not path.exists():
+        return "empty"
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            n = sum(1 for _ in fh) - 1  # subtract header row
+        return f"{max(0, n):,} entries" if n > 0 else "empty"
+    except Exception:
+        return "?"
+
 
 # Results-tab helpers
 _MUT_ENTRY_RE = re.compile(
@@ -146,6 +177,9 @@ class App(ctk.CTk):
         self.title("Cluster-Scout")
         self.geometry("1100x820")
         self.minsize(900, 560)
+        ico = PROJECT_ROOT / "cluster_scout.ico"
+        if ico.exists():
+            self.iconbitmap(str(ico))
 
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._running = False
@@ -190,11 +224,25 @@ class App(ctk.CTk):
         p = scroll  # all pipeline widgets go in the scrollable frame
 
         # Title
-        ctk.CTkLabel(
-            p,
-            text="Cluster-Scout",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
+        _logo_path_dark = PROJECT_ROOT / "cluster_scout_logo_dark.png"
+        if _logo_path_dark.exists():
+            _pil_dark = Image.open(_logo_path_dark)
+            _h = 200
+            _w = int(_pil_dark.width * _h / _pil_dark.height)
+            _logo_img = ctk.CTkImage(
+                light_image=_pil_dark,
+                dark_image=_pil_dark,
+                size=(_w, _h),
+            )
+            ctk.CTkLabel(p, image=_logo_img, text="").grid(
+                row=0, column=0, padx=24, pady=(12, 4), sticky="w"
+            )
+        else:
+            ctk.CTkLabel(
+                p,
+                text="Cluster-Scout",
+                font=ctk.CTkFont(size=22, weight="bold"),
+            ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
 
         # Data-file status bar with Browse buttons
         self._file_frame = ctk.CTkFrame(p)
@@ -390,6 +438,16 @@ class App(ctk.CTk):
             height=44,
         )
         self._open_btn.pack(side="left")
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Manage Cache",
+            command=self._manage_cache,
+            width=140,
+            height=44,
+            fg_color="gray30",
+            hover_color="gray40",
+        ).pack(side="left", padx=(8, 0))
 
         self._timer_label = ctk.CTkLabel(
             btn_frame,
@@ -738,6 +796,18 @@ class App(ctk.CTk):
     def _output_files(self) -> list[Path]:
         return [self._output_dir / name for name in self._DEFAULT_OUTPUT_FILES]
 
+    def _find_locked_output_file(self) -> Path | None:
+        """Return the first existing output file that cannot be opened for writing, or None."""
+        for path in self._output_files:
+            if not path.exists():
+                continue
+            try:
+                with path.open("r+b"):
+                    pass
+            except PermissionError:
+                return path
+        return None
+
     def _backup_outputs(self) -> list[Path]:
         """Copy existing output files to .bak before the pipeline overwrites them."""
         backups = []
@@ -766,6 +836,22 @@ class App(ctk.CTk):
 
     def _start_pipeline(self):
         if self._running:
+            return
+
+        locked = self._find_locked_output_file()
+        if locked:
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Output File Not Writable",
+                f"Cannot start the pipeline — the output file\n\n"
+                f"    {locked.name}\n\n"
+                f"cannot be written to. Common causes:\n"
+                f"  • Open in another program (e.g. Excel)\n"
+                f"  • File is marked read-only\n"
+                f"  • A cloud sync service (OneDrive, Dropbox) has it locked\n"
+                f"  • You do not have write permission on the output folder\n\n"
+                f"Close or resolve the issue above and try again.",
+            )
             return
 
         mode = self._mode.get()
@@ -1757,6 +1843,82 @@ class App(ctk.CTk):
                     "",
                     "",
                 ), tags=("odd" if i % 2 else "even",))
+
+    # ── Cache management ─────────────────────────────────────────────────────
+
+    def _manage_cache(self):
+        import shutil
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Manage Cache")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog, text="Manage Cache",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).grid(row=0, column=0, columnspan=4, padx=20, pady=(16, 2), sticky="w")
+        ctk.CTkLabel(
+            dialog,
+            text="Clear cached API results to force re-fetching on the next run.",
+            text_color=_GRAY,
+        ).grid(row=1, column=0, columnspan=4, padx=20, pady=(0, 10), sticky="w")
+
+        for col, txt in enumerate(["Step", "Cache", "Entries", ""]):
+            ctk.CTkLabel(
+                dialog, text=txt, font=ctk.CTkFont(weight="bold"), text_color=_GRAY,
+            ).grid(row=2, column=col, padx=(20 if col == 0 else 8, 8), pady=(0, 4), sticky="w")
+
+        count_labels: list = []
+        last_step = None
+
+        def _clear(path: Path, is_dir: bool, lbl):
+            if is_dir:
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+            lbl.configure(text="empty")
+
+        def _clear_all():
+            for _, _, path, is_dir in _CACHE_ITEMS:
+                if is_dir:
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            for lbl in count_labels:
+                lbl.configure(text="empty")
+
+        for i, (step, name, path, is_dir) in enumerate(_CACHE_ITEMS):
+            row = 3 + i
+            step_text = step if step != last_step else ""
+            last_step = step
+
+            ctk.CTkLabel(dialog, text=step_text, text_color=_GRAY).grid(
+                row=row, column=0, padx=(20, 8), pady=3, sticky="w")
+            ctk.CTkLabel(dialog, text=name).grid(
+                row=row, column=1, padx=8, pady=3, sticky="w")
+
+            count_lbl = ctk.CTkLabel(
+                dialog, text=_cache_entry_count(path, is_dir),
+                text_color=_GRAY, width=90, anchor="e",
+            )
+            count_lbl.grid(row=row, column=2, padx=8, pady=3, sticky="e")
+            count_labels.append(count_lbl)
+
+            ctk.CTkButton(
+                dialog, text="Clear", width=64,
+                fg_color="gray30", hover_color=_RED,
+                command=lambda p=path, d=is_dir, lbl=count_lbl: _clear(p, d, lbl),
+            ).grid(row=row, column=3, padx=(0, 20), pady=3)
+
+        bottom_row = 3 + len(_CACHE_ITEMS)
+        ctk.CTkButton(
+            dialog, text="Clear All Caches",
+            fg_color="gray30", hover_color=_RED,
+            command=_clear_all,
+        ).grid(row=bottom_row, column=0, columnspan=4, padx=20, pady=(10, 16), sticky="ew")
+
+        dialog.after(50, dialog.lift)
 
     # ── Output folder ────────────────────────────────────────────────────────
 

@@ -26,7 +26,7 @@ ptm_mutation_proximity_db.tsv
 ptm_mutation_proximity_long.tsv
 download_errors.tsv
 ptm_skipped.tsv
-*.png
+Output/*.png
 
 #Coordinate data
 Output/coordinates/
