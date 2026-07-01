@@ -139,7 +139,7 @@ def _save_runtimes(mode: str, run_type: str, times: list[float]) -> None:
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Mutation Cluster Proximity Pipeline")
+        self.title("Cluster-Scout")
         self.geometry("1100x820")
         self.minsize(900, 560)
 
@@ -187,7 +187,7 @@ class App(ctk.CTk):
         # Title
         ctk.CTkLabel(
             p,
-            text="Mutation Cluster Proximity Pipeline",
+            text="Cluster-Scout",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
 
@@ -1440,8 +1440,8 @@ class App(ctk.CTk):
 
     # ── Tab change handler ───────────────────────────────────────────────────
 
-    def _on_tab_change(self, tab_name: str) -> None:
-        if tab_name == "Results":
+    def _on_tab_change(self) -> None:
+        if self._tabview.get() == "Results":
             self._load_results()
 
     # ── Results tab ──────────────────────────────────────────────────────────

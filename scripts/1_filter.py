@@ -58,12 +58,19 @@ def clean_str_list(values):
 
 
 def is_simple_substitution(change):
-    """Return True if the amino-acid change is a single-residue missense substitution (e.g. 'V600E')."""
+    """Return True if the amino-acid change is a single-residue missense substitution (e.g. 'V600E').
+
+    Requires the reference and alternate amino acid to differ so that synonymous
+    variants stored by COSMIC as 'p.P100P' (same letter before and after) are
+    excluded.  Stop-codon variants ('p.R175*') are also excluded because the
+    final character must be a letter.
+    """
     if pd.isna(change):
         return False
 
     text = str(change).strip()
-    return bool(re.fullmatch(r"[A-Z]\d+[A-Z]", text))
+    m = re.fullmatch(r"([A-Z])(\d+)([A-Z])", text)
+    return bool(m) and m.group(1) != m.group(3)
 
 
 def build_ptm_site(row):
