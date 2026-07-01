@@ -502,6 +502,8 @@ def main():
             "patient_count", "total_nearby_patient_count", "total_cosmic_missense_patients",
             "nearby_mutation_count", "confirmed_disrupting_mutation", "ptm_diseases",
             "1433_predicted", "1433_predicted_consensus", "1433_confirmed", "kinase_predictions",
+            "ptm_aiupred_general", "ptm_aiupred_binding", "ptm_is_disordered", "ptm_is_binding",
+            "mut_aiupred_general", "mut_aiupred_binding", "mut_is_disordered", "mut_is_binding",
         ]
 
         long_handle = None
@@ -689,6 +691,14 @@ def main():
                                     "",  # 1433_predicted_consensus (filled by step 4)
                                     "",  # 1433_confirmed (filled by step 4)
                                     "",  # kinase_predictions (filled by step 4)
+                                    "",  # ptm_aiupred_general (filled by step 4)
+                                    "",  # ptm_aiupred_binding (filled by step 4)
+                                    "",  # ptm_is_disordered (filled by step 4)
+                                    "",  # ptm_is_binding (filled by step 4)
+                                    "",  # mut_aiupred_general (filled by step 4)
+                                    "",  # mut_aiupred_binding (filled by step 4)
+                                    "",  # mut_is_disordered (filled by step 4)
+                                    "",  # mut_is_binding (filled by step 4)
                                 ])
 
             print(f"Wrote nearby mutation data to {OUTPUT_PATH}")

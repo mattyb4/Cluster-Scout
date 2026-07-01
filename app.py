@@ -88,6 +88,10 @@ _MUT_TV_COLS = [
     ("Mutation",   "mut",    80),
     ("Seq dist",   "seqd",   62),
     ("Dist (Å)",   "dist",   62),
+    ("Binding",    "bind",   62),
+    ("Binding?",   "isbnd",  58),
+    ("Disorder",   "dsord",  62),
+    ("Disordr?",   "isdis",  58),
     ("PP Class",   "ppc",   115),
     ("PP Score",   "pps",    62),
     ("Mut pLDDT",  "mpld",   72),
@@ -177,6 +181,7 @@ class App(ctk.CTk):
         # ── Pipeline tab ──
         pipeline_tab.grid_columnconfigure(0, weight=1)
         pipeline_tab.grid_rowconfigure(0, weight=1)
+        pipeline_tab.grid_rowconfigure(1, weight=0)  # log panel — weight set dynamically
 
         scroll = ctk.CTkScrollableFrame(pipeline_tab, fg_color="transparent")
         scroll.grid(row=0, column=0, sticky="nsew")
@@ -346,13 +351,13 @@ class App(ctk.CTk):
 
         # Steps panel
         self._steps_outer = ctk.CTkFrame(p)
-        self._steps_outer.grid(row=6, column=0, padx=24, pady=4, sticky="ew")
+        self._steps_outer.grid(row=7, column=0, padx=24, pady=4, sticky="ew")
         self._steps_outer.grid_columnconfigure(1, weight=1)
         self._rebuild_step_rows()
 
         # Buttons
         btn_frame = ctk.CTkFrame(p, fg_color="transparent")
-        btn_frame.grid(row=7, column=0, padx=24, pady=8, sticky="ew")
+        btn_frame.grid(row=8, column=0, padx=24, pady=8, sticky="ew")
 
         self._run_btn = ctk.CTkButton(
             btn_frame,
@@ -419,14 +424,13 @@ class App(ctk.CTk):
             hover_color="gray40",
             command=self._toggle_log,
         )
-        self._log_toggle.grid(row=8, column=0, padx=24, pady=(8, 0), sticky="w")
+        self._log_toggle.grid(row=9, column=0, padx=24, pady=(8, 0), sticky="w")
 
         self._log = ctk.CTkTextbox(
-            p,
+            pipeline_tab,
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
-            height=300,
         )
 
         # Hide the scrollbar when content fits; show it only when scrolling is needed
@@ -697,12 +701,15 @@ class App(ctk.CTk):
 
     def _toggle_log(self):
         """Show or hide the raw log output panel."""
+        tab = self._log.master
         if self._log_visible:
             self._log.grid_remove()
+            tab.grid_rowconfigure(1, weight=0)
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log.grid(row=9, column=0, padx=24, pady=(4, 20), sticky="nsew")
+            tab.grid_rowconfigure(1, weight=1)
+            self._log.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 
@@ -879,6 +886,7 @@ class App(ctk.CTk):
     _TIME_PER_1433_FETCH = 0.2          # 5 concurrent workers
     _TIME_PER_PP_FETCH = 0.05           # 10 concurrent workers
     _TIME_PER_KINASE_PREDICT = 0.5
+    _TIME_PER_AIUPRED_FETCH = 2.0       # per-protein REST call, sequential
     _TIME_PER_PROTEIN_STEP3 = 0.35
     _TIME_STEP1_BASE = 40               # base time for filtering/merging
     _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
@@ -955,12 +963,26 @@ class App(ctk.CTk):
                 except Exception:
                     pass
 
+            # AIUPred — one binding call per protein (yields general + binding scores)
+            cached_aiupred = 0
+            aiupred_cache = cache_dir / "aiupred_disorder.tsv"
+            if aiupred_cache.exists():
+                try:
+                    df_ac = pd.read_csv(aiupred_cache, sep="\t", dtype=str,
+                                        keep_default_na=False)
+                    cached_aiupred = int((df_ac["analysis_type"] == "binding").sum())
+                except Exception:
+                    pass
+            uncached_aiupred = max(0, n_proteins - cached_aiupred)
+
             self._q("log", f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
-                    f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached")
+                    f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
+                    f"{cached_aiupred}/{n_proteins} AIUPred cached")
 
             step4_est = (uncached_1433 * self._TIME_PER_1433_FETCH
                          + max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
                          + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT
+                         + uncached_aiupred * self._TIME_PER_AIUPRED_FETCH
                          + self._TIME_STEP4_BASE)
 
         total_est = step1_est + step2_est + step3_est + step4_est
@@ -1686,6 +1708,10 @@ class App(ctk.CTk):
                 r.get("mutation", ""),
                 r.get("sequence_distance", ""),
                 r.get("distance_angstrom", ""),
+                r.get("mut_aiupred_binding", ""),
+                r.get("mut_is_binding", ""),
+                r.get("mut_aiupred_general", ""),
+                r.get("mut_is_disordered", ""),
                 r.get("polyphen_class", ""),
                 r.get("polyphen_score", ""),
                 r.get("mutation_plddt", ""),
@@ -1722,6 +1748,8 @@ class App(ctk.CTk):
                     m.group(1),
                     seq_d,
                     m.group(4),
+                    "", "",  # binding score / is_binding (unavailable in wide format)
+                    "", "",  # disorder score / is_disordered (unavailable in wide format)
                     _PP_LABEL.get(pp_code, ""),
                     m.group(3) or "",
                     "",

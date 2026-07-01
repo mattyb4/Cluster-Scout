@@ -35,7 +35,7 @@ PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 
-_NUM_PHASES = 3
+_NUM_PHASES = 4
 
 
 def _emit_progress(phase: int, phase_pct: float, desc: str) -> None:
@@ -613,6 +613,125 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Phase 4: AIUPred disorder scores
+# ═════════════════════════════════════════════════════════════════════════════
+
+_AIUPRED_API_URL = "https://aiupred.elte.hu/rest_api"
+_AIUPRED_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "aiupred_disorder.tsv"
+_aiupred_session = requests.Session()
+
+# Maps response JSON keys to canonical type names stored in the cache
+_AIUPRED_KEY_MAP = {
+    "AIUPred": "general",
+    "AIUPred-binding": "binding",
+    "AIUPred-linker": "linker",
+}
+
+# One binding call yields both general disorder and binding-region scores
+_AIUPRED_CALLS = [
+    ("binding", ["general", "binding"]),
+]
+
+
+def _aiupred_load_cache() -> dict[tuple[str, str], dict[int, float]]:
+    """Load cached AIUPred scores. Returns {(uniprot_id, analysis_type): {pos: score}}."""
+    if not _AIUPRED_CACHE_FILE.exists():
+        return {}
+    try:
+        df = pd.read_csv(_AIUPRED_CACHE_FILE, sep="\t", dtype=str, keep_default_na=False)
+    except Exception:
+        return {}
+    cache: dict[tuple[str, str], dict[int, float]] = {}
+    for _, row in df.iterrows():
+        uid = str(row.get("uniprot_id", ""))
+        atype = str(row.get("analysis_type", ""))
+        try:
+            scores = {int(k): float(v) for k, v in json.loads(row.get("scores_json", "{}")).items()}
+        except Exception:
+            scores = {}
+        if uid and atype:
+            cache[(uid, atype)] = scores
+    return cache
+
+
+def _aiupred_save_cache(cache: dict[tuple[str, str], dict[int, float]]) -> None:
+    _AIUPRED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"uniprot_id": uid, "analysis_type": atype,
+         "scores_json": json.dumps({str(k): v for k, v in scores.items()})}
+        for (uid, atype), scores in cache.items()
+    ]
+    pd.DataFrame(rows, columns=["uniprot_id", "analysis_type", "scores_json"]).to_csv(
+        _AIUPRED_CACHE_FILE, sep="\t", index=False
+    )
+
+
+def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, float]]:
+    """Fetch AIUPred scores for one protein, returning all score arrays in the response.
+
+    Returns {type_name: {1-based position: score}}.  A binding call returns both
+    'general' and 'binding' scores; a linker call returns only 'linker'.
+    """
+    params: dict[str, str] = {"accession": uniprot_id, "smoothing": "default",
+                               "analysis_type": api_type}
+    try:
+        resp = _aiupred_session.get(_AIUPRED_API_URL, params=params, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, dict[int, float]] = {}
+    for key, val in data.items():
+        type_name = _AIUPRED_KEY_MAP.get(key)
+        if type_name is None:
+            continue
+        if isinstance(val, list) and val and isinstance(val[0], (int, float)):
+            result[type_name] = {i + 1: float(s) for i, s in enumerate(val)}
+    return result
+
+
+def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]]:
+    """Phase 4: fetch general, binding, and linker disorder scores for each protein.
+
+    Makes two API calls per protein: binding (yields general+binding) and linker.
+    Returns {type_name: {uniprot_id: {position: score}}} for types general/binding/linker.
+    """
+    print("\n── Phase 4: AIUPred disorder scores (general + binding + linker) ──")
+    cache = _aiupred_load_cache()
+    uniprots = [u for u in df["UniProt"].unique() if u]
+
+    needs = [
+        (api_type, [u for u in uniprots if any((u, t) not in cache for t in produced)])
+        for api_type, produced in _AIUPRED_CALLS
+    ]
+    total_fetches = sum(len(n) for _, n in needs)
+    done = 0
+    any_new = False
+
+    for api_type, need in needs:
+        if not need:
+            print(f"  {api_type}: all {len(uniprots)} proteins cached")
+            continue
+        print(f"  Fetching {len(need)} proteins via {api_type} call")
+        for uid in tqdm(need, desc=f"  AIUPred/{api_type}"):
+            for t, scores in fetch_aiupred_all(api_type, uid).items():
+                cache[(uid, t)] = scores
+            done += 1
+            _emit_progress(3, done / max(total_fetches, 1) * 100, f"AIUPred {uid}")
+        any_new = True
+
+    if any_new:
+        _aiupred_save_cache(cache)
+
+    return {
+        t: {uid: cache.get((uid, t), {}) for uid in uniprots}
+        for t in ("general", "binding")
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Long-format annotation
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -624,11 +743,15 @@ def annotate_long_format(
     pp_cache: dict,
     seq_maps: dict,
     kin_cache: dict,
+    disorder_maps: dict | None = None,
 ) -> None:
     """Fill annotation columns in the long-format PTM/mutation table in-place."""
     pred_1433, consensus_1433, confirmed_1433 = [], [], []
     pp_scores, pp_classes = [], []
     kinase_preds = []
+    _ATYPES = ("general", "binding")
+    ptm_disorder: dict[str, list] = {t: [] for t in _ATYPES}
+    mut_disorder: dict[str, list] = {t: [] for t in _ATYPES}
 
     for _, row in df.iterrows():
         uid = str(row.get("uniprot_id", "") or "")
@@ -666,12 +789,41 @@ def annotate_long_format(
         else:
             kinase_preds.append("")
 
+        # AIUPred disorder — compute PTM/mut positions once, look up all three types
+        ptm_pos_m = SITE_RE.match(ptm_site.strip()) if ptm_site else None
+        ptm_pos = int(ptm_pos_m.group(2)) if ptm_pos_m else None
+        mut_pos_m = MUT_RE.search(clean_mut)
+        mut_pos = int(mut_pos_m.group(2)) if mut_pos_m else None
+        for t in _ATYPES:
+            if disorder_maps is not None:
+                ps = disorder_maps[t].get(uid, {})
+                ptm_disorder[t].append(f"{ps[ptm_pos]:.3f}" if ptm_pos in ps else "")
+                mut_disorder[t].append(f"{ps[mut_pos]:.3f}" if mut_pos in ps else "")
+            else:
+                ptm_disorder[t].append("")
+                mut_disorder[t].append("")
+
     df["polyphen_score"] = pp_scores
     df["polyphen_class"] = pp_classes
     df["1433_predicted"] = pred_1433
     df["1433_predicted_consensus"] = consensus_1433
     df["1433_confirmed"] = confirmed_1433
     df["kinase_predictions"] = kinase_preds
+    for t in _ATYPES:
+        df[f"ptm_aiupred_{t}"] = ptm_disorder[t]
+        df[f"mut_aiupred_{t}"] = mut_disorder[t]
+    df["ptm_is_disordered"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in ptm_disorder["general"]
+    ]
+    df["ptm_is_binding"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in ptm_disorder["binding"]
+    ]
+    df["mut_is_disordered"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["general"]
+    ]
+    df["mut_is_binding"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["binding"]
+    ]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -713,6 +865,24 @@ def main() -> None:
     pp_cache = run_polyphen_phase(df)
     seq_maps, kin_cache = run_kinase_phase(df)
 
+    disorder_maps = run_aiupred_phase(df)
+    for atype in ("general", "binding"):
+        col_vals = []
+        for _, row in df.iterrows():
+            uid = str(row.get("UniProt", "") or "")
+            ptm_site = str(row.get("ptm_site", "") or "")
+            m = SITE_RE.match(ptm_site.strip()) if ptm_site else None
+            pos = int(m.group(2)) if m else None
+            ps = disorder_maps[atype].get(uid, {})
+            col_vals.append(f"{ps[pos]:.3f}" if pos in ps else "")
+        df[f"ptm_aiupred_{atype}"] = col_vals
+    df["ptm_is_disordered"] = df["ptm_aiupred_general"].apply(
+        lambda v: "yes" if v and float(v) > 0.5 else "no"
+    )
+    df["ptm_is_binding"] = df["ptm_aiupred_binding"].apply(
+        lambda v: "yes" if v and float(v) > 0.5 else "no"
+    )
+
     if args.pp_exclude:
         df = apply_polyphen_filter(df, args.pp_exclude)
 
@@ -726,7 +896,10 @@ def main() -> None:
             df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
                                   keep_default_na=False)
             print(f"{len(df_long)} rows")
-            annotate_long_format(df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache)
+            annotate_long_format(
+                df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache,
+                disorder_maps,
+            )
             if args.pp_exclude:
                 before = len(df_long)
                 df_long = df_long[
