@@ -137,8 +137,9 @@ def annotate_confirmed(uid: str, ptm_site: str,
     return ("Yes", pmid) if pmid else ("", "")
 
 
-def run_1433_phase(df: pd.DataFrame) -> None:
-    """Phase 1: fetch 14-3-3 predictions and confirmed sites, add columns to df."""
+def run_1433_phase(df: pd.DataFrame) -> tuple[dict, dict]:
+    """Phase 1: fetch 14-3-3 predictions and confirmed sites, add columns to df.
+    Returns (score_maps, confirmed_sites) for use in long-format annotation."""
     print("\n── Phase 1: 14-3-3 binding-site predictions ──")
 
     interactors_dir = input_dir(PROJECT_ROOT, INTERACTORS_1433_INPUT_DIR)
@@ -191,6 +192,7 @@ def run_1433_phase(df: pd.DataFrame) -> None:
     predicted = sum(1 for b in binding_sites if b == "Yes")
     n_confirmed = sum(1 for c in confirmed_col if c == "Yes")
     print(f"  {predicted} predicted binding sites, {n_confirmed} experimentally confirmed")
+    return score_maps, confirmed_sites
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -202,6 +204,10 @@ _PP_API_URL = "https://myvariant.info/v1/query"
 _PP_MAX_WORKERS = 30
 _pp_session = requests.Session()
 _PP_SEVERITY = {"D": 2, "P": 1, "B": 0}
+_PP_CLASS = {"D": "probably_damaging", "P": "possibly_damaging", "B": "benign"}
+_PP_CODE_MAP = {"benign": "B", "possibly_damaging": "P", "probably_damaging": "D"}
+_PP_TAG_RE = re.compile(r"\(PP:([DPB]),")
+_MUT_POS_RE = re.compile(r"[A-Z](\d+)[A-Z*]")
 
 _MUTATION_COLS = ["mutations_within_5_positions", "mutations_more_than_5_positions"]
 _ENTRY_RE = re.compile(r"^([A-Z]\d+[A-Z*])((?:\([^)]+\))*)(-.+)$")
@@ -301,8 +307,8 @@ def annotate_mutation_string(
     return ", ".join(parts)
 
 
-def run_polyphen_phase(df: pd.DataFrame) -> None:
-    """Phase 2: fetch PolyPhen-2 scores and tag mutation strings."""
+def run_polyphen_phase(df: pd.DataFrame) -> dict:
+    """Phase 2: fetch PolyPhen-2 scores and tag mutation strings. Returns the full cache."""
     print("\n── Phase 2: PolyPhen-2 pathogenicity scores ──")
 
     cache = _pp_load_cache()
@@ -358,6 +364,7 @@ def run_polyphen_phase(df: pd.DataFrame) -> None:
         df[col] = new_values
 
     print(f"  Tagged {tagged} mutation entries with PolyPhen-2 predictions")
+    return cache
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -421,8 +428,9 @@ def predict_kinases(window: str) -> str:
     return "; ".join(parts)
 
 
-def run_kinase_phase(df: pd.DataFrame) -> None:
-    """Phase 3: predict upstream kinases for phosphorylation sites using CIF sequences."""
+def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
+    """Phase 3: predict upstream kinases for phosphorylation sites using CIF sequences.
+    Returns (seq_maps, kin_cache) for use in long-format annotation."""
     print("\n── Phase 3: Kinase predictions ──")
 
     unique_uniprots = df["UniProt"].unique().tolist()
@@ -501,6 +509,169 @@ def run_kinase_phase(df: pd.DataFrame) -> None:
     df["kinase_predictions"] = predictions
     print(f"  Annotated {annotated}/{len(df)} rows "
           f"({cache_hits} cached, {new_predictions} newly predicted)")
+    return seq_maps, cache
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PolyPhen class filter
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _filter_mut_str(mutation_str: str, exclude_codes: set[str]) -> str:
+    """Remove mutation entries whose PP code is in exclude_codes; keep unscored entries."""
+    if not mutation_str or not exclude_codes:
+        return mutation_str
+    kept = []
+    for entry in mutation_str.split(", "):
+        entry = entry.strip()
+        if not entry:
+            continue
+        m = _PP_TAG_RE.search(entry)
+        code = m.group(1) if m else ""
+        if code and code in exclude_codes:
+            continue
+        kept.append(entry)
+    return ", ".join(kept)
+
+
+def _positions_from_str(mutation_str: str) -> list[int]:
+    """Return unique residue positions from a formatted mutation string, in order."""
+    seen: set[int] = set()
+    result = []
+    for entry in (mutation_str or "").split(", "):
+        m = _MUT_POS_RE.search(entry)
+        if m:
+            pos = int(m.group(1))
+            if pos not in seen:
+                seen.add(pos)
+                result.append(pos)
+    return result
+
+
+def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.DataFrame:
+    """Remove mutations of excluded PP classes from the wide-format proximity DB.
+
+    Filters mutation strings, recomputes count and distance columns, and drops PTM
+    rows where no qualifying mutations remain.  *_total_patient_count columns are
+    left unchanged (they reflect pre-filter totals and cannot be recomputed here).
+    """
+    exclude_codes = {_PP_CODE_MAP[c] for c in exclude_classes if c in _PP_CODE_MAP}
+    if not exclude_codes:
+        return df
+
+    print(f"\nApplying PolyPhen filter — excluding: {', '.join(exclude_classes)}")
+    print("  Note: *_total_patient_count columns retain pre-filter totals")
+
+    within_col = "mutations_within_5_positions"
+    beyond_col = "mutations_more_than_5_positions"
+    disrupting_col = "confirmed_disrupting_mutations"
+
+    for col in (within_col, beyond_col, disrupting_col):
+        if col in df.columns:
+            df[col] = df[col].fillna("").apply(
+                lambda s: _filter_mut_str(s, exclude_codes)
+            )
+
+    def _count(s: str) -> int:
+        return len([e for e in s.split(", ") if e.strip()]) if s else 0
+
+    def _uniq_pos(s: str) -> int:
+        return len(set(_positions_from_str(s)))
+
+    for prefix, col in [("within_5", within_col), ("more_than_5", beyond_col)]:
+        df[f"mutation_count_{prefix}_positions"] = df[col].apply(_count)
+        df[f"unique_mutation_position_count_{prefix}_positions"] = df[col].apply(_uniq_pos)
+
+    # Recompute morethan5_linear_distance from filtered beyond-5 string
+    if "morethan5_linear_distance" in df.columns and "ptm_site" in df.columns:
+        def _linear_dists(row) -> str:
+            ptm_m = re.search(r"(\d+)", str(row.get("ptm_site", "")))
+            if not ptm_m:
+                return ""
+            ptm_pos = int(ptm_m.group(1))
+            return ",".join(str(abs(p - ptm_pos)) for p in _positions_from_str(row[beyond_col]))
+        df["morethan5_linear_distance"] = df.apply(_linear_dists, axis=1)
+
+    # Recompute mutation_at_ptm_site from filtered within-5 string
+    if "mutation_at_ptm_site" in df.columns and "ptm_site" in df.columns:
+        def _at_ptm(row) -> str:
+            ptm_m = re.search(r"(\d+)", str(row.get("ptm_site", "")))
+            if not ptm_m:
+                return "no"
+            return "yes" if int(ptm_m.group(1)) in _positions_from_str(row[within_col]) else "no"
+        df["mutation_at_ptm_site"] = df.apply(_at_ptm, axis=1)
+
+    before = len(df)
+    df = df[
+        (df[within_col].fillna("").str.len() > 0) |
+        (df[beyond_col].fillna("").str.len() > 0)
+    ].reset_index(drop=True)
+    removed = before - len(df)
+    print(f"  Removed {removed} PTM rows with no qualifying mutations; "
+          f"{len(df)} rows remaining")
+    return df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Long-format annotation
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def annotate_long_format(
+    df: pd.DataFrame,
+    score_maps: dict,
+    confirmed_sites: dict,
+    pp_cache: dict,
+    seq_maps: dict,
+    kin_cache: dict,
+) -> None:
+    """Fill annotation columns in the long-format PTM/mutation table in-place."""
+    pred_1433, consensus_1433, confirmed_1433 = [], [], []
+    pp_scores, pp_classes = [], []
+    kinase_preds = []
+
+    for _, row in df.iterrows():
+        uid = str(row.get("uniprot_id", "") or "")
+        ptm_site = str(row.get("ptm_position", "") or "")
+        ptm_type = str(row.get("ptm_type", "") or "")
+        gene = str(row.get("gene", "") or "")
+        mutation = str(row.get("mutation", "") or "")
+        clean_mut = mutation.replace("(isoform?)", "")
+
+        # 14-3-3 — only applicable to S/T residues
+        m_site = SITE_RE.match(ptm_site.strip()) if ptm_site else None
+        is_st = bool(m_site and m_site.group(1) in ("S", "T"))
+        if is_st:
+            binding, score = annotate_1433_row(ptm_site, score_maps.get(uid, {}))
+            pred_1433.append(binding.lower() if binding else "no")
+            consensus_1433.append(score)
+            conf, _ = annotate_confirmed(uid, ptm_site, confirmed_sites)
+            confirmed_1433.append("yes" if conf == "Yes" else "no")
+        else:
+            pred_1433.append("")
+            consensus_1433.append("")
+            confirmed_1433.append("")
+
+        # PolyPhen-2
+        pred, pp_score = pp_cache.get((gene, clean_mut), ("", ""))
+        pp_scores.append(pp_score)
+        pp_classes.append(_PP_CLASS.get(pred, ""))
+
+        # Kinase Library — phosphorylation sites only
+        if "phosphorylation" in ptm_type.lower() and m_site:
+            pos = int(m_site.group(2))
+            pos_to_aa = seq_maps.get(uid)
+            window = build_kinase_window(pos_to_aa, pos) if pos_to_aa else None
+            kinase_preds.append(kin_cache.get(window, "") if window else "")
+        else:
+            kinase_preds.append("")
+
+    df["polyphen_score"] = pp_scores
+    df["polyphen_class"] = pp_classes
+    df["1433_predicted"] = pred_1433
+    df["1433_predicted_consensus"] = consensus_1433
+    df["1433_confirmed"] = confirmed_1433
+    df["kinase_predictions"] = kinase_preds
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -516,20 +687,56 @@ def main() -> None:
         default=str(DEFAULT_OUTPUT_DIR),
         help="Directory containing the proximity DB (default: Output/)",
     )
+    parser.add_argument(
+        "--long-format",
+        action="store_true",
+        help="Also annotate the long-format TSV if it exists",
+    )
+    parser.add_argument(
+        "--pp-exclude",
+        nargs="+",
+        choices=["benign", "possibly_damaging", "probably_damaging"],
+        default=[],
+        metavar="CLASS",
+        help="Exclude mutations with these PolyPhen-2 classes from the output",
+    )
     args = parser.parse_args()
 
-    proximity_db = Path(args.output_dir) / "ptm_mutation_proximity_db.tsv"
+    output_dir = Path(args.output_dir)
+    proximity_db = output_dir / "ptm_mutation_proximity_db.tsv"
     print(f"Reading proximity DB: {proximity_db}")
     df = pd.read_csv(proximity_db, sep="\t", encoding="utf-16", dtype=str,
                      keep_default_na=False)
     print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
 
-    run_1433_phase(df)
-    run_polyphen_phase(df)
-    run_kinase_phase(df)
+    score_maps, confirmed_sites = run_1433_phase(df)
+    pp_cache = run_polyphen_phase(df)
+    seq_maps, kin_cache = run_kinase_phase(df)
+
+    if args.pp_exclude:
+        df = apply_polyphen_filter(df, args.pp_exclude)
 
     df.to_csv(proximity_db, sep="\t", index=False, encoding="utf-16")
     print(f"\nUpdated proximity DB written to: {proximity_db}")
+
+    if args.long_format:
+        long_db = output_dir / "ptm_mutation_proximity_long.tsv"
+        if long_db.exists():
+            print(f"\nAnnotating long-format DB: {long_db}")
+            df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
+                                  keep_default_na=False)
+            print(f"{len(df_long)} rows")
+            annotate_long_format(df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache)
+            if args.pp_exclude:
+                before = len(df_long)
+                df_long = df_long[
+                    ~df_long["polyphen_class"].isin(args.pp_exclude)
+                ].reset_index(drop=True)
+                print(f"  Long format: removed {before - len(df_long)} rows by PolyPhen filter")
+            df_long.to_csv(long_db, sep="\t", index=False, encoding="utf-16")
+            print(f"Updated long-format DB written to: {long_db}")
+        else:
+            print(f"\nNo long-format DB found at {long_db} — skipping")
 
 
 if __name__ == "__main__":

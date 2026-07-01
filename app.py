@@ -58,6 +58,44 @@ _GREEN = "#2ecc71"
 _RED = "#e74c3c"
 _YELLOW = "#f1c40f"
 
+# Results-tab helpers
+_MUT_ENTRY_RE = re.compile(
+    r"([A-Z]\d+[A-Z*](?:\(isoform\?\))?)"
+    r"(?:\(PP:([DPB]),([0-9.]*)\))?"
+    r"-([0-9.]+)Å"
+    r"(?:\(PAE:([0-9.]+)\))?"
+)
+_PP_LABEL = {"D": "probably_damaging", "P": "possibly_damaging", "B": "benign"}
+
+_PTM_TV_COLS = [
+    ("#",          "#col",   32),
+    ("Gene",       "gene",   58),
+    ("PTM Site",   "site",   65),
+    ("Type",       "type",  110),
+    ("≤5 pos",     "near",   52),
+    (">5 pos",     "far",    52),
+    ("Patients",   "pts",    65),
+    ("COSMIC",     "cosmic", 65),
+    ("At PTM",     "atptm",  52),
+    ("Disrupting", "disrupt",68),
+    ("14-3-3",     "pred14", 58),
+    ("Conf.",      "conf14", 52),
+    ("Diseases",   "dis",   200),
+]
+
+_MUT_TV_COLS = [
+    ("#",          "#col",   32),
+    ("Mutation",   "mut",    80),
+    ("Seq dist",   "seqd",   62),
+    ("Dist (Å)",   "dist",   62),
+    ("PP Class",   "ppc",   115),
+    ("PP Score",   "pps",    62),
+    ("Mut pLDDT",  "mpld",   72),
+    ("PAE",        "pae",    48),
+    ("Patients",   "pts",    62),
+    ("Disrupting", "dis",    68),
+]
+
 
 def _fmt_time(seconds: float) -> str:
     s = int(seconds)
@@ -102,8 +140,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Mutation Cluster Proximity Pipeline")
-        self.geometry("960x820")
-        self.minsize(760, 560)
+        self.geometry("1100x820")
+        self.minsize(900, 560)
 
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._running = False
@@ -129,9 +167,11 @@ class App(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # Tab view
-        self._tabview = ctk.CTkTabview(self)
+        self._tabview = ctk.CTkTabview(self, command=self._on_tab_change)
         self._tabview.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
         pipeline_tab = self._tabview.add("Pipeline")
+        results_tab = self._tabview.add("Results")
+        viz_tab = self._tabview.add("Visualization")
         help_tab = self._tabview.add("Help / Documentation")
 
         # ── Pipeline tab ──
@@ -238,13 +278,13 @@ class App(ctk.CTk):
             settings_frame, text="Settings:", font=ctk.CTkFont(weight="bold"),
         ).pack(side="left", padx=(12, 8), pady=8)
 
-        ctk.CTkLabel(settings_frame, text="Distance cutoff (A):").pack(side="left", padx=(8, 4), pady=8)
+        ctk.CTkLabel(settings_frame, text="Cutoff (Å):").pack(side="left", padx=(8, 4), pady=8)
         self._cutoff_var = ctk.StringVar(value="10.0")
         ctk.CTkEntry(
             settings_frame, textvariable=self._cutoff_var, width=60,
         ).pack(side="left", padx=(0, 16), pady=8)
 
-        ctk.CTkLabel(settings_frame, text="Min COSMIC samples:").pack(side="left", padx=(8, 4), pady=8)
+        ctk.CTkLabel(settings_frame, text="Min samples:").pack(side="left", padx=(8, 4), pady=8)
         self._min_samples_var = ctk.StringVar(value="3")
         ctk.CTkEntry(
             settings_frame, textvariable=self._min_samples_var, width=60,
@@ -264,15 +304,55 @@ class App(ctk.CTk):
             placeholder_text="off",
         ).pack(side="left", padx=(0, 12), pady=8)
 
+        # Output options + PolyPhen filter (combined row)
+        pp_frame = ctk.CTkFrame(p)
+        pp_frame.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
+
+        self._long_format_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            pp_frame, text="Long format output",
+            variable=self._long_format_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=(12, 4), pady=8)
+
+        ctk.CTkLabel(
+            pp_frame, text="|", text_color="gray50",
+        ).pack(side="left", padx=(8, 4), pady=8)
+
+        ctk.CTkLabel(
+            pp_frame, text="PolyPhen filter:", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(4, 4), pady=8)
+
+        self._pp_benign_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            pp_frame, text="Benign",
+            variable=self._pp_benign_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=8, pady=8)
+
+        self._pp_possibly_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            pp_frame, text="Possibly damaging",
+            variable=self._pp_possibly_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=8, pady=8)
+
+        self._pp_probably_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            pp_frame, text="Probably damaging",
+            variable=self._pp_probably_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=(8, 12), pady=8)
+
         # Steps panel
         self._steps_outer = ctk.CTkFrame(p)
-        self._steps_outer.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
+        self._steps_outer.grid(row=6, column=0, padx=24, pady=4, sticky="ew")
         self._steps_outer.grid_columnconfigure(1, weight=1)
         self._rebuild_step_rows()
 
         # Buttons
         btn_frame = ctk.CTkFrame(p, fg_color="transparent")
-        btn_frame.grid(row=6, column=0, padx=24, pady=8, sticky="ew")
+        btn_frame.grid(row=7, column=0, padx=24, pady=8, sticky="ew")
 
         self._run_btn = ctk.CTkButton(
             btn_frame,
@@ -339,7 +419,7 @@ class App(ctk.CTk):
             hover_color="gray40",
             command=self._toggle_log,
         )
-        self._log_toggle.grid(row=7, column=0, padx=24, pady=(8, 0), sticky="w")
+        self._log_toggle.grid(row=8, column=0, padx=24, pady=(8, 0), sticky="w")
 
         self._log = ctk.CTkTextbox(
             p,
@@ -348,6 +428,32 @@ class App(ctk.CTk):
             state="disabled",
             height=300,
         )
+
+        # Hide the scrollbar when content fits; show it only when scrolling is needed
+        def _update_scrollbar(*_):
+            try:
+                canvas = scroll._parent_canvas
+                sr = canvas.cget("scrollregion")
+                if not sr:
+                    scroll._scrollbar.grid_remove()
+                    return
+                content_h = int(float(sr.split()[3]))
+                if content_h > canvas.winfo_height():
+                    scroll._scrollbar.grid()
+                else:
+                    scroll._scrollbar.grid_remove()
+            except Exception:
+                pass
+
+        scroll.bind("<Configure>", _update_scrollbar)
+        pipeline_tab.bind("<Configure>", _update_scrollbar)
+        self.after(200, _update_scrollbar)
+
+        # ── Results tab ──
+        self._build_results_tab(results_tab)
+
+        # ── Visualization tab ──
+        self._build_viz_tab(viz_tab)
 
         # ── Help / Documentation tab ──
         self._build_help_tab(help_tab)
@@ -596,7 +702,7 @@ class App(ctk.CTk):
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log.grid(row=8, column=0, padx=24, pady=(4, 20), sticky="nsew")
+            self._log.grid(row=9, column=0, padx=24, pady=(4, 20), sticky="nsew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 
@@ -617,6 +723,7 @@ class App(ctk.CTk):
 
     _DEFAULT_OUTPUT_FILES = [
         "ptm_mutation_proximity_db.tsv",
+        "ptm_mutation_proximity_long.tsv",
         "mutation_cluster_db.tsv",
     ]
 
@@ -876,6 +983,14 @@ class App(ctk.CTk):
         min_samples = self._min_samples_var.get().strip() or "3"
         min_plddt = self._min_plddt_var.get().strip()
         max_pae = self._max_pae_var.get().strip()
+        long_format = self._long_format_var.get()
+        pp_exclude = []
+        if not self._pp_benign_var.get():
+            pp_exclude.append("benign")
+        if not self._pp_possibly_var.get():
+            pp_exclude.append("possibly_damaging")
+        if not self._pp_probably_var.get():
+            pp_exclude.append("probably_damaging")
 
         cmds = [
             [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode,
@@ -893,11 +1008,14 @@ class App(ctk.CTk):
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
              "--output-dir", str(self._output_dir), "--cutoff", cutoff,
              *(["--min-plddt", min_plddt] if min_plddt else []),
-             *(["--max-pae", max_pae] if max_pae else [])],
+             *(["--max-pae", max_pae] if max_pae else []),
+             *(["--long-format"] if long_format else [])],
         ]
         if mode == "ptm-proximity":
             cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),
-                         "--output-dir", str(self._output_dir)])
+                         "--output-dir", str(self._output_dir),
+                         *(["--long-format"] if long_format else []),
+                         *(["--pp-exclude"] + pp_exclude if pp_exclude else [])])
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
         run_type = _detect_run_type()
@@ -1319,6 +1437,298 @@ class App(ctk.CTk):
             self._q("log", "Results appended successfully.")
         else:
             self._q("log", "Failed to append results.")
+
+    # ── Tab change handler ───────────────────────────────────────────────────
+
+    def _on_tab_change(self, tab_name: str) -> None:
+        if tab_name == "Results":
+            self._load_results()
+
+    # ── Results tab ──────────────────────────────────────────────────────────
+
+    def _setup_treeview_style(self) -> None:
+        import tkinter.ttk as ttk
+        style = ttk.Style()
+        style.theme_use("default")
+        bg, fg = "#2b2b2b", "#dcdcdc"
+        heading_bg = "#3a3a3a"
+        for name in ("Results.Treeview",):
+            style.configure(name,
+                background=bg, foreground=fg, rowheight=24,
+                fieldbackground=bg, borderwidth=0, relief="flat",
+                font=("Segoe UI", 10),
+            )
+            style.configure(f"{name}.Heading",
+                background=heading_bg, foreground=fg,
+                relief="flat", borderwidth=1,
+                font=("Segoe UI", 10, "bold"),
+            )
+            style.map(name,
+                background=[("selected", _BLUE)],
+                foreground=[("selected", "white")],
+            )
+            style.map(f"{name}.Heading",
+                background=[("active", "#4a4a4a")],
+            )
+
+    def _make_treeview(self, parent, col_defs: list):
+        import tkinter as tk
+        import tkinter.ttk as ttk
+
+        frame = tk.Frame(parent, bg="#2b2b2b")
+        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        tv = ttk.Treeview(frame, style="Results.Treeview", show="headings",
+                           selectmode="browse")
+        col_ids = [c[1] for c in col_defs]
+        tv["columns"] = col_ids
+
+        numeric_cols = {"#col", "near", "far", "pts", "cosmic", "seqd", "dist", "pps", "pae", "mpld"}
+        for display, col_id, width in col_defs:
+            anchor = "e" if col_id in numeric_cols else "w"
+            tv.heading(col_id, text=display,
+                       command=lambda c=col_id: self._sort_tv(tv, c, False))
+            stretch = col_id == col_ids[-1]
+            tv.column(col_id, width=width, minwidth=30, stretch=stretch, anchor=anchor)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tv.xview)
+        tv.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tv.tag_configure("odd",  background="#2b2b2b")
+        tv.tag_configure("even", background="#313131")
+
+        tv.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        return tv
+
+    def _sort_tv(self, tv, col: str, reverse: bool) -> None:
+        def _key(v: str):
+            try:
+                return (0, float(v))
+            except (ValueError, TypeError):
+                return (1, str(v).lower())
+
+        rows = [(tv.set(k, col), k) for k in tv.get_children("")]
+        rows.sort(key=lambda x: _key(x[0]), reverse=reverse)
+        for idx, (_, k) in enumerate(rows):
+            tv.move(k, "", idx)
+        if "#col" in tv["columns"]:
+            for idx, k in enumerate(tv.get_children(""), 1):
+                tv.set(k, "#col", idx)
+        tv.heading(col, command=lambda: self._sort_tv(tv, col, not reverse))
+
+    def _build_results_tab(self, tab) -> None:
+        import tkinter as tk
+
+        self._results_df_wide = None
+        self._results_df_long = None
+        self._setup_treeview_style()
+
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+
+        outer = ctk.CTkFrame(tab, fg_color="transparent")
+        outer.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=3)
+        outer.grid_rowconfigure(3, weight=2)
+
+        # ── Top panel header ──
+        top_header = ctk.CTkFrame(outer, fg_color="transparent")
+        top_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        ctk.CTkLabel(top_header, text="PTM Sites",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
+        self._results_status = ctk.CTkLabel(top_header, text="",
+                                             text_color="gray60",
+                                             font=ctk.CTkFont(size=11))
+        self._results_status.pack(side=tk.LEFT, padx=(12, 0))
+        ctk.CTkButton(top_header, text="↺  Refresh", width=90, height=28,
+                       font=ctk.CTkFont(size=12),
+                       command=self._load_results).pack(side=tk.RIGHT)
+
+        # ── PTM site treeview ──
+        top_frame = ctk.CTkFrame(outer)
+        top_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        top_frame.grid_rowconfigure(0, weight=1)
+        top_frame.grid_columnconfigure(0, weight=1)
+        self._ptm_tv = self._make_treeview(top_frame, _PTM_TV_COLS)
+        self._ptm_tv.bind("<<TreeviewSelect>>", self._on_ptm_select)
+
+        # ── Detail panel header ──
+        ctk.CTkLabel(outer, text="Mutation Details",
+                     font=ctk.CTkFont(size=14, weight="bold"),
+                     anchor="w").grid(row=2, column=0, sticky="ew",
+                                      padx=16, pady=(4, 2))
+
+        # ── Mutation detail treeview ──
+        bot_frame = ctk.CTkFrame(outer)
+        bot_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        bot_frame.grid_rowconfigure(0, weight=1)
+        bot_frame.grid_columnconfigure(0, weight=1)
+        self._mut_tv = self._make_treeview(bot_frame, _MUT_TV_COLS)
+
+    def _build_viz_tab(self, tab) -> None:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        frame = ctk.CTkFrame(tab, fg_color="transparent")
+        frame.place(relx=0.5, rely=0.45, anchor="center")
+        ctk.CTkLabel(frame, text="Visualization",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(0, 10))
+        ctk.CTkLabel(frame,
+                     text="Lollipop plots and other visualizations will appear here.",
+                     text_color="gray60",
+                     font=ctk.CTkFont(size=14)).pack()
+
+    def _load_results(self) -> None:
+        import pandas as pd
+
+        wide_path = self._output_dir / "ptm_mutation_proximity_db.tsv"
+        long_path = self._output_dir / "ptm_mutation_proximity_long.tsv"
+
+        if not wide_path.exists():
+            self._results_status.configure(
+                text=f"No output found in {self._output_dir.name}/",
+                text_color=_RED,
+            )
+            self._ptm_tv.delete(*self._ptm_tv.get_children())
+            self._mut_tv.delete(*self._mut_tv.get_children())
+            self._results_df_wide = None
+            self._results_df_long = None
+            return
+
+        try:
+            df_wide = pd.read_csv(wide_path, sep="\t", encoding="utf-16",
+                                   dtype=str, keep_default_na=False)
+        except Exception as exc:
+            self._results_status.configure(text=f"Error loading file: {exc}",
+                                            text_color=_RED)
+            return
+
+        df_long = None
+        if long_path.exists():
+            try:
+                df_long = pd.read_csv(long_path, sep="\t", encoding="utf-16",
+                                       dtype=str, keep_default_na=False)
+            except Exception:
+                pass
+
+        self._results_df_wide = df_wide
+        self._results_df_long = df_long
+
+        n_sites = len(df_wide)
+        n_proteins = df_wide["UniProt"].nunique() if "UniProt" in df_wide.columns else "?"
+        long_note = (" · long format available" if df_long is not None
+                     else " · enable long format for per-mutation detail")
+        self._results_status.configure(
+            text=f"{n_sites} PTM sites · {n_proteins} proteins{long_note}",
+            text_color="gray60",
+        )
+        self._populate_ptm_tv(df_wide)
+        self._mut_tv.delete(*self._mut_tv.get_children())
+
+    def _populate_ptm_tv(self, df) -> None:
+        tv = self._ptm_tv
+        tv.delete(*tv.get_children())
+        for i, (_, row) in enumerate(df.iterrows(), 1):
+            try:
+                near_pts = int(float(row.get("nearby_muts_total_patient_count", "") or "0"))
+                far_pts  = int(float(row.get("distant_muts_total_patient_count", "") or "0"))
+                total_pts: int | str = near_pts + far_pts
+            except ValueError:
+                total_pts = ""
+            disrupt  = "Yes" if row.get("confirmed_disrupting_mutations", "").strip() else ""
+            diseases = row.get("ptm_diseases", "")
+            if len(diseases) > 50:
+                diseases = diseases[:47] + "…"
+            tv.insert("", "end", iid=str(i), values=(
+                i,
+                row.get("gene", ""),
+                row.get("ptm_site", ""),
+                row.get("ptm_type", ""),
+                row.get("mutation_count_within_5_positions", ""),
+                row.get("mutation_count_more_than_5_positions", ""),
+                total_pts,
+                row.get("total_cosmic_missense_patients", ""),
+                row.get("mutation_at_ptm_site", ""),
+                disrupt,
+                row.get("1433pred_binding_site", ""),
+                row.get("1433_confirmed_site", ""),
+                diseases,
+            ), tags=("odd" if i % 2 else "even",))
+
+    def _on_ptm_select(self, *_) -> None:
+        sel = self._ptm_tv.selection()
+        if not sel or self._results_df_wide is None:
+            return
+        row = self._results_df_wide.iloc[int(sel[0]) - 1]
+        if self._results_df_long is not None:
+            uid  = row.get("UniProt", "")
+            site = row.get("ptm_site", "")
+            mask = (
+                (self._results_df_long.get("uniprot_id", "") == uid) &
+                (self._results_df_long.get("ptm_position", "") == site)
+            )
+            self._populate_mut_tv_long(self._results_df_long[mask])
+        else:
+            self._populate_mut_tv_wide(row)
+
+    def _populate_mut_tv_long(self, df) -> None:
+        tv = self._mut_tv
+        tv.delete(*tv.get_children())
+        for i, (_, r) in enumerate(df.iterrows(), 1):
+            tv.insert("", "end", iid=str(i), values=(
+                i,
+                r.get("mutation", ""),
+                r.get("sequence_distance", ""),
+                r.get("distance_angstrom", ""),
+                r.get("polyphen_class", ""),
+                r.get("polyphen_score", ""),
+                r.get("mutation_plddt", ""),
+                r.get("pair_pae", ""),
+                r.get("patient_count", ""),
+                r.get("confirmed_disrupting_mutation", ""),
+            ), tags=("odd" if i % 2 else "even",))
+
+    def _populate_mut_tv_wide(self, row) -> None:
+        import re as _re
+        tv = self._mut_tv
+        tv.delete(*tv.get_children())
+        ptm_m = _re.search(r"(\d+)", str(row.get("ptm_site", "")))
+        ptm_pos = int(ptm_m.group(1)) if ptm_m else None
+        i = 0
+        for col_key, _ in [
+            ("mutations_within_5_positions",  "≤5 pos"),
+            ("mutations_more_than_5_positions", ">5 pos"),
+        ]:
+            for entry in (row.get(col_key, "") or "").split(", "):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                m = _MUT_ENTRY_RE.match(entry)
+                if not m:
+                    continue
+                i += 1
+                pp_code = m.group(2) or ""
+                mut_m   = _re.search(r"\d+", m.group(1))
+                mut_pos = int(mut_m.group()) if mut_m else None
+                seq_d   = abs(mut_pos - ptm_pos) if (mut_pos is not None and ptm_pos is not None) else ""
+                tv.insert("", "end", iid=str(i), values=(
+                    i,
+                    m.group(1),
+                    seq_d,
+                    m.group(4),
+                    _PP_LABEL.get(pp_code, ""),
+                    m.group(3) or "",
+                    "",
+                    m.group(5) or "",
+                    "",
+                    "",
+                ), tags=("odd" if i % 2 else "even",))
 
     # ── Output folder ────────────────────────────────────────────────────────
 
