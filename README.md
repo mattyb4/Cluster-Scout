@@ -90,14 +90,6 @@ The main output for PTM-proximity mode is **`Output/ptm_mutation_proximity_db.ts
 
 The main output for mutation-clustering mode is **`Output/mutation_cluster_db.tsv`** — a table of recurrent mutations and other mutations clustering within 10 Å of them in 3D space.
 
-### Generate Figure 3
-
-```bash
-uv run scripts/makeFigure3.py
-```
-
-Output figures are saved to the **`Output/`** directory as `.png` files.
-
 ---
 ## Interpereting the Data
 
