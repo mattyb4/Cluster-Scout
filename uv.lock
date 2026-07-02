@@ -11,45 +11,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "bio465capstone"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "biopython" },
-    { name = "biotite" },
-    { name = "customtkinter" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "openpyxl" },
-    { name = "pandas" },
-    { name = "psutil" },
-    { name = "requests" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "biopython", specifier = ">=1.84" },
-    { name = "biotite", specifier = ">=1.6.0" },
-    { name = "customtkinter", specifier = ">=5.2.2" },
-    { name = "matplotlib", specifier = ">=3.9.0" },
-    { name = "numpy", specifier = ">=2.4.3" },
-    { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "pandas", specifier = ">=3.0.1" },
-    { name = "psutil", specifier = ">=7.2.2" },
-    { name = "requests", specifier = ">=2.32.5" },
-    { name = "tqdm", specifier = ">=4.67.3" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.3" }]
-
-[[package]]
 name = "biopython"
 version = "1.87"
 source = { registry = "https://pypi.org/simple" }
@@ -242,6 +203,45 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/23/06/28b29fba521a37a8932c6a84192175c34d49f84a6d4773fa63d05f9aff22/charset_normalizer-3.4.6-cp314-cp314t-win_arm64.whl", hash = "sha256:47955475ac79cc504ef2704b192364e51d0d473ad452caedd0002605f780101c", size = 148523, upload-time = "2026-03-15T18:52:29.956Z" },
     { url = "https://files.pythonhosted.org/packages/2a/68/687187c7e26cb24ccbd88e5069f5ef00eba804d36dde11d99aad0838ab45/charset_normalizer-3.4.6-py3-none-any.whl", hash = "sha256:947cf925bc916d90adba35a64c82aace04fa39b46b52d4630ece166655905a69", size = 61455, upload-time = "2026-03-15T18:53:23.833Z" },
 ]
+
+[[package]]
+name = "cluster-scout"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "biopython" },
+    { name = "biotite" },
+    { name = "customtkinter" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "openpyxl" },
+    { name = "pandas" },
+    { name = "psutil" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "biopython", specifier = ">=1.84" },
+    { name = "biotite", specifier = ">=1.6.0" },
+    { name = "customtkinter", specifier = ">=5.2.2" },
+    { name = "matplotlib", specifier = ">=3.9.0" },
+    { name = "numpy", specifier = ">=2.4.3" },
+    { name = "openpyxl", specifier = ">=3.1.5" },
+    { name = "pandas", specifier = ">=3.0.1" },
+    { name = "psutil", specifier = ">=7.2.2" },
+    { name = "requests", specifier = ">=2.32.5" },
+    { name = "tqdm", specifier = ">=4.67.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "colorama"
