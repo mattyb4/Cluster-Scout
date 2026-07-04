@@ -107,7 +107,7 @@ uv run main.py --mode mutation-clustering
 
 The main output for PTM-proximity mode is **`Output/ptm_mutation_proximity_db.tsv`** — a table of PTM sites, their nearby COSMIC mutations, 3D distances, 14-3-3 binding predictions, kinase predictions, disorder scores, and PolyPhen-2 pathogenicity scores.
 
-Checking **"Long format output"** on the Pipeline tab additionally produces **`Output/ptm_mutation_proximity_long.tsv`**, with one row per PTM/mutation pair instead of one row per PTM site. This is what powers the per-mutation detail table on the Results tab and the patient-count-aware Visualization plots — without it, those views fall back to parsing the wide-format summary columns, which don't carry per-mutation patient counts.
+PTM-proximity mode also always produces **`Output/ptm_mutation_proximity_long.tsv`**, with one row per PTM/mutation pair instead of one row per PTM site. This is what powers the per-mutation detail table on the Results tab and the patient-count-aware Visualization plots.
 
 The main output for mutation-clustering mode is **`Output/mutation_cluster_db.tsv`** — a table of recurrent mutations and other mutations clustering within 10 Å of them in 3D space.
 
@@ -205,6 +205,53 @@ uv run scripts/export_ca_coordinates.py P04637 --cosmic path/to/your/COSMIC.tsv
 ```
 
 Output files are saved to `Output/coordinates/`.
+
+## Finding the Optimal Distance Cutoff
+
+`scripts/radius_sweep.py` tests a range of distance cutoffs (default 4-20 Å) to help choose the PTM-to-mutation distance threshold used by the pipeline. For a set of genes, it computes the average number of nearby mutations per PTM site at each radius, compares against a random-placement baseline (mutations shuffled across the same protein), and detects the "elbow" of each curve — the point of diminishing returns — using `kneed`.
+
+**Basic usage** (uses a default gene panel: EGFR, TP53, VHL, CANT1, DDR2, PTPN11, LZTR1, CDK12):
+```bash
+uv run scripts/radius_sweep.py
+```
+
+**Choose specific genes:**
+```bash
+uv run scripts/radius_sweep.py --genes EGFR TP53 VHL
+```
+
+**Choose a custom radius range** (start, stop, step in Å):
+```bash
+uv run scripts/radius_sweep.py --radii 4 25 1
+```
+
+**Compare against unfiltered COSMIC mutations** (not just hotspot-filtered ones) with `--unfiltered`. This requires pipeline step 1 to have already been run, since it reads the intermediate `PTMD_TCGA_hotspots_by_protein.tsv` file, and requires CIF files for the target genes to already be downloaded.
+
+Output is written to `Output/radius_sweep.png` (a 2- or 4-panel plot depending on whether `--unfiltered` was used) and a matching `Output/radius_sweep.tsv` with the raw per-radius data. Elbow points and average optimal radius are also printed to the console.
+
+*Note: this script depends on the `kneed` package, which is not currently listed in `pyproject.toml` — install it manually (`uv pip install kneed`) before running.*
+
+## Comparing Structural Variance Across CIF Models
+
+`scripts/cif_variance.py` compares multiple AlphaFold CIF predictions of the same protein (e.g., different seeds or model versions) to assess structural confidence. It aligns the structures to an iteratively-refined average reference, then reports per-residue positional variance and pLDDT agreement, cross-referenced against PTM and mutation sites from the pipeline's intermediate data.
+
+Place two or more `.cif` files for the same protein in `data/cif_comparison/`, then run:
+```bash
+uv run scripts/cif_variance.py
+```
+
+**Options:**
+- `--input-dir` — directory containing the CIF files to compare (default: `data/cif_comparison`)
+- `--output-dir` — where results are written (default: `Output/cif_variance`)
+- `--top N` — number of top-variance residues to print (default: 10)
+- `--range START END` — restrict reported output to a residue range
+- `--align-range START END` — use only this residue range for structural alignment (defaults to `--range`); useful for excluding disordered regions from alignment while still reporting their variance
+- `--uniprot` / `--gene` — UniProt ID or gene symbol for PTM/mutation cross-referencing (auto-detected from the CIF file when possible)
+
+Output (in `Output/cif_variance/`):
+- **`variance_plot.png`** — per-residue positional variance and pLDDT (mean ± std) across structures, with PTM and mutation sites marked
+- **`variance_data.tsv`** — per-residue variance, pLDDT stats, and PTM/mutation flags
+- **`pairwise_rmsd.tsv`** — RMSD matrix between every pair of input structures
 
 ---
 

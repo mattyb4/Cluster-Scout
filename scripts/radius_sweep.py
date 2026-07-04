@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,6 +33,16 @@ MODELS_ROOT = PROJECT_ROOT / "cif_models"
 PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
 
 DEFAULT_GENES = ["EGFR", "TP53", "VHL", "CANT1", "DDR2", "PTPN11", "LZTR1", "CDK12"]
+
+
+@dataclass
+class SweepResult:
+    """Everything needed to build the sweep figure, without recomputing anything."""
+    result_df: pd.DataFrame
+    radii: list[float]
+    elbows: dict[str, float | None] = field(default_factory=dict)
+    uf_elbows: dict[str, float | None] = field(default_factory=dict)
+    has_unfiltered: bool = False
 
 
 def get_ca_coord(chain, residue_number):
@@ -85,13 +97,13 @@ def load_protein_data(gene: str, df: pd.DataFrame, chain):
 _cosmic_cache: pd.DataFrame | None = None
 
 
-def _load_cosmic_df() -> pd.DataFrame:
+def _load_cosmic_df(log_cb: Callable[[str], None] = print) -> pd.DataFrame:
     """Load and filter the raw COSMIC file once, caching it for reuse across genes."""
     global _cosmic_cache
     if _cosmic_cache is not None:
         return _cosmic_cache
     cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
-    print(f"  Loading COSMIC file: {cosmic_file.name}")
+    log_cb(f"  Loading COSMIC file: {cosmic_file.name}")
     cols = ["GENE_SYMBOL", "MUTATION_AA", "MUTATION_SOMATIC_STATUS"]
     cosmic = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
     cosmic = cosmic[cosmic["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
@@ -101,9 +113,9 @@ def _load_cosmic_df() -> pd.DataFrame:
     return cosmic
 
 
-def load_unfiltered_mutations(gene: str, chain) -> list[tuple[int, np.ndarray]]:
+def load_unfiltered_mutations(gene: str, chain, log_cb: Callable[[str], None] = print) -> list[tuple[int, np.ndarray]]:
     """Load ALL somatic missense mutation positions from raw COSMIC for a gene."""
-    cosmic = _load_cosmic_df()
+    cosmic = _load_cosmic_df(log_cb)
     gene_cosmic = cosmic[cosmic["GENE_SYMBOL"] == gene]
 
     positions = set()
@@ -168,76 +180,94 @@ def random_baseline(ptm_coords, all_ca_coords, n_mutations, radii, n_permutation
     return {r: v / (n_permutations * n_ptms) for r, v in totals.items()}
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Sweep distance cutoffs to find the optimal mutation-capture radius."
-    )
-    parser.add_argument(
-        "--genes", nargs="+", default=DEFAULT_GENES,
-        help=f"Gene symbols to test (default: {' '.join(DEFAULT_GENES)})",
-    )
-    parser.add_argument(
-        "--radii", nargs=3, type=float, default=[4, 20, 1],
-        metavar=("START", "STOP", "STEP"),
-        help="Radius range as start stop step (default: 4 20 1)",
-    )
-    parser.add_argument(
-        "--output", default=str(PROJECT_ROOT / "Output" / "radius_sweep.png"),
-        help="Output plot path (default: Output/radius_sweep.png)",
-    )
-    parser.add_argument(
-        "--unfiltered", action="store_true",
-        help="Also run the sweep with ALL COSMIC mutations (not just hotspots) for comparison",
-    )
-    args = parser.parse_args()
+def _detect_elbows(df: pd.DataFrame, proteins, log_cb: Callable[[str], None]) -> dict[str, float | None]:
+    """Run kneed's KneeLocator per protein on an avg_mutation_count-by-radius curve."""
+    from kneed import KneeLocator
 
-    radii = list(np.arange(args.radii[0], args.radii[1] + args.radii[2] / 2, args.radii[2]))
-    print(f"Testing radii: {radii[0]:.0f}-{radii[-1]:.0f} A in {args.radii[2]:.0f} A steps")
+    elbows: dict[str, float | None] = {}
+    for gene in proteins:
+        gene_data = df[df["protein"] == gene].sort_values("radius")
+        if gene_data.empty:
+            continue
+        try:
+            kn = KneeLocator(
+                gene_data["radius"].values,
+                gene_data["avg_mutation_count"].values,
+                curve="convex",
+                direction="increasing",
+                interp_method="interp1d",
+            )
+            elbows[gene] = kn.knee
+            if kn.knee is not None:
+                log_cb(f"  {gene}: optimal radius = {kn.knee:.0f} A")
+            else:
+                log_cb(f"  {gene}: no elbow detected")
+        except Exception:
+            elbows[gene] = None
+            log_cb(f"  {gene}: could not compute elbow")
+    return elbows
+
+
+def run_sweep(
+    genes: list[str],
+    radii: list[float],
+    unfiltered: bool = False,
+    output_tsv_path: Path | None = None,
+    log_cb: Callable[[str], None] = print,
+) -> SweepResult:
+    """Run the radius sweep for a set of genes and return everything needed to plot it.
+
+    Raises FileNotFoundError if the pipeline's intermediate TSV is missing, and
+    ValueError if no data could be collected for any of the requested genes.
+    """
+    step = radii[1] - radii[0] if len(radii) > 1 else 0.0
+    log_cb(f"Testing radii: {radii[0]:.0f}-{radii[-1]:.0f} A in {step:.0f} A steps")
 
     if not PTM_TSV.exists():
-        sys.exit(f"Error: intermediate TSV not found at {PTM_TSV}\n"
-                 "Run the pipeline (step 1) first to generate it.")
+        raise FileNotFoundError(
+            f"Intermediate TSV not found at {PTM_TSV}\nRun the pipeline (step 1) first to generate it."
+        )
 
     df = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
 
     # Map gene names to UniProt IDs
     gene_to_uid = {}
-    for g in args.genes:
+    for g in genes:
         rows = df[df["gene"] == g]
         if rows.empty:
-            print(f"  Warning: {g} not found in dataset, skipping")
+            log_cb(f"  Warning: {g} not found in dataset, skipping")
             continue
         gene_to_uid[g] = rows.iloc[0]["uniprot_id"]
 
     results = []
 
     for gene, uid in gene_to_uid.items():
-        print(f"\n{gene} ({uid}):")
+        log_cb(f"\n{gene} ({uid}):")
 
         cif_dir = MODELS_ROOT / uid
         cif_file = find_canonical_cif(cif_dir) if cif_dir.is_dir() else None
         if cif_file is None:
-            print(f"  No CIF file found, skipping")
+            log_cb(f"  No CIF file found, skipping")
             continue
 
         chain = load_first_chain(cif_file)
         if chain is None:
-            print(f"  Could not parse CIF, skipping")
+            log_cb(f"  Could not parse CIF, skipping")
             continue
 
         all_ca = get_all_ca_coords(chain)
         protein_length = len(all_ca)
 
         ptm_coords, mutation_coords = load_protein_data(gene, df, chain)
-        print(f"  {len(ptm_coords)} PTM sites, {len(mutation_coords)} unique mutation positions, "
-              f"{protein_length} residues")
+        log_cb(f"  {len(ptm_coords)} PTM sites, {len(mutation_coords)} unique mutation positions, "
+               f"{protein_length} residues")
 
         if not ptm_coords:
-            print(f"  No PTM coordinates found, skipping")
+            log_cb(f"  No PTM coordinates found, skipping")
             continue
 
         avg_counts = sweep_radii(ptm_coords, mutation_coords, radii)
-        print("  Computing random baseline (100 permutations)...")
+        log_cb("  Computing random baseline (100 permutations)...")
         baseline = random_baseline(ptm_coords, all_ca, len(mutation_coords), radii)
 
         for r in radii:
@@ -252,16 +282,16 @@ def main():
                 "protein_length": protein_length,
                 "n_mutations": len(mutation_coords),
             })
-        print(f"  Hotspot: {avg_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
-              f"-> {avg_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
+        log_cb(f"  Hotspot: {avg_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
+               f"-> {avg_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
 
-        if args.unfiltered:
-            print(f"  Loading unfiltered COSMIC mutations for {gene}...")
-            unfiltered_coords = load_unfiltered_mutations(gene, chain)
-            print(f"  {len(unfiltered_coords)} unfiltered mutation positions")
+        if unfiltered:
+            log_cb(f"  Loading unfiltered COSMIC mutations for {gene}...")
+            unfiltered_coords = load_unfiltered_mutations(gene, chain, log_cb)
+            log_cb(f"  {len(unfiltered_coords)} unfiltered mutation positions")
 
             uf_counts = sweep_radii(ptm_coords, unfiltered_coords, radii)
-            print("  Computing unfiltered random baseline...")
+            log_cb("  Computing unfiltered random baseline...")
             uf_baseline = random_baseline(ptm_coords, all_ca, len(unfiltered_coords), radii)
 
             for r in radii:
@@ -276,58 +306,78 @@ def main():
                     "protein_length": protein_length,
                     "n_mutations": len(unfiltered_coords),
                 })
-            print(f"  Unfiltered: {uf_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
-                  f"-> {uf_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
+            log_cb(f"  Unfiltered: {uf_counts[radii[0]]:.1f} avg at {radii[0]:.0f}A "
+                   f"-> {uf_counts[radii[-1]]:.1f} avg at {radii[-1]:.0f}A")
 
     if not results:
-        sys.exit("No data collected. Check that CIF files are downloaded for the target genes.")
+        raise ValueError("No data collected. Check that CIF files are downloaded for the target genes.")
 
     result_df = pd.DataFrame(results)
-
-    # Elbow detection (on hotspot data)
-    from kneed import KneeLocator
 
     hotspot_df = result_df[result_df["dataset"] == "hotspot"]
     proteins = hotspot_df["protein"].unique()
 
-    print("\n-- Elbow Detection (hotspot-filtered) --")
-    elbows: dict[str, float | None] = {}
-    for gene in proteins:
-        gene_data = hotspot_df[hotspot_df["protein"] == gene].sort_values("radius")
-        try:
-            kn = KneeLocator(
-                gene_data["radius"].values,
-                gene_data["avg_mutation_count"].values,
-                curve="convex",
-                direction="increasing",
-                interp_method="interp1d",
-            )
-            elbows[gene] = kn.knee
-            if kn.knee is not None:
-                print(f"  {gene}: optimal radius = {kn.knee:.0f} A")
-            else:
-                print(f"  {gene}: no elbow detected")
-        except Exception:
-            elbows[gene] = None
-            print(f"  {gene}: could not compute elbow")
+    log_cb("\n-- Elbow Detection (hotspot-filtered) --")
+    elbows = _detect_elbows(hotspot_df, proteins, log_cb)
 
     detected = [v for v in elbows.values() if v is not None]
     if detected:
         avg_elbow = np.mean(detected)
-        print(f"\n  Average optimal radius across proteins: {avg_elbow:.1f} A")
+        log_cb(f"\n  Average optimal radius across proteins: {avg_elbow:.1f} A")
 
-    # Save data
-    tsv_path = Path(args.output).with_suffix(".tsv")
-    result_df.to_csv(tsv_path, sep="\t", index=False)
-    print(f"\nData saved to: {tsv_path}")
-
-    # Determine layout: 2 panels if hotspot-only, 4 panels if unfiltered comparison
     has_unfiltered = "unfiltered" in result_df["dataset"].values
+    uf_elbows: dict[str, float | None] = {}
     if has_unfiltered:
-        fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=False)
-        (ax1, ax3), (ax2, ax4) = axes
+        unfiltered_df = result_df[result_df["dataset"] == "unfiltered"]
+        log_cb("\n-- Elbow Detection (unfiltered) --")
+        uf_elbows = _detect_elbows(unfiltered_df, proteins, log_cb)
+
+        uf_detected = [v for v in uf_elbows.values() if v is not None]
+        if uf_detected:
+            uf_avg_elbow = np.mean(uf_detected)
+            log_cb(f"\n  Average optimal radius (unfiltered): {uf_avg_elbow:.1f} A")
+
+    if output_tsv_path is not None:
+        result_df.to_csv(output_tsv_path, sep="\t", index=False)
+        log_cb(f"\nData saved to: {output_tsv_path}")
+
+    return SweepResult(
+        result_df=result_df,
+        radii=radii,
+        elbows=elbows,
+        uf_elbows=uf_elbows,
+        has_unfiltered=has_unfiltered,
+    )
+
+
+def build_sweep_figure(result: SweepResult, fig=None):
+    """Build the sweep plot from a SweepResult. Uses an injected Figure if given
+    (for GUI embedding), otherwise creates one via plt.subplots (for standalone use).
+    """
+    result_df = result.result_df
+    hotspot_df = result_df[result_df["dataset"] == "hotspot"]
+    proteins = hotspot_df["protein"].unique()
+    elbows = result.elbows
+    detected = [v for v in elbows.values() if v is not None]
+    avg_elbow = np.mean(detected) if detected else None
+
+    has_unfiltered = result.has_unfiltered
+    uf_elbows = result.uf_elbows
+    uf_detected = [v for v in uf_elbows.values() if v is not None]
+    uf_avg_elbow = np.mean(uf_detected) if uf_detected else None
+
+    if fig is None:
+        if has_unfiltered:
+            fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=False)
+            (ax1, ax3), (ax2, ax4) = axes
+        else:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
     else:
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10), sharex=False)
+        if has_unfiltered:
+            axes = fig.subplots(2, 2, sharex=False)
+            (ax1, ax3), (ax2, ax4) = axes
+        else:
+            ax1, ax2 = fig.subplots(2, 1, sharex=False)
 
     colors = {}
 
@@ -382,38 +432,9 @@ def main():
     if detected:
         ax2.axvline(x=avg_elbow, color="red", linestyle=":", alpha=0.6)
 
-    # ── Right panels: unfiltered (if --unfiltered) ──
+    # ── Right panels: unfiltered (if present) ──
     if has_unfiltered:
         unfiltered_df = result_df[result_df["dataset"] == "unfiltered"]
-
-        # Elbow detection for unfiltered
-        print("\n-- Elbow Detection (unfiltered) --")
-        uf_elbows: dict[str, float | None] = {}
-        for gene in proteins:
-            gene_data = unfiltered_df[unfiltered_df["protein"] == gene].sort_values("radius")
-            if gene_data.empty:
-                continue
-            try:
-                kn = KneeLocator(
-                    gene_data["radius"].values,
-                    gene_data["avg_mutation_count"].values,
-                    curve="convex",
-                    direction="increasing",
-                    interp_method="interp1d",
-                )
-                uf_elbows[gene] = kn.knee
-                if kn.knee is not None:
-                    print(f"  {gene}: optimal radius = {kn.knee:.0f} A")
-                else:
-                    print(f"  {gene}: no elbow detected")
-            except Exception:
-                uf_elbows[gene] = None
-                print(f"  {gene}: could not compute elbow")
-
-        uf_detected = [v for v in uf_elbows.values() if v is not None]
-        if uf_detected:
-            uf_avg_elbow = np.mean(uf_detected)
-            print(f"\n  Average optimal radius (unfiltered): {uf_avg_elbow:.1f} A")
 
         for gene in proteins:
             gene_data = unfiltered_df[unfiltered_df["protein"] == gene]
@@ -462,8 +483,45 @@ def main():
         if uf_detected:
             ax4.axvline(x=uf_avg_elbow, color="red", linestyle=":", alpha=0.6)
 
-    plt.tight_layout()
-    plt.savefig(args.output, dpi=150)
+    fig.tight_layout()
+    return fig
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sweep distance cutoffs to find the optimal mutation-capture radius."
+    )
+    parser.add_argument(
+        "--genes", nargs="+", default=DEFAULT_GENES,
+        help=f"Gene symbols to test (default: {' '.join(DEFAULT_GENES)})",
+    )
+    parser.add_argument(
+        "--radii", nargs=3, type=float, default=[4, 20, 1],
+        metavar=("START", "STOP", "STEP"),
+        help="Radius range as start stop step (default: 4 20 1)",
+    )
+    parser.add_argument(
+        "--output", default=str(PROJECT_ROOT / "Output" / "radius_sweep.png"),
+        help="Output plot path (default: Output/radius_sweep.png)",
+    )
+    parser.add_argument(
+        "--unfiltered", action="store_true",
+        help="Also run the sweep with ALL COSMIC mutations (not just hotspots) for comparison",
+    )
+    args = parser.parse_args()
+
+    radii = list(np.arange(args.radii[0], args.radii[1] + args.radii[2] / 2, args.radii[2]))
+
+    try:
+        result = run_sweep(
+            args.genes, radii, unfiltered=args.unfiltered,
+            output_tsv_path=Path(args.output).with_suffix(".tsv"),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        sys.exit(str(exc))
+
+    fig = build_sweep_figure(result)
+    fig.savefig(args.output, dpi=150)
     print(f"Plot saved to: {args.output}")
     plt.show()
 

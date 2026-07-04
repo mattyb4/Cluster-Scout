@@ -357,16 +357,10 @@ def main():
         default=None,
         help="Exclude mutation pairs with PAE above this threshold (default: disabled)",
     )
-    parser.add_argument(
-        "--long-format",
-        action="store_true",
-        help="Also write a long-format TSV with one row per (PTM, mutation) pair",
-    )
     args = parser.parse_args()
     DISTANCE_CUTOFF = args.cutoff
     MIN_PLDDT = args.min_plddt or 0
     MAX_PAE = args.max_pae
-    LONG_FORMAT = args.long_format
     if MIN_PLDDT > 0:
         print(f"pLDDT filter: excluding positions below {MIN_PLDDT}")
     if MAX_PAE is not None:
@@ -506,12 +500,9 @@ def main():
             "mut_aiupred_general", "mut_aiupred_binding", "mut_is_disordered", "mut_is_binding",
         ]
 
-        long_handle = None
-        long_writer = None
-        if LONG_FORMAT:
-            long_handle = LONG_OUTPUT_PATH.open("w", encoding="utf-16", newline="")
-            long_writer = csv.writer(long_handle, delimiter="\t")
-            long_writer.writerow(_LONG_HEADER)
+        long_handle = LONG_OUTPUT_PATH.open("w", encoding="utf-16", newline="")
+        long_writer = csv.writer(long_handle, delimiter="\t")
+        long_writer.writerow(_LONG_HEADER)
 
         try:
             with OUTPUT_PATH.open("w", encoding="utf-16", newline="") as handle, \
@@ -581,7 +572,7 @@ def main():
                         if atom.res_id not in pos_to_aa:
                             pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
-                    plddt_map = get_plddt_map(chain) if (MIN_PLDDT > 0 or LONG_FORMAT) else {}
+                    plddt_map = get_plddt_map(chain)
 
                     # Tag mutations whose reference AA does not match this structure, or whose
                     # position is past the point where COSMIC's isoform diverges from canonical
@@ -703,11 +694,9 @@ def main():
 
             print(f"Wrote nearby mutation data to {OUTPUT_PATH}")
             print(f"Wrote skipped PTMs to {SKIPPED_PATH}")
-            if LONG_FORMAT:
-                print(f"Wrote long-format PTM-mutation pairs to {LONG_OUTPUT_PATH}")
+            print(f"Wrote long-format PTM-mutation pairs to {LONG_OUTPUT_PATH}")
         finally:
-            if long_handle is not None:
-                long_handle.close()
+            long_handle.close()
 
 
 if __name__ == "__main__":

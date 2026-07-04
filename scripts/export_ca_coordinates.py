@@ -17,7 +17,9 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import requests
@@ -37,16 +39,27 @@ OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
 
 
-def _download_cif(uid: str) -> list[Path]:
+@dataclass
+class ExportResult:
+    """Everything produced by a CA-coordinate export run."""
+    uid: str
+    gene: str
+    all_ca_df: pd.DataFrame
+    mut_ca_df: pd.DataFrame
+    all_out: Path
+    mut_out: Path
+
+
+def _download_cif(uid: str, log_cb: Callable[[str], None] = print) -> list[Path]:
     """Fetch CIF file(s) for *uid* from the AlphaFold DB and save to cif_models/{uid}/."""
-    print(f"Querying AlphaFold DB for {uid} ...")
+    log_cb(f"Querying AlphaFold DB for {uid} ...")
     try:
         resp = requests.get(_AF_API.format(uid=uid), timeout=30)
     except requests.RequestException as exc:
-        sys.exit(f"Error: AlphaFold API request failed: {exc}")
+        raise RuntimeError(f"AlphaFold API request failed: {exc}") from exc
 
     if resp.status_code == 404:
-        sys.exit(f"Error: {uid} has no AlphaFold DB entry (404). Check the UniProt accession.")
+        raise ValueError(f"{uid} has no AlphaFold DB entry (404). Check the UniProt accession.")
     resp.raise_for_status()
 
     records = resp.json()
@@ -56,7 +69,7 @@ def _download_cif(uid: str) -> list[Path]:
     # Keep only canonical records — isoforms have uniprotAccession like "P11362-9"
     canonical = [r for r in records if r.get("uniprotAccession") == uid]
     if not canonical:
-        sys.exit(f"Error: AlphaFold DB returned no canonical model for {uid} (isoform-only).")
+        raise ValueError(f"AlphaFold DB returned no canonical model for {uid} (isoform-only).")
 
     out_dir = MODELS_ROOT / uid
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,11 +91,11 @@ def _download_cif(uid: str) -> list[Path]:
             filename = cif_url.split("/")[-1]
             dest = out_dir / filename
             if dest.exists() and dest.stat().st_size > 0:
-                print(f"  Already downloaded: {filename}")
+                log_cb(f"  Already downloaded: {filename}")
                 downloaded.append(dest)
                 continue
 
-            print(f"  Downloading {filename} ...")
+            log_cb(f"  Downloading {filename} ...")
             backoff = 1.6
             for attempt in range(4):
                 with session.get(cif_url, stream=True, timeout=90) as r:
@@ -97,7 +110,7 @@ def _download_cif(uid: str) -> list[Path]:
                         break
                     time.sleep(backoff ** attempt)
             else:
-                print(f"  Warning: failed to download {cif_url}", file=sys.stderr)
+                log_cb(f"  Warning: failed to download {cif_url}")
 
     return downloaded
 
@@ -125,7 +138,7 @@ def _load_ca_from_cif(cif_file: Path) -> list[dict]:
     return rows
 
 
-def _lookup_gene(uniprot_id: str) -> str | None:
+def _lookup_gene(uniprot_id: str, log_cb: Callable[[str], None] = print) -> str | None:
     """Return gene symbol for *uniprot_id*, checking the local cache first."""
     if GENE_CACHE.exists():
         df = pd.read_csv(GENE_CACHE, sep="\t", dtype=str, keep_default_na=False)
@@ -136,7 +149,7 @@ def _lookup_gene(uniprot_id: str) -> str | None:
             if gene:
                 return gene
 
-    print(f"Gene not found in cache — querying UniProt API for {uniprot_id}...")
+    log_cb(f"Gene not found in cache — querying UniProt API for {uniprot_id}...")
     try:
         resp = requests.get(
             f"https://rest.uniprot.org/uniprotkb/{uniprot_id}",
@@ -150,32 +163,34 @@ def _lookup_gene(uniprot_id: str) -> str | None:
             # Detect deleted/merged entries
             protein_name = fields[1].strip() if len(fields) > 1 else ""
             if protein_name.lower() == "deleted":
-                sys.exit(
-                    f"Error: UniProt entry {uniprot_id} has been deleted from the database.\n"
+                raise ValueError(
+                    f"UniProt entry {uniprot_id} has been deleted from the database. "
                     "Check whether it was merged into another accession at https://www.uniprot.org"
                 )
             gene_field = fields[0].strip()
             gene = gene_field.split()[0] if gene_field else None
             if gene:
                 return gene
-            sys.exit(
-                f"Error: UniProt entry {uniprot_id} has no gene symbol.\n"
-                "Use --gene SYMBOL to provide the gene name directly."
+            raise ValueError(
+                f"UniProt entry {uniprot_id} has no gene symbol. "
+                "Provide the gene name directly."
             )
-    except SystemExit:
+    except ValueError:
         raise
     except Exception as exc:
-        print(f"  UniProt API error: {exc}", file=sys.stderr)
+        log_cb(f"  UniProt API error: {exc}")
     return None
 
 
 def _load_cosmic_mutations(
-    gene: str, cosmic_file: Path
+    gene: str, cosmic_file: Path, log_cb: Callable[[str], None] = print,
 ) -> tuple[dict[int, list[str]], dict[int, int]]:
-    """Load somatic missense mutations from COSMIC for a single gene, returning per-position mutation labels and patient counts."""
-    """Return position-level dicts: {pos: [mutations]} and {pos: patient_count}."""
+    """Load somatic missense mutations from COSMIC for a single gene.
+
+    Returns position-level dicts: {pos: [mutations]} and {pos: patient_count}.
+    """
     cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
-    print(f"Scanning COSMIC for gene {gene} ...")
+    log_cb(f"Scanning COSMIC for gene {gene} ...")
     df = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
     df = df[df["GENE_SYMBOL"] == gene].copy()
     df = df[df["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
@@ -202,50 +217,45 @@ def _load_cosmic_mutations(
     return pos_mutations, pos_patients
 
 
-def main() -> None:
-    """Export all alpha-carbon coordinates and mutation-site coordinates for a given UniProt protein."""
-    parser = argparse.ArgumentParser(
-        description=(
-            "Export alpha-carbon coordinates for all residues and COSMIC missense-mutation sites."
-        )
-    )
-    parser.add_argument("uniprot", help="UniProt accession (e.g. P04637 for TP53)")
-    parser.add_argument("--gene", help="Gene symbol — skips the UniProt API gene lookup")
-    parser.add_argument(
-        "--cosmic",
-        default=None,
-        help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
-    )
-    args = parser.parse_args()
+def run_export(
+    uniprot: str,
+    gene: str | None = None,
+    cosmic_file: Path | None = None,
+    output_dir: Path = OUTPUT_DIR,
+    log_cb: Callable[[str], None] = print,
+) -> ExportResult:
+    """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
 
-    uid = args.uniprot.strip().upper()
-    if args.cosmic:
-        cosmic_file = Path(args.cosmic)
-    else:
+    Raises FileNotFoundError if the COSMIC file is missing, and ValueError if no
+    AlphaFold structure, no CA atoms, or no gene symbol could be resolved.
+    """
+    uid = uniprot.strip().upper()
+    if cosmic_file is None:
         cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    cosmic_file = Path(cosmic_file)
 
     # ── 1. Locate CIF files (download from AlphaFold if not present) ─────────
     uniprot_dir = MODELS_ROOT / uid
     cif_files = find_canonical_cifs(uniprot_dir) if uniprot_dir.is_dir() else []
 
     if not cif_files:
-        _download_cif(uid)
+        _download_cif(uid, log_cb)
         cif_files = find_canonical_cifs(uniprot_dir)
 
     if not cif_files:
-        sys.exit(f"Error: no canonical AlphaFold CIF files found in {uniprot_dir}")
+        raise ValueError(f"No canonical AlphaFold CIF files found in {uniprot_dir}")
 
-    print(f"CIF fragment(s): {[f.name for f in cif_files]}")
+    log_cb(f"CIF fragment(s): {[f.name for f in cif_files]}")
 
     # ── 2. Extract CA coordinates from all fragments ──────────────────────────
     all_records: list[dict] = []
     for cf in cif_files:
         records = _load_ca_from_cif(cf)
-        print(f"  {cf.name}: {len(records)} CA atoms")
+        log_cb(f"  {cf.name}: {len(records)} CA atoms")
         all_records.extend(records)
 
     if not all_records:
-        sys.exit("Error: no CA atoms could be extracted")
+        raise ValueError("No CA atoms could be extracted")
 
     all_ca_df = (
         pd.DataFrame(all_records, columns=["residue", "position", "x", "y", "z"])
@@ -253,23 +263,22 @@ def main() -> None:
         .sort_values("position")
         .reset_index(drop=True)
     )
-    print(f"Total unique CA atoms: {len(all_ca_df)}")
+    log_cb(f"Total unique CA atoms: {len(all_ca_df)}")
 
     # ── 3. Gene symbol ────────────────────────────────────────────────────────
-    gene = args.gene or _lookup_gene(uid)
-    if gene is None:
-        sys.exit(
-            f"Error: could not determine gene symbol for {uid}.\n"
-            "Use --gene SYMBOL to provide it directly."
+    resolved_gene = gene or _lookup_gene(uid, log_cb)
+    if resolved_gene is None:
+        raise ValueError(
+            f"Could not determine gene symbol for {uid}. Provide the gene symbol directly."
         )
-    print(f"Gene: {gene}")
+    log_cb(f"Gene: {resolved_gene}")
 
     # ── 4. COSMIC missense mutations ──────────────────────────────────────────
     if not cosmic_file.exists():
-        sys.exit(f"Error: COSMIC file not found: {cosmic_file}")
+        raise FileNotFoundError(f"COSMIC file not found: {cosmic_file}")
 
-    pos_mutations, pos_patients = _load_cosmic_mutations(gene, cosmic_file)
-    print(f"Missense mutation positions in COSMIC: {len(pos_mutations)}")
+    pos_mutations, pos_patients = _load_cosmic_mutations(resolved_gene, cosmic_file, log_cb)
+    log_cb(f"Missense mutation positions in COSMIC: {len(pos_mutations)}")
 
     # ── 5. Filter to mutation positions ───────────────────────────────────────
     mut_rows = []
@@ -291,19 +300,53 @@ def main() -> None:
         mut_rows,
         columns=["residue", "position", "x", "y", "z", "mutations", "total_patients"],
     )
-    print(f"CA atoms at mutation positions: {len(mut_ca_df)}")
+    log_cb(f"CA atoms at mutation positions: {len(mut_ca_df)}")
 
     # ── 6. Write outputs ──────────────────────────────────────────────────────
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    all_out = OUTPUT_DIR / f"{uid}_all_ca.tsv"
-    mut_out = OUTPUT_DIR / f"{uid}_mutation_ca.tsv"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    all_out = output_dir / f"{uid}_all_ca.tsv"
+    mut_out = output_dir / f"{uid}_mutation_ca.tsv"
 
     all_ca_df.to_csv(all_out, sep="\t", index=False)
     mut_ca_df.to_csv(mut_out, sep="\t", index=False)
 
-    print(f"\nDone.")
-    print(f"  All CA coordinates : {all_out}  ({len(all_ca_df)} rows)")
-    print(f"  Mutation CA coords : {mut_out}  ({len(mut_ca_df)} rows)")
+    log_cb("")
+    log_cb("Done.")
+    log_cb(f"  All CA coordinates : {all_out}  ({len(all_ca_df)} rows)")
+    log_cb(f"  Mutation CA coords : {mut_out}  ({len(mut_ca_df)} rows)")
+
+    return ExportResult(
+        uid=uid, gene=resolved_gene,
+        all_ca_df=all_ca_df, mut_ca_df=mut_ca_df,
+        all_out=all_out, mut_out=mut_out,
+    )
+
+
+def main() -> None:
+    """Export all alpha-carbon coordinates and mutation-site coordinates for a given UniProt protein."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export alpha-carbon coordinates for all residues and COSMIC missense-mutation sites."
+        )
+    )
+    parser.add_argument("uniprot", help="UniProt accession (e.g. P04637 for TP53)")
+    parser.add_argument("--gene", help="Gene symbol — skips the UniProt API gene lookup")
+    parser.add_argument(
+        "--cosmic",
+        default=None,
+        help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
+    )
+    args = parser.parse_args()
+
+    try:
+        run_export(
+            args.uniprot,
+            gene=args.gene,
+            cosmic_file=Path(args.cosmic) if args.cosmic else None,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        sys.exit(f"Error: {exc}")
 
 
 if __name__ == "__main__":

@@ -840,11 +840,6 @@ def main() -> None:
         help="Directory containing the proximity DB (default: Output/)",
     )
     parser.add_argument(
-        "--long-format",
-        action="store_true",
-        help="Also annotate the long-format TSV if it exists",
-    )
-    parser.add_argument(
         "--pp-exclude",
         nargs="+",
         choices=["benign", "possibly_damaging", "probably_damaging"],
@@ -889,27 +884,26 @@ def main() -> None:
     df.to_csv(proximity_db, sep="\t", index=False, encoding="utf-16")
     print(f"\nUpdated proximity DB written to: {proximity_db}")
 
-    if args.long_format:
-        long_db = output_dir / "ptm_mutation_proximity_long.tsv"
-        if long_db.exists():
-            print(f"\nAnnotating long-format DB: {long_db}")
-            df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
-                                  keep_default_na=False)
-            print(f"{len(df_long)} rows")
-            annotate_long_format(
-                df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache,
-                disorder_maps,
-            )
-            if args.pp_exclude:
-                before = len(df_long)
-                df_long = df_long[
-                    ~df_long["polyphen_class"].isin(args.pp_exclude)
-                ].reset_index(drop=True)
-                print(f"  Long format: removed {before - len(df_long)} rows by PolyPhen filter")
-            df_long.to_csv(long_db, sep="\t", index=False, encoding="utf-16")
-            print(f"Updated long-format DB written to: {long_db}")
-        else:
-            print(f"\nNo long-format DB found at {long_db} — skipping")
+    long_db = output_dir / "ptm_mutation_proximity_long.tsv"
+    if long_db.exists():
+        print(f"\nAnnotating long-format DB: {long_db}")
+        df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
+                              keep_default_na=False)
+        print(f"{len(df_long)} rows")
+        annotate_long_format(
+            df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache,
+            disorder_maps,
+        )
+        if args.pp_exclude:
+            before = len(df_long)
+            df_long = df_long[
+                ~df_long["polyphen_class"].isin(args.pp_exclude)
+            ].reset_index(drop=True)
+            print(f"  Long format: removed {before - len(df_long)} rows by PolyPhen filter")
+        df_long.to_csv(long_db, sep="\t", index=False, encoding="utf-16")
+        print(f"Updated long-format DB written to: {long_db}")
+    else:
+        print(f"\nNo long-format DB found at {long_db} — skipping")
 
 
 if __name__ == "__main__":

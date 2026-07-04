@@ -19,7 +19,9 @@ import argparse
 import itertools
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +37,22 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output" / "cif_variance"
 PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
 
 _parser = MMCIFParser(QUIET=True)
+
+
+@dataclass
+class VarianceResult:
+    """Everything needed to build the variance figure, without recomputing anything."""
+    rmsd_df: pd.DataFrame
+    data_df: pd.DataFrame
+    shared_positions: list[int]
+    per_residue_variance: np.ndarray
+    plddt_mean: np.ndarray
+    plddt_std: np.ndarray
+    ptm_in_range: list[int]
+    mut_in_range: list[int]
+    uniprot: str
+    cif_files: list[Path]
+    report_range: tuple[int, int] | None = None
 
 
 def load_ca_data(cif_path: Path) -> tuple[list[int], np.ndarray, np.ndarray, list[str]]:
@@ -102,6 +120,7 @@ def iterative_average_alignment(
     align_positions: set[int] | None = None,
     max_iterations: int = 10,
     convergence: float = 1e-4,
+    log_cb: Callable[[str], None] = print,
 ) -> list[np.ndarray]:
     """Align all structures to an iteratively refined average reference.
 
@@ -153,10 +172,10 @@ def iterative_average_alignment(
 
         aligned = new_aligned
         if shift < convergence:
-            print(f"  Converged after {iteration + 1} iteration(s) (shift={shift:.6f} A)")
+            log_cb(f"  Converged after {iteration + 1} iteration(s) (shift={shift:.6f} A)")
             break
     else:
-        print(f"  Reached max iterations ({max_iterations}), shift={shift:.6f} A")
+        log_cb(f"  Reached max iterations ({max_iterations}), shift={shift:.6f} A")
 
     return aligned
 
@@ -204,6 +223,243 @@ def load_ptm_and_mutation_positions(uniprot: str) -> tuple[set[int], set[int]]:
     return ptm_positions, mutation_positions
 
 
+def run_variance_analysis(
+    input_dir: Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    top: int = 10,
+    range_: tuple[int, int] | None = None,
+    align_range: tuple[int, int] | None = None,
+    uniprot: str | None = None,
+    gene: str | None = None,
+    log_cb: Callable[[str], None] = print,
+) -> VarianceResult:
+    """Run the CIF structural variance analysis and return everything needed to plot it.
+
+    Raises ValueError if fewer than 2 CIF files are found in input_dir.
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cif_files = sorted(input_dir.glob("*.cif"))
+    if len(cif_files) < 2:
+        raise ValueError(f"Need at least 2 CIF files in {input_dir}, found {len(cif_files)}")
+
+    log_cb(f"Found {len(cif_files)} CIF files in {input_dir}")
+
+    # Determine UniProt ID: explicit arg > CIF metadata > gene lookup
+    resolved_uniprot = uniprot or ""
+    if not resolved_uniprot:
+        resolved_uniprot = extract_uniprot_from_cif(cif_files[0]) or ""
+
+    if not resolved_uniprot and gene and PTM_TSV.exists():
+        df_lookup = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
+        gene_rows = df_lookup[df_lookup["gene"].str.upper() == gene.upper()]
+        if not gene_rows.empty:
+            resolved_uniprot = gene_rows.iloc[0]["uniprot_id"]
+
+    if resolved_uniprot:
+        log_cb(f"UniProt ID: {resolved_uniprot}")
+    else:
+        log_cb("Warning: no UniProt ID — PTM/mutation cross-referencing will be skipped.")
+        log_cb("  Use --uniprot or --gene to provide it.")
+
+    # Load all structures
+    all_positions, all_coords, all_plddts, all_names = [], [], [], []
+    file_names = []
+    for cif in cif_files:
+        log_cb(f"  Loading {cif.name}...")
+        positions, coords, plddts, res_names = load_ca_data(cif)
+        all_positions.append(positions)
+        all_coords.append(coords)
+        all_plddts.append(plddts)
+        all_names.append(res_names)
+        file_names.append(cif.stem)
+
+    # Determine alignment range (stable core) vs reporting range
+    resolved_align_range = align_range or range_
+    report_range = range_
+
+    if resolved_align_range:
+        a_start, a_end = resolved_align_range
+        align_set = {p for pos_list in all_positions for p in pos_list
+                     if a_start <= p <= a_end}
+        log_cb(f"\nAlignment range: residues {a_start}-{a_end}")
+    else:
+        align_set = None
+        log_cb("\nAlignment range: all residues")
+
+    # Iterative alignment using only the alignment residues
+    log_cb("Aligning all structures to iterative average reference...")
+    aligned_coords = iterative_average_alignment(all_coords, all_positions,
+                                                  align_positions=align_set, log_cb=log_cb)
+
+    # Apply reporting range filter AFTER alignment
+    rng_start = rng_end = None
+    if report_range:
+        rng_start, rng_end = report_range
+        log_cb(f"Reporting range: residues {rng_start}-{rng_end}")
+        for i in range(len(all_positions)):
+            mask = [(rng_start <= p <= rng_end) for p in all_positions[i]]
+            all_positions[i] = [p for p, keep in zip(all_positions[i], mask) if keep]
+            aligned_coords[i] = aligned_coords[i][mask]
+            all_plddts[i] = all_plddts[i][mask]
+            all_names[i] = [n for n, keep in zip(all_names[i], mask) if keep]
+
+    # Compute pairwise RMSD (on aligned + filtered coordinates)
+    log_cb("\nComputing pairwise RMSD matrix...")
+    rmsd_df = compute_pairwise_rmsd(aligned_coords, all_positions, file_names)
+    rmsd_path = output_dir / "pairwise_rmsd.tsv"
+    rmsd_df.to_csv(rmsd_path, sep="\t")
+    log_cb(f"  Saved to {rmsd_path}")
+    log_cb(rmsd_df.to_string())
+
+    # Compute per-residue variance and pLDDT stats
+    shared_positions = sorted(set.intersection(*(set(p) for p in all_positions)))
+    log_cb(f"\n{len(shared_positions)} shared residue positions"
+           + (f" in reporting range {rng_start}-{rng_end}" if report_range else ""))
+
+    # Build aligned coordinate arrays for shared positions
+    coord_stack = []
+    plddt_stack = []
+
+    for i in range(len(aligned_coords)):
+        idx_map = {p: j for j, p in enumerate(all_positions[i])}
+        c = np.array([aligned_coords[i][idx_map[p]] for p in shared_positions])
+        l = np.array([all_plddts[i][idx_map[p]] for p in shared_positions])
+        coord_stack.append(c)
+        plddt_stack.append(l)
+
+    # Residue names from reference
+    first_idx_map = {p: j for j, p in enumerate(all_positions[0])}
+    res_name_list = [all_names[0][first_idx_map[p]] for p in shared_positions]
+
+    coord_stack = np.array(coord_stack)   # (n_structures, n_residues, 3)
+    plddt_stack = np.array(plddt_stack)   # (n_structures, n_residues)
+
+    # Per-residue positional variance = mean squared deviation of each residue's position
+    mean_coords = coord_stack.mean(axis=0)  # (n_residues, 3)
+    deviations = coord_stack - mean_coords  # (n_structures, n_residues, 3)
+    per_residue_variance = (deviations ** 2).sum(axis=2).mean(axis=0)  # (n_residues,)
+
+    # pLDDT stats
+    plddt_mean = plddt_stack.mean(axis=0)
+    plddt_std = plddt_stack.std(axis=0)
+
+    # Cross-reference PTMs and mutations
+    ptm_positions, mutation_positions = load_ptm_and_mutation_positions(resolved_uniprot)
+    if ptm_positions:
+        log_cb(f"Found {len(ptm_positions)} PTM sites and {len(mutation_positions)} mutation sites")
+    else:
+        log_cb("No PTM/mutation data found (run pipeline step 1 first for cross-referencing)")
+
+    shared_set = set(shared_positions)
+    ptm_in_range = [p for p in ptm_positions if p in shared_set]
+    mut_in_range = [p for p in mutation_positions if p in shared_set]
+    log_cb(f"  {len(ptm_in_range)} PTM sites and {len(mut_in_range)} mutation sites in plotted range")
+
+    # Build per-residue data table
+    rows = []
+    for idx, pos in enumerate(shared_positions):
+        rows.append({
+            "position": pos,
+            "residue": res_name_list[idx],
+            "positional_variance": round(float(per_residue_variance[idx]), 4),
+            "plddt_mean": round(float(plddt_mean[idx]), 2),
+            "plddt_std": round(float(plddt_std[idx]), 2),
+            "is_ptm_site": "Yes" if pos in ptm_positions else "",
+            "is_mutation_site": "Yes" if pos in mutation_positions else "",
+        })
+    data_df = pd.DataFrame(rows)
+
+    # Save data
+    data_path = output_dir / "variance_data.tsv"
+    data_df.to_csv(data_path, sep="\t", index=False)
+    log_cb(f"\nPer-residue data saved to {data_path}")
+
+    # Summary stats
+    avg_variance = per_residue_variance.mean()
+    log_cb(f"\nProtein-wide average positional variance: {avg_variance:.4f} A^2")
+
+    top_n = min(top, len(data_df))
+    top_var = data_df.nlargest(top_n, "positional_variance")
+    log_cb(f"\nTop {top_n} most variable residues:")
+    log_cb(top_var.to_string(index=False))
+
+    return VarianceResult(
+        rmsd_df=rmsd_df,
+        data_df=data_df,
+        shared_positions=shared_positions,
+        per_residue_variance=per_residue_variance,
+        plddt_mean=plddt_mean,
+        plddt_std=plddt_std,
+        ptm_in_range=ptm_in_range,
+        mut_in_range=mut_in_range,
+        uniprot=resolved_uniprot,
+        cif_files=cif_files,
+        report_range=report_range,
+    )
+
+
+def build_variance_figure(result: VarianceResult, fig=None):
+    """Build the variance plot from a VarianceResult. Uses an injected Figure if given
+    (for GUI embedding), otherwise creates one via plt.subplots (for standalone use).
+    """
+    if fig is None:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+    else:
+        ax1, ax2 = fig.subplots(2, 1)
+
+    shared_positions = result.shared_positions
+    positions_arr = np.array(shared_positions)
+    per_residue_variance = result.per_residue_variance
+    plddt_mean = result.plddt_mean
+    plddt_std = result.plddt_std
+    ptm_in_range = result.ptm_in_range
+    mut_in_range = result.mut_in_range
+
+    # Top panel: positional variance
+    ax1.plot(positions_arr, per_residue_variance, linewidth=0.8, color="#3a86ff", alpha=0.8)
+    ax1.fill_between(positions_arr, per_residue_variance, alpha=0.2, color="#3a86ff")
+
+    for pos in ptm_in_range:
+        ax1.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
+    for pos in mut_in_range:
+        ax1.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
+
+    if ptm_in_range or mut_in_range:
+        ax1.plot([], [], color="#2ecc71", linewidth=2, label=f"PTM site ({len(ptm_in_range)})")
+        ax1.plot([], [], color="#e74c3c", linewidth=2, label=f"Mutation site ({len(mut_in_range)})")
+
+    ax1.set_xlabel("Residue Position", fontsize=12)
+    ax1.set_ylabel("Positional Variance (A^2)", fontsize=12)
+    ax1.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
+    ax1.set_title(f"Per-Residue Structural Variance ({len(result.cif_files)} structures"
+                  + (f", {result.uniprot})" if result.uniprot else ")"), fontsize=14)
+    ax1.legend(loc="upper right", fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # Bottom panel: pLDDT mean ± std
+    ax2.plot(positions_arr, plddt_mean, linewidth=1, color="#f39c12")
+    ax2.fill_between(positions_arr, plddt_mean - plddt_std, plddt_mean + plddt_std,
+                     alpha=0.25, color="#f39c12")
+
+    for pos in ptm_in_range:
+        ax2.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
+    for pos in mut_in_range:
+        ax2.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
+
+    ax2.set_xlabel("Residue Position", fontsize=12)
+    ax2.set_ylabel("pLDDT (mean +/- std)", fontsize=12)
+    ax2.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
+    ax2.set_title("AlphaFold Confidence (pLDDT)", fontsize=14)
+    ax2.set_ylim(0, 100)
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    return fig
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze structural variance across multiple AlphaFold CIF predictions."
@@ -240,203 +496,22 @@ def main():
     )
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        result = run_variance_analysis(
+            input_dir=Path(args.input_dir),
+            output_dir=Path(args.output_dir),
+            top=args.top,
+            range_=tuple(args.range) if args.range else None,
+            align_range=tuple(args.align_range) if args.align_range else None,
+            uniprot=args.uniprot,
+            gene=args.gene,
+        )
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
 
-    cif_files = sorted(input_dir.glob("*.cif"))
-    if len(cif_files) < 2:
-        sys.exit(f"Error: need at least 2 CIF files in {input_dir}, found {len(cif_files)}")
-
-    print(f"Found {len(cif_files)} CIF files in {input_dir}")
-
-    # Determine UniProt ID: explicit arg > CIF metadata > gene lookup
-    uniprot = args.uniprot or ""
-    if not uniprot:
-        uniprot = extract_uniprot_from_cif(cif_files[0]) or ""
-
-    if not uniprot and args.gene and PTM_TSV.exists():
-        df_lookup = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
-        gene_rows = df_lookup[df_lookup["gene"].str.upper() == args.gene.upper()]
-        if not gene_rows.empty:
-            uniprot = gene_rows.iloc[0]["uniprot_id"]
-
-    if uniprot:
-        print(f"UniProt ID: {uniprot}")
-    else:
-        print("Warning: no UniProt ID — PTM/mutation cross-referencing will be skipped.")
-        print("  Use --uniprot or --gene to provide it.")
-
-    # Load all structures
-    all_positions, all_coords, all_plddts, all_names = [], [], [], []
-    file_names = []
-    for cif in cif_files:
-        print(f"  Loading {cif.name}...")
-        positions, coords, plddts, res_names = load_ca_data(cif)
-        all_positions.append(positions)
-        all_coords.append(coords)
-        all_plddts.append(plddts)
-        all_names.append(res_names)
-        file_names.append(cif.stem)
-
-    # Determine alignment range (stable core) vs reporting range
-    align_range = args.align_range or args.range
-    report_range = args.range
-
-    if align_range:
-        a_start, a_end = align_range
-        align_set = {p for pos_list in all_positions for p in pos_list
-                     if a_start <= p <= a_end}
-        print(f"\nAlignment range: residues {a_start}-{a_end}")
-    else:
-        align_set = None
-        print("\nAlignment range: all residues")
-
-    # Iterative alignment using only the alignment residues
-    print("Aligning all structures to iterative average reference...")
-    aligned_coords = iterative_average_alignment(all_coords, all_positions,
-                                                  align_positions=align_set)
-
-    # Apply reporting range filter AFTER alignment
-    if report_range:
-        rng_start, rng_end = report_range
-        print(f"Reporting range: residues {rng_start}-{rng_end}")
-        for i in range(len(all_positions)):
-            mask = [(rng_start <= p <= rng_end) for p in all_positions[i]]
-            all_positions[i] = [p for p, keep in zip(all_positions[i], mask) if keep]
-            aligned_coords[i] = aligned_coords[i][mask]
-            all_plddts[i] = all_plddts[i][mask]
-            all_names[i] = [n for n, keep in zip(all_names[i], mask) if keep]
-
-    # Compute pairwise RMSD (on aligned + filtered coordinates)
-    print("\nComputing pairwise RMSD matrix...")
-    rmsd_df = compute_pairwise_rmsd(aligned_coords, all_positions, file_names)
-    rmsd_path = output_dir / "pairwise_rmsd.tsv"
-    rmsd_df.to_csv(rmsd_path, sep="\t")
-    print(f"  Saved to {rmsd_path}")
-    print(rmsd_df.to_string())
-
-    # Compute per-residue variance and pLDDT stats
-    shared_positions = sorted(set.intersection(*(set(p) for p in all_positions)))
-    print(f"\n{len(shared_positions)} shared residue positions"
-          + (f" in reporting range {rng_start}-{rng_end}" if report_range else ""))
-
-    # Build aligned coordinate arrays for shared positions
-    coord_stack = []  # (n_structures, n_shared, 3)
-    plddt_stack = []  # (n_structures, n_shared)
-    res_name_list = []
-
-    for i in range(len(aligned_coords)):
-        idx_map = {p: j for j, p in enumerate(all_positions[i])}
-        c = np.array([aligned_coords[i][idx_map[p]] for p in shared_positions])
-        l = np.array([all_plddts[i][idx_map[p]] for p in shared_positions])
-        coord_stack.append(c)
-        plddt_stack.append(l)
-
-    # Residue names from reference
-    first_idx_map = {p: j for j, p in enumerate(all_positions[0])}
-    res_name_list = [all_names[0][first_idx_map[p]] for p in shared_positions]
-
-    coord_stack = np.array(coord_stack)   # (n_structures, n_residues, 3)
-    plddt_stack = np.array(plddt_stack)   # (n_structures, n_residues)
-
-    # Per-residue positional variance = mean squared deviation of each residue's position
-    mean_coords = coord_stack.mean(axis=0)  # (n_residues, 3)
-    deviations = coord_stack - mean_coords  # (n_structures, n_residues, 3)
-    per_residue_variance = (deviations ** 2).sum(axis=2).mean(axis=0)  # (n_residues,)
-
-    # pLDDT stats
-    plddt_mean = plddt_stack.mean(axis=0)
-    plddt_std = plddt_stack.std(axis=0)
-
-    # Cross-reference PTMs and mutations
-    ptm_positions, mutation_positions = load_ptm_and_mutation_positions(uniprot)
-    if ptm_positions:
-        print(f"Found {len(ptm_positions)} PTM sites and {len(mutation_positions)} mutation sites")
-    else:
-        print("No PTM/mutation data found (run pipeline step 1 first for cross-referencing)")
-
-    # Build per-residue data table
-    rows = []
-    for idx, pos in enumerate(shared_positions):
-        rows.append({
-            "position": pos,
-            "residue": res_name_list[idx],
-            "positional_variance": round(float(per_residue_variance[idx]), 4),
-            "plddt_mean": round(float(plddt_mean[idx]), 2),
-            "plddt_std": round(float(plddt_std[idx]), 2),
-            "is_ptm_site": "Yes" if pos in ptm_positions else "",
-            "is_mutation_site": "Yes" if pos in mutation_positions else "",
-        })
-    data_df = pd.DataFrame(rows)
-
-    # Save data
-    data_path = output_dir / "variance_data.tsv"
-    data_df.to_csv(data_path, sep="\t", index=False)
-    print(f"\nPer-residue data saved to {data_path}")
-
-    # Summary stats
-    avg_variance = per_residue_variance.mean()
-    print(f"\nProtein-wide average positional variance: {avg_variance:.4f} A^2")
-
-    top_n = min(args.top, len(data_df))
-    top_var = data_df.nlargest(top_n, "positional_variance")
-    print(f"\nTop {top_n} most variable residues:")
-    print(top_var.to_string(index=False))
-
-    # ── Plot ──
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
-
-    positions_arr = np.array(shared_positions)
-
-    # Top panel: positional variance
-    ax1.plot(positions_arr, per_residue_variance, linewidth=0.8, color="#3a86ff", alpha=0.8)
-    ax1.fill_between(positions_arr, per_residue_variance, alpha=0.2, color="#3a86ff")
-
-    # Mark PTM and mutation sites
-    shared_set = set(shared_positions)
-    ptm_in_range = [p for p in ptm_positions if p in shared_set]
-    mut_in_range = [p for p in mutation_positions if p in shared_set]
-
-    for pos in ptm_in_range:
-        ax1.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
-    for pos in mut_in_range:
-        ax1.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
-
-    if ptm_in_range or mut_in_range:
-        ax1.plot([], [], color="#2ecc71", linewidth=2, label=f"PTM site ({len(ptm_in_range)})")
-        ax1.plot([], [], color="#e74c3c", linewidth=2, label=f"Mutation site ({len(mut_in_range)})")
-
-    print(f"  {len(ptm_in_range)} PTM sites and {len(mut_in_range)} mutation sites in plotted range")
-
-    ax1.set_xlabel("Residue Position", fontsize=12)
-    ax1.set_ylabel("Positional Variance (A^2)", fontsize=12)
-    ax1.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
-    ax1.set_title(f"Per-Residue Structural Variance ({len(cif_files)} structures"
-                  + (f", {uniprot})" if uniprot else ")"), fontsize=14)
-    ax1.legend(loc="upper right", fontsize=10)
-    ax1.grid(True, alpha=0.3)
-
-    # Bottom panel: pLDDT mean ± std
-    ax2.plot(positions_arr, plddt_mean, linewidth=1, color="#f39c12")
-    ax2.fill_between(positions_arr, plddt_mean - plddt_std, plddt_mean + plddt_std,
-                     alpha=0.25, color="#f39c12")
-
-    for pos in ptm_in_range:
-        ax2.axvline(x=pos, color="#2ecc71", alpha=0.3, linewidth=0.8)
-    for pos in mut_in_range:
-        ax2.axvline(x=pos, color="#e74c3c", alpha=0.3, linewidth=0.8)
-
-    ax2.set_xlabel("Residue Position", fontsize=12)
-    ax2.set_ylabel("pLDDT (mean +/- std)", fontsize=12)
-    ax2.set_xlim(min(shared_positions) - 1, max(shared_positions) + 1)
-    ax2.set_title("AlphaFold Confidence (pLDDT)", fontsize=14)
-    ax2.set_ylim(0, 100)
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plot_path = output_dir / "variance_plot.png"
-    plt.savefig(plot_path, dpi=150)
+    fig = build_variance_figure(result)
+    plot_path = Path(args.output_dir) / "variance_plot.png"
+    fig.savefig(plot_path, dpi=150)
     print(f"Plot saved to {plot_path}")
     plt.show()
 

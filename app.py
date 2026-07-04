@@ -190,6 +190,8 @@ class App(ctk.CTk):
             self.iconbitmap(str(ico))
 
         self._queue: queue.Queue[tuple] = queue.Queue()
+        self._radius_sweep_result = None
+        self._cif_variance_result = None
         self._running = False
         self._stop_requested = False
         self._suspended = False
@@ -218,12 +220,13 @@ class App(ctk.CTk):
         pipeline_tab = self._tabview.add("Pipeline")
         results_tab = self._tabview.add("Results")
         viz_tab = self._tabview.add("Visualization")
+        radius_sweep_tab = self._tabview.add("Radius Sweep")
+        cif_variance_tab = self._tabview.add("CIF Variance")
         help_tab = self._tabview.add("Help / Documentation")
 
         # ── Pipeline tab ──
         pipeline_tab.grid_columnconfigure(0, weight=1)
         pipeline_tab.grid_rowconfigure(0, weight=1)
-        pipeline_tab.grid_rowconfigure(1, weight=0)  # log panel — weight set dynamically
 
         scroll = ctk.CTkScrollableFrame(pipeline_tab, fg_color="transparent")
         scroll.grid(row=0, column=0, sticky="nsew")
@@ -295,6 +298,9 @@ class App(ctk.CTk):
             ("PTM Proximity", "ptm-proximity"),
             ("Mutation Clustering", "mutation-clustering"),
             ("Single Protein", "single-protein"),
+            ("Radius Sweep", "radius-sweep"),
+            ("CIF Variance", "cif-variance"),
+            ("CA Coordinates", "ca-coordinates"),
         ]:
             ctk.CTkRadioButton(
                 mode_frame,
@@ -365,24 +371,13 @@ class App(ctk.CTk):
             placeholder_text="off",
         ).pack(side="left", padx=(0, 12), pady=8)
 
-        # Output options + PolyPhen filter (combined row)
+        # PolyPhen filter
         pp_frame = ctk.CTkFrame(p)
         pp_frame.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
 
-        self._long_format_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            pp_frame, text="Long format output",
-            variable=self._long_format_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left", padx=(12, 4), pady=8)
-
-        ctk.CTkLabel(
-            pp_frame, text="|", text_color="gray50",
-        ).pack(side="left", padx=(8, 4), pady=8)
-
         ctk.CTkLabel(
             pp_frame, text="PolyPhen filter:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(4, 4), pady=8)
+        ).pack(side="left", padx=(12, 4), pady=8)
 
         self._pp_benign_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -493,11 +488,13 @@ class App(ctk.CTk):
         self._log_toggle.grid(row=9, column=0, padx=24, pady=(8, 0), sticky="w")
 
         self._log = ctk.CTkTextbox(
-            pipeline_tab,
+            p,
+            height=140,
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
         )
+        self._toggle_log()  # visible by default
 
         # Hide the scrollbar when content fits; show it only when scrolling is needed
         def _update_scrollbar(*_):
@@ -515,8 +512,12 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
-        scroll.bind("<Configure>", _update_scrollbar)
-        pipeline_tab.bind("<Configure>", _update_scrollbar)
+        # add="+" is required here: CTkScrollableFrame already binds its own
+        # <Configure> handler (to keep the canvas scrollregion in sync with
+        # content size) — a plain .bind() would replace it instead of adding
+        # to it, freezing the scrollregion at whatever it was when this ran.
+        scroll.bind("<Configure>", _update_scrollbar, add="+")
+        pipeline_tab.bind("<Configure>", _update_scrollbar, add="+")
         self.after(200, _update_scrollbar)
 
         # ── Results tab ──
@@ -524,6 +525,12 @@ class App(ctk.CTk):
 
         # ── Visualization tab ──
         self._build_viz_tab(viz_tab)
+
+        # ── Radius Sweep tab ──
+        self._build_radius_sweep_tab(radius_sweep_tab)
+
+        # ── CIF Variance tab ──
+        self._build_cif_variance_tab(cif_variance_tab)
 
         # ── Help / Documentation tab ──
         self._build_help_tab(help_tab)
@@ -584,6 +591,15 @@ class App(ctk.CTk):
 
         if mode == "single-protein":
             self._build_single_protein_panel()
+            return
+        if mode == "radius-sweep":
+            self._build_radius_sweep_panel()
+            return
+        if mode == "cif-variance":
+            self._build_cif_variance_panel()
+            return
+        if mode == "ca-coordinates":
+            self._build_ca_coordinates_panel()
             return
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
@@ -681,6 +697,237 @@ class App(ctk.CTk):
             parent_name = Path(path).parent.name
             self._single_uniprot_var.set(parent_name)
 
+    def _build_radius_sweep_panel(self):
+        """Build the input fields for radius-sweep analysis mode."""
+        ctk.CTkLabel(
+            self._steps_outer,
+            text="Radius Sweep Analysis",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(8, 2), sticky="w")
+
+        # Genes
+        ctk.CTkLabel(self._steps_outer, text="Genes:", anchor="w").grid(
+            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_radius_genes_var"):
+            from radius_sweep import DEFAULT_GENES
+            self._radius_genes_var = ctk.StringVar(value=" ".join(DEFAULT_GENES))
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._radius_genes_var, width=400,
+            placeholder_text="Space-separated gene symbols",
+        ).grid(row=1, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
+
+        # Radius range
+        ctk.CTkLabel(self._steps_outer, text="Radius range (Å):", anchor="w").grid(
+            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        range_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        range_frame.grid(row=2, column=1, columnspan=3, padx=6, pady=6, sticky="w")
+        if not hasattr(self, "_radius_start_var"):
+            self._radius_start_var = ctk.StringVar(value="4")
+            self._radius_stop_var = ctk.StringVar(value="20")
+            self._radius_step_var = ctk.StringVar(value="1")
+        for label, var in [
+            ("start", self._radius_start_var),
+            ("stop", self._radius_stop_var),
+            ("step", self._radius_step_var),
+        ]:
+            ctk.CTkLabel(range_frame, text=label).pack(side="left", padx=(0, 4))
+            ctk.CTkEntry(range_frame, textvariable=var, width=50).pack(side="left", padx=(0, 12))
+
+        # Unfiltered comparison
+        if not hasattr(self, "_radius_unfiltered_var"):
+            self._radius_unfiltered_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self._steps_outer, text="Include unfiltered COSMIC comparison",
+            variable=self._radius_unfiltered_var,
+            checkbox_width=18, checkbox_height=18,
+        ).grid(row=3, column=0, columnspan=4, padx=12, pady=6, sticky="w")
+
+        # Status label + progress bar (reuse the step status pattern)
+        status = ctk.CTkLabel(
+            self._steps_outer, text="●  Ready", width=100,
+            anchor="e", text_color=_GRAY,
+        )
+        status.grid(row=4, column=1, columnspan=3, padx=12, pady=6, sticky="e")
+        self._step_status_labels.append(status)
+
+        bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
+        bar.set(0)
+        bar.grid(row=4, column=0, padx=12, pady=6, sticky="w")
+        bar.grid_remove()
+        self._step_progress_bars.append(bar)
+
+    def _build_cif_variance_panel(self):
+        """Build the input fields for CIF-variance analysis mode."""
+        ctk.CTkLabel(
+            self._steps_outer,
+            text="CIF Variance Analysis",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
+
+        # Input folder
+        ctk.CTkLabel(self._steps_outer, text="Input folder:", anchor="w").grid(
+            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_variance_input_dir_var"):
+            from cif_variance import DEFAULT_INPUT_DIR
+            self._variance_input_dir_var = ctk.StringVar(value=str(DEFAULT_INPUT_DIR))
+            self._variance_input_dir_var.trace_add("write", self._update_variance_cif_count)
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._variance_input_dir_var, width=340,
+        ).grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+        ctk.CTkButton(
+            self._steps_outer, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_variance_input_dir,
+        ).grid(row=1, column=2, padx=12, pady=6, sticky="e")
+
+        self._variance_cif_count_label = ctk.CTkLabel(
+            self._steps_outer, text="", anchor="w", font=ctk.CTkFont(size=11),
+        )
+        self._variance_cif_count_label.grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="w")
+        self._update_variance_cif_count()
+
+        # Top N
+        ctk.CTkLabel(self._steps_outer, text="Top N residues:", anchor="w").grid(
+            row=3, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_variance_top_var"):
+            self._variance_top_var = ctk.StringVar(value="10")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._variance_top_var, width=60,
+        ).grid(row=3, column=1, padx=6, pady=6, sticky="w")
+
+        # Report range
+        ctk.CTkLabel(self._steps_outer, text="Report range:", anchor="w").grid(
+            row=4, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        report_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        report_frame.grid(row=4, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        if not hasattr(self, "_variance_range_start_var"):
+            self._variance_range_start_var = ctk.StringVar(value="")
+            self._variance_range_end_var = ctk.StringVar(value="")
+        ctk.CTkEntry(report_frame, textvariable=self._variance_range_start_var, width=70,
+                     placeholder_text="start").pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(report_frame, textvariable=self._variance_range_end_var, width=70,
+                     placeholder_text="end (blank = all)").pack(side="left")
+
+        # Align range
+        ctk.CTkLabel(self._steps_outer, text="Align range:", anchor="w").grid(
+            row=5, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        align_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        align_frame.grid(row=5, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        if not hasattr(self, "_variance_align_start_var"):
+            self._variance_align_start_var = ctk.StringVar(value="")
+            self._variance_align_end_var = ctk.StringVar(value="")
+        ctk.CTkEntry(align_frame, textvariable=self._variance_align_start_var, width=70,
+                     placeholder_text="start").pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(align_frame, textvariable=self._variance_align_end_var, width=70,
+                     placeholder_text="end (blank = same as report range)").pack(side="left")
+
+        # UniProt / gene overrides
+        ctk.CTkLabel(self._steps_outer, text="UniProt override:", anchor="w").grid(
+            row=6, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_variance_uniprot_var"):
+            self._variance_uniprot_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._variance_uniprot_var, width=150,
+            placeholder_text="auto-detected from CIF",
+        ).grid(row=6, column=1, padx=6, pady=6, sticky="w")
+
+        ctk.CTkLabel(self._steps_outer, text="Gene override:", anchor="w").grid(
+            row=7, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_variance_gene_var"):
+            self._variance_gene_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._variance_gene_var, width=150,
+            placeholder_text="optional, for UniProt lookup",
+        ).grid(row=7, column=1, padx=6, pady=6, sticky="w")
+
+        # Status label + progress bar (reuse the step status pattern)
+        status = ctk.CTkLabel(
+            self._steps_outer, text="●  Ready", width=100,
+            anchor="e", text_color=_GRAY,
+        )
+        status.grid(row=8, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        self._step_status_labels.append(status)
+
+        bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
+        bar.set(0)
+        bar.grid(row=8, column=0, padx=12, pady=6, sticky="w")
+        bar.grid_remove()
+        self._step_progress_bars.append(bar)
+
+    def _browse_variance_input_dir(self):
+        """Open a folder dialog for selecting the CIF-comparison input directory."""
+        path = filedialog.askdirectory(
+            title="Select CIF comparison folder",
+            initialdir=self._variance_input_dir_var.get(),
+        )
+        if path:
+            self._variance_input_dir_var.set(path)
+
+    def _update_variance_cif_count(self, *_args):
+        """Update the live .cif file count label for the CIF Variance input folder."""
+        if not hasattr(self, "_variance_cif_count_label"):
+            return
+        path = Path(self._variance_input_dir_var.get().strip())
+        n = len(list(path.glob("*.cif"))) if path.is_dir() else 0
+        if n >= 2:
+            self._variance_cif_count_label.configure(text=f"✓  {n} .cif files found", text_color=_GREEN)
+        else:
+            self._variance_cif_count_label.configure(
+                text=f"⚠  {n} .cif file(s) found — need at least 2", text_color=_YELLOW,
+            )
+
+    def _build_ca_coordinates_panel(self):
+        """Build the input fields for CA-coordinate export mode."""
+        ctk.CTkLabel(
+            self._steps_outer,
+            text="Export Alpha-Carbon Coordinates",
+            font=ctk.CTkFont(weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
+
+        # UniProt ID
+        ctk.CTkLabel(self._steps_outer, text="UniProt ID:", anchor="w").grid(
+            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_ca_uniprot_var"):
+            self._ca_uniprot_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._ca_uniprot_var, width=200,
+            placeholder_text="e.g. P04637",
+        ).grid(row=1, column=1, padx=6, pady=6, sticky="w")
+
+        # Gene override
+        ctk.CTkLabel(self._steps_outer, text="Gene override:", anchor="w").grid(
+            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_ca_gene_var"):
+            self._ca_gene_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._steps_outer, textvariable=self._ca_gene_var, width=200,
+            placeholder_text="optional, skips UniProt API lookup",
+        ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+
+        # Status label + progress bar (reuse the step status pattern)
+        status = ctk.CTkLabel(
+            self._steps_outer, text="●  Ready", width=100,
+            anchor="e", text_color=_GRAY,
+        )
+        status.grid(row=3, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        self._step_status_labels.append(status)
+
+        bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
+        bar.set(0)
+        bar.grid(row=3, column=0, padx=12, pady=6, sticky="w")
+        bar.grid_remove()
+        self._step_progress_bars.append(bar)
+
     # ── Timer ────────────────────────────────────────────────────────────────
 
     def _tick(self) -> None:
@@ -766,16 +1013,13 @@ class App(ctk.CTk):
         self._refresh_file_status()
 
     def _toggle_log(self):
-        """Show or hide the raw log output panel."""
-        tab = self._log.master
+        """Show or hide the raw log output panel (a normal part of the scrollable content)."""
         if self._log_visible:
             self._log.grid_remove()
-            tab.grid_rowconfigure(1, weight=0)
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            tab.grid_rowconfigure(1, weight=1)
-            self._log.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+            self._log.grid(row=10, column=0, padx=24, pady=(6, 12), sticky="ew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 
@@ -868,6 +1112,60 @@ class App(ctk.CTk):
             if not cif or not cif.get().strip():
                 from tkinter import messagebox
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
+                return
+        elif mode == "radius-sweep":
+            from tkinter import messagebox
+            genes = self._radius_genes_var.get().split()
+            if not genes:
+                messagebox.showwarning("Missing input", "Enter at least one gene symbol.")
+                return
+            try:
+                start = float(self._radius_start_var.get())
+                stop = float(self._radius_stop_var.get())
+                step = float(self._radius_step_var.get())
+                if step <= 0 or stop <= start:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Invalid input",
+                    "Radius start/stop/step must be numeric, with stop > start and step > 0.",
+                )
+                return
+            ptm_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+            if not ptm_tsv.exists():
+                messagebox.showerror(
+                    "Missing data",
+                    f"Required file not found:\n{ptm_tsv}\n\n"
+                    f"Run the PTM Proximity or Mutation Clustering pipeline (step 1) first.",
+                )
+                return
+        elif mode == "cif-variance":
+            from tkinter import messagebox
+            input_dir = Path(self._variance_input_dir_var.get().strip())
+            n_cifs = len(list(input_dir.glob("*.cif"))) if input_dir.is_dir() else 0
+            if n_cifs < 2:
+                messagebox.showwarning(
+                    "Missing input", f"Need at least 2 .cif files in\n{input_dir}\n\nFound {n_cifs}.",
+                )
+                return
+            if self._variance_top_var.get().strip() and not self._variance_top_var.get().strip().isdigit():
+                messagebox.showwarning("Invalid input", "Top N must be a whole number.")
+                return
+            for start_var, end_var, label in [
+                (self._variance_range_start_var, self._variance_range_end_var, "Report range"),
+                (self._variance_align_start_var, self._variance_align_end_var, "Align range"),
+            ]:
+                s, e = start_var.get().strip(), end_var.get().strip()
+                if s or e:
+                    if not (s.isdigit() and e.isdigit()) or int(s) >= int(e):
+                        messagebox.showwarning(
+                            "Invalid input", f"{label} must be two whole numbers with start < end.",
+                        )
+                        return
+        elif mode == "ca-coordinates":
+            from tkinter import messagebox
+            if not self._ca_uniprot_var.get().strip():
+                messagebox.showwarning("Missing input", "Enter a UniProt accession.")
                 return
 
         self._running = True
@@ -1090,6 +1388,15 @@ class App(ctk.CTk):
         if mode == "single-protein":
             self._run_single_protein()
             return
+        if mode == "radius-sweep":
+            self._run_radius_sweep()
+            return
+        if mode == "cif-variance":
+            self._run_cif_variance()
+            return
+        if mode == "ca-coordinates":
+            self._run_ca_coordinates()
+            return
 
         python = [sys.executable, "-u"]
         input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
@@ -1099,7 +1406,6 @@ class App(ctk.CTk):
         min_samples = self._min_samples_var.get().strip() or "3"
         min_plddt = self._min_plddt_var.get().strip()
         max_pae = self._max_pae_var.get().strip()
-        long_format = self._long_format_var.get()
         pp_exclude = []
         if not self._pp_benign_var.get():
             pp_exclude.append("benign")
@@ -1124,13 +1430,11 @@ class App(ctk.CTk):
             [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
              "--output-dir", str(self._output_dir), "--cutoff", cutoff,
              *(["--min-plddt", min_plddt] if min_plddt else []),
-             *(["--max-pae", max_pae] if max_pae else []),
-             *(["--long-format"] if long_format else [])],
+             *(["--max-pae", max_pae] if max_pae else [])],
         ]
         if mode == "ptm-proximity":
             cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),
                          "--output-dir", str(self._output_dir),
-                         *(["--long-format"] if long_format else []),
                          *(["--pp-exclude"] + pp_exclude if pp_exclude else [])])
 
         steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
@@ -1267,6 +1571,173 @@ class App(ctk.CTk):
         self._q("enable_open")
         self._q("finished")
 
+    def _run_radius_sweep(self):
+        """Run the radius-sweep analysis in-process, in the background thread."""
+        import numpy as np
+
+        genes = self._radius_genes_var.get().split()
+        try:
+            start = float(self._radius_start_var.get())
+            stop = float(self._radius_stop_var.get())
+            step = float(self._radius_step_var.get())
+        except ValueError:
+            self._q("log", "Error: invalid radius range.")
+            self._q("finished")
+            return
+        radii = list(np.arange(start, stop + step / 2, step))
+        unfiltered = self._radius_unfiltered_var.get()
+
+        self._q("pipeline_start", 1, "radius-sweep", "warm")
+        self._q("show_log")
+        self._q("status", 0, "▶  Running sweep…", _BLUE)
+        self._q("show_progress", 0)
+        self._q("log", f"Testing radii {radii[0]:.0f}-{radii[-1]:.0f} Å in {step:.0f} Å steps "
+                        f"for {len(genes)} gene(s)")
+        self._q("log", "")
+
+        t0 = time.time()
+        try:
+            from radius_sweep import run_sweep
+            result = run_sweep(
+                genes, radii, unfiltered=unfiltered,
+                output_tsv_path=self._output_dir / "radius_sweep.tsv",
+                log_cb=lambda line: self._q("log", line),
+            )
+        except ImportError as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except (FileNotFoundError, ValueError) as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except Exception as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Unexpected error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+
+        elapsed = time.time() - t0
+        self._q("hide_progress", 0)
+        self._q("status", 0, f"✓  {_fmt_time(elapsed)}", _GREEN)
+        self._q("log", "")
+        self._q("log", f"Sweep complete in {_fmt_time(elapsed)}.")
+        self._q("viz_data", "radius-sweep", result)
+        self._q("enable_open")
+        self._q("finished")
+
+    def _run_cif_variance(self):
+        """Run the CIF variance analysis in-process, in the background thread."""
+        input_dir = Path(self._variance_input_dir_var.get().strip())
+        top = int(self._variance_top_var.get().strip() or 10)
+
+        def _range_or_none(start_var, end_var):
+            s, e = start_var.get().strip(), end_var.get().strip()
+            return (int(s), int(e)) if s and e else None
+
+        range_ = _range_or_none(self._variance_range_start_var, self._variance_range_end_var)
+        align_range = _range_or_none(self._variance_align_start_var, self._variance_align_end_var)
+        uniprot = self._variance_uniprot_var.get().strip() or None
+        gene = self._variance_gene_var.get().strip() or None
+
+        self._q("pipeline_start", 1, "cif-variance", "warm")
+        self._q("show_log")
+        self._q("status", 0, "▶  Running analysis…", _BLUE)
+        self._q("show_progress", 0)
+        self._q("log", f"Comparing CIF files in {input_dir}")
+        self._q("log", "")
+
+        t0 = time.time()
+        try:
+            from cif_variance import run_variance_analysis
+            result = run_variance_analysis(
+                input_dir=input_dir,
+                output_dir=self._output_dir / "cif_variance",
+                top=top,
+                range_=range_,
+                align_range=align_range,
+                uniprot=uniprot,
+                gene=gene,
+                log_cb=lambda line: self._q("log", line),
+            )
+        except ImportError as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except (FileNotFoundError, ValueError) as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except Exception as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Unexpected error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+
+        elapsed = time.time() - t0
+        self._q("hide_progress", 0)
+        self._q("status", 0, f"✓  {_fmt_time(elapsed)}", _GREEN)
+        self._q("log", "")
+        self._q("log", f"Analysis complete in {_fmt_time(elapsed)}.")
+        self._q("viz_data", "cif-variance", result)
+        self._q("enable_open")
+        self._q("finished")
+
+    def _run_ca_coordinates(self):
+        """Run the CA-coordinate export in-process, in the background thread."""
+        uniprot = self._ca_uniprot_var.get().strip()
+        gene = self._ca_gene_var.get().strip() or None
+
+        self._q("pipeline_start", 1, "ca-coordinates", "warm")
+        self._q("show_log")
+        self._q("status", 0, "▶  Exporting…", _BLUE)
+        self._q("show_progress", 0)
+        self._q("log", f"Exporting CA coordinates for {uniprot}")
+        self._q("log", "")
+
+        t0 = time.time()
+        try:
+            from export_ca_coordinates import run_export
+            run_export(
+                uniprot, gene=gene,
+                output_dir=self._output_dir / "coordinates",
+                log_cb=lambda line: self._q("log", line),
+            )
+        except ImportError as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except Exception as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Unexpected error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+
+        elapsed = time.time() - t0
+        self._q("hide_progress", 0)
+        self._q("status", 0, f"✓  {_fmt_time(elapsed)}", _GREEN)
+        self._q("enable_open")
+        self._q("finished")
+
     _TQDM_RE = re.compile(r"^(.*?):\s+(\d+)%\|[^|]*\|\s+(\d+)/(\d+)")
     _OVERALL_RE = re.compile(r"^##PROGRESS##\s+(\d+)\s+(.+)$")
     _using_overall_progress = False
@@ -1389,6 +1860,16 @@ class App(ctk.CTk):
                 elif kind == "offer_append":
                     _, cif_path, uniprot = msg
                     self._show_append_dialog(cif_path, uniprot)
+                elif kind == "viz_data":
+                    _, which, result = msg
+                    if which == "radius-sweep":
+                        self._radius_sweep_result = result
+                        self._tabview.set("Radius Sweep")
+                        self._draw_radius_sweep_plot()
+                    elif which == "cif-variance":
+                        self._cif_variance_result = result
+                        self._tabview.set("CIF Variance")
+                        self._draw_cif_variance_plot()
                 elif kind == "enable_open":
                     self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
                 elif kind == "finished":
@@ -1641,11 +2122,48 @@ class App(ctk.CTk):
                 tv.set(k, "#col", idx)
         tv.heading(col, command=lambda: self._sort_tv(tv, col, not reverse))
 
+    def _clear_treeview_fully(self, tv, all_rows: list) -> None:
+        """Delete every row a treeview has ever held, including ones currently
+        hidden by a search filter (plain tv.delete(*tv.get_children()) would
+        miss detached rows, leaking them and causing iid collisions on reinsert).
+        """
+        all_iids = set(tv.get_children("")) | {iid for iid, _, _ in all_rows}
+        if all_iids:
+            tv.delete(*all_iids)
+
+    def _capture_tv_rows(self, tv) -> list:
+        """Snapshot (iid, values, tags) for every row, to filter against later.
+
+        Must be called immediately after a full (unfiltered) populate, while
+        every row is still attached.
+        """
+        return [(iid, tv.item(iid, "values"), tv.item(iid, "tags")) for iid in tv.get_children("")]
+
+    def _filter_treeview(self, tv, all_rows: list, query: str) -> None:
+        """Show only rows whose displayed values contain *query* (case-insensitive).
+
+        Uses detach()/move() rather than delete(), so hidden rows keep their
+        iid and can reappear — this preserves the iid-as-dataframe-position
+        scheme that selection handlers rely on.
+        """
+        query = query.strip().lower()
+        attached = set(tv.get_children(""))
+        shown = 0
+        for iid, values, _tags in all_rows:
+            haystack = " ".join(str(v) for v in values).lower()
+            if not query or query in haystack:
+                tv.move(iid, "", shown)
+                shown += 1
+            elif iid in attached:
+                tv.detach(iid)
+
     def _build_results_tab(self, tab) -> None:
         import tkinter as tk
 
         self._results_df_wide = None
         self._results_df_long = None
+        self._ptm_tv_all_rows: list = []
+        self._mut_tv_all_rows: list = []
         self._setup_treeview_style()
 
         tab.grid_columnconfigure(0, weight=1)
@@ -1672,6 +2190,13 @@ class App(ctk.CTk):
         ctk.CTkButton(top_header, text="📈  Visualize", width=100, height=28,
                        font=ctk.CTkFont(size=12),
                        command=self._visualize_selected_ptm).pack(side=tk.RIGHT, padx=(0, 6))
+        self._results_ptm_search_var = ctk.StringVar(value="")
+        self._ptm_search_entry = ctk.CTkEntry(
+            top_header, textvariable=self._results_ptm_search_var,
+            width=220, placeholder_text="🔍 Search PTM sites… (Ctrl+F)",
+        )
+        self._ptm_search_entry.pack(side=tk.RIGHT, padx=(0, 12))
+        self._results_ptm_search_var.trace_add("write", self._filter_ptm_tv)
 
         # ── PTM site treeview ──
         top_frame = ctk.CTkFrame(outer)
@@ -1683,10 +2208,17 @@ class App(ctk.CTk):
         self._ptm_tv.bind("<Double-Button-1>", lambda _e: self._visualize_selected_ptm())
 
         # ── Detail panel header ──
-        ctk.CTkLabel(outer, text="Mutation Details",
-                     font=ctk.CTkFont(size=14, weight="bold"),
-                     anchor="w").grid(row=2, column=0, sticky="ew",
-                                      padx=16, pady=(4, 2))
+        bot_header = ctk.CTkFrame(outer, fg_color="transparent")
+        bot_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
+        ctk.CTkLabel(bot_header, text="Mutation Details",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
+        self._results_mut_search_var = ctk.StringVar(value="")
+        self._mut_search_entry = ctk.CTkEntry(
+            bot_header, textvariable=self._results_mut_search_var,
+            width=220, placeholder_text="🔍 Search mutations…",
+        )
+        self._mut_search_entry.pack(side=tk.RIGHT, padx=(0, 6))
+        self._results_mut_search_var.trace_add("write", self._filter_mut_tv)
 
         # ── Mutation detail treeview ──
         bot_frame = ctk.CTkFrame(outer)
@@ -1694,6 +2226,9 @@ class App(ctk.CTk):
         bot_frame.grid_rowconfigure(0, weight=1)
         bot_frame.grid_columnconfigure(0, weight=1)
         self._mut_tv = self._make_treeview(bot_frame, _MUT_TV_COLS)
+
+        # Ctrl+F focuses the PTM search box whenever the Results tab is active
+        self.bind_all("<Control-f>", self._focus_results_search)
 
     def _build_viz_tab(self, tab) -> None:
         import matplotlib
@@ -1864,7 +2399,7 @@ class App(ctk.CTk):
         df_fallback = pd.DataFrame(rows)
         note = None
         if not df_fallback.empty:
-            note = "patient counts unavailable in wide format — enable Long format output for accurate stem heights"
+            note = "patient counts unavailable — re-run the pipeline to generate the long-format table"
         return df_fallback, note
 
     # ── Visualization: plotting ──────────────────────────────────────────────
@@ -2111,6 +2646,148 @@ class App(ctk.CTk):
         self._viz_fig.savefig(out_path, dpi=200, facecolor=self._viz_fig.get_facecolor(), bbox_inches="tight")
         self._viz_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
 
+    # ── Radius Sweep / CIF Variance: shared dark-theme styling ────────────────
+
+    def _style_dark_figure(self, fig) -> None:
+        """Apply the app's dark theme to every axes of a Figure built by an external script."""
+        fig.patch.set_facecolor("#2b2b2b")
+        for ax in fig.axes:
+            self._style_lollipop_axis(ax)
+            if ax.get_title():
+                ax.title.set_color("#dcdcdc")
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.get_frame().set_facecolor("#3a3a3a")
+                legend.get_frame().set_edgecolor("#555555")
+                for text in legend.get_texts():
+                    text.set_color("#dcdcdc")
+
+    # ── Radius Sweep tab ────────────────────────────────────────────────────
+
+    def _build_radius_sweep_tab(self, tab) -> None:
+        import matplotlib
+        matplotlib.use("TkAgg")
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        controls = ctk.CTkFrame(tab)
+        controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+
+        ctk.CTkButton(
+            controls, text="Save PNG", width=100,
+            fg_color="gray30", hover_color="gray40",
+            command=self._save_radius_sweep_plot,
+        ).pack(side="left", padx=(12, 12), pady=10)
+
+        self._radius_sweep_status = ctk.CTkLabel(
+            controls, text="Run Radius Sweep mode from the Pipeline tab to see results here.",
+            text_color="gray60", font=ctk.CTkFont(size=11),
+        )
+        self._radius_sweep_status.pack(side="left", padx=(0, 12), pady=10)
+
+        canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
+        canvas_frame.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        canvas_frame.grid_columnconfigure(0, weight=1)
+        canvas_frame.grid_rowconfigure(0, weight=1)
+
+        self._radius_sweep_fig = Figure(figsize=(14, 9), dpi=100, facecolor="#2b2b2b")
+        self._radius_sweep_canvas = FigureCanvasTkAgg(self._radius_sweep_fig, master=canvas_frame)
+        self._radius_sweep_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def _draw_radius_sweep_plot(self) -> None:
+        from radius_sweep import build_sweep_figure
+
+        self._radius_sweep_fig.clf()
+        build_sweep_figure(self._radius_sweep_result, fig=self._radius_sweep_fig)
+        self._style_dark_figure(self._radius_sweep_fig)
+        self._radius_sweep_canvas.draw()
+        self._radius_sweep_status.configure(text="Sweep complete.", text_color=_GREEN)
+
+    def _save_radius_sweep_plot(self) -> None:
+        if not self._radius_sweep_fig.axes:
+            self._radius_sweep_status.configure(text="Run a sweep before saving.", text_color=_RED)
+            return
+        out_dir = self._output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "radius_sweep_plot.png"
+        self._radius_sweep_fig.savefig(
+            out_path, dpi=200, facecolor=self._radius_sweep_fig.get_facecolor(), bbox_inches="tight",
+        )
+        self._radius_sweep_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
+
+    # ── CIF Variance tab ────────────────────────────────────────────────────
+
+    def _build_cif_variance_tab(self, tab) -> None:
+        import matplotlib
+        matplotlib.use("TkAgg")
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        controls = ctk.CTkFrame(tab)
+        controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+
+        ctk.CTkButton(
+            controls, text="Save PNG", width=100,
+            fg_color="gray30", hover_color="gray40",
+            command=self._save_cif_variance_plot,
+        ).pack(side="left", padx=(12, 12), pady=10)
+
+        self._cif_variance_status = ctk.CTkLabel(
+            controls, text="Run CIF Variance mode from the Pipeline tab to see results here.",
+            text_color="gray60", font=ctk.CTkFont(size=11),
+        )
+        self._cif_variance_status.pack(side="left", padx=(0, 12), pady=10)
+
+        canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
+        canvas_frame.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        canvas_frame.grid_columnconfigure(0, weight=1)
+        canvas_frame.grid_rowconfigure(0, weight=1)
+
+        self._cif_variance_fig = Figure(figsize=(14, 8), dpi=100, facecolor="#2b2b2b")
+        self._cif_variance_canvas = FigureCanvasTkAgg(self._cif_variance_fig, master=canvas_frame)
+        self._cif_variance_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+    def _draw_cif_variance_plot(self) -> None:
+        from cif_variance import build_variance_figure
+
+        self._cif_variance_fig.clf()
+        build_variance_figure(self._cif_variance_result, fig=self._cif_variance_fig)
+        self._style_dark_figure(self._cif_variance_fig)
+        self._cif_variance_canvas.draw()
+        self._cif_variance_status.configure(text="Analysis complete.", text_color=_GREEN)
+
+    def _save_cif_variance_plot(self) -> None:
+        if not self._cif_variance_fig.axes:
+            self._cif_variance_status.configure(text="Run an analysis before saving.", text_color=_RED)
+            return
+        out_dir = self._output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "cif_variance_plot.png"
+        self._cif_variance_fig.savefig(
+            out_path, dpi=200, facecolor=self._cif_variance_fig.get_facecolor(), bbox_inches="tight",
+        )
+        self._cif_variance_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
+
+    # ── Results tab: search/filter ───────────────────────────────────────────
+
+    def _filter_ptm_tv(self, *_args) -> None:
+        self._filter_treeview(self._ptm_tv, self._ptm_tv_all_rows, self._results_ptm_search_var.get())
+
+    def _filter_mut_tv(self, *_args) -> None:
+        self._filter_treeview(self._mut_tv, self._mut_tv_all_rows, self._results_mut_search_var.get())
+
+    def _focus_results_search(self, event=None):
+        """Ctrl+F: focus the PTM search box, but only while the Results tab is showing."""
+        if self._tabview.get() == "Results":
+            self._ptm_search_entry.focus_set()
+            return "break"
+
     def _load_results(self) -> None:
         import pandas as pd
 
@@ -2122,8 +2799,10 @@ class App(ctk.CTk):
                 text=f"No output found in {self._output_dir.name}/",
                 text_color=_RED,
             )
-            self._ptm_tv.delete(*self._ptm_tv.get_children())
-            self._mut_tv.delete(*self._mut_tv.get_children())
+            self._clear_treeview_fully(self._ptm_tv, self._ptm_tv_all_rows)
+            self._clear_treeview_fully(self._mut_tv, self._mut_tv_all_rows)
+            self._ptm_tv_all_rows = []
+            self._mut_tv_all_rows = []
             self._results_df_wide = None
             self._results_df_long = None
             self._refresh_viz_selector(pd.DataFrame(columns=["gene", "ptm_site", "UniProt"]))
@@ -2157,12 +2836,13 @@ class App(ctk.CTk):
             text_color="gray60",
         )
         self._populate_ptm_tv(df_wide)
-        self._mut_tv.delete(*self._mut_tv.get_children())
+        self._clear_treeview_fully(self._mut_tv, self._mut_tv_all_rows)
+        self._mut_tv_all_rows = []
         self._refresh_viz_selector(df_wide)
 
     def _populate_ptm_tv(self, df) -> None:
         tv = self._ptm_tv
-        tv.delete(*tv.get_children())
+        self._clear_treeview_fully(tv, self._ptm_tv_all_rows)
         for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
                 near_pts = int(float(row.get("nearby_muts_total_patient_count", "") or "0"))
@@ -2196,6 +2876,8 @@ class App(ctk.CTk):
                 row.get("1433_confirmed_site", ""),
                 diseases,
             ), tags=("odd" if i % 2 else "even",))
+        self._ptm_tv_all_rows = self._capture_tv_rows(tv)
+        self._filter_ptm_tv()
 
     def _on_ptm_select(self, *_) -> None:
         sel = self._ptm_tv.selection()
@@ -2236,7 +2918,7 @@ class App(ctk.CTk):
 
     def _populate_mut_tv_long(self, df) -> None:
         tv = self._mut_tv
-        tv.delete(*tv.get_children())
+        self._clear_treeview_fully(tv, self._mut_tv_all_rows)
         for i, (_, r) in enumerate(df.iterrows(), 1):
             tv.insert("", "end", iid=str(i), values=(
                 i,
@@ -2254,11 +2936,13 @@ class App(ctk.CTk):
                 r.get("patient_count", ""),
                 r.get("confirmed_disrupting_mutation", ""),
             ), tags=("odd" if i % 2 else "even",))
+        self._mut_tv_all_rows = self._capture_tv_rows(tv)
+        self._filter_mut_tv()
 
     def _populate_mut_tv_wide(self, row) -> None:
         import re as _re
         tv = self._mut_tv
-        tv.delete(*tv.get_children())
+        self._clear_treeview_fully(tv, self._mut_tv_all_rows)
         ptm_m = _re.search(r"(\d+)", str(row.get("ptm_site", "")))
         ptm_pos = int(ptm_m.group(1)) if ptm_m else None
         i = 0
@@ -2292,6 +2976,8 @@ class App(ctk.CTk):
                     "",
                     "",
                 ), tags=("odd" if i % 2 else "even",))
+        self._mut_tv_all_rows = self._capture_tv_rows(tv)
+        self._filter_mut_tv()
 
     # ── Cache management ─────────────────────────────────────────────────────
 
