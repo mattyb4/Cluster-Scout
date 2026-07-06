@@ -106,20 +106,21 @@ _PTM_MARKER_COLOR = _BLUE
 _NEEDLE_DEFAULT_COLOR = "#888888"
 
 _PTM_TV_COLS = [
-    ("#",          "#col",   32),
-    ("Gene",       "gene",   58),
-    ("PTM Site",   "site",   65),
-    ("Type",       "type",  110),
-    ("≤5 pos",     "near",   52),
-    (">5 pos",     "far",    52),
-    ("Unique pos", "total",  68),
-    ("Patients",   "pts",    65),
-    ("COSMIC",     "cosmic", 65),
-    ("At PTM",     "atptm",  52),
-    ("Disrupting", "disrupt",68),
-    ("14-3-3",     "pred14", 58),
-    ("Conf.",      "conf14", 52),
-    ("Diseases",   "dis",   200),
+    ("#",              "#col",   32),
+    ("UniProt",        "uniprot",70),
+    ("Gene",           "gene",   58),
+    ("PTM Site",       "site",   65),
+    ("Type",           "type",  110),
+    ("≤5 pos",         "near",   52),
+    (">5 pos",         "far",    52),
+    ("Unique pos",     "total",  68),
+    ("Patients",       "pts",    65),
+    ("COSMIC",         "cosmic", 65),
+    ("At PTM",         "atptm",  52),
+    ("14-3-3",         "pred14", 58),
+    ("Disordered?",    "disord", 78),
+    ("Binding?",       "bind",   58),
+    ("Max lin. dist.", "maxlin", 90),
 ]
 
 _MUT_TV_COLS = [
@@ -127,16 +128,12 @@ _MUT_TV_COLS = [
     ("Mutation",   "mut",    80),
     ("Seq dist",   "seqd",   62),
     ("Dist (Å)",   "dist",   62),
-    ("Binding",    "bind",   62),
     ("Binding?",   "isbnd",  58),
-    ("Disorder",   "dsord",  62),
-    ("Disordr?",   "isdis",  58),
+    ("Disordered?","isdis",  78),
     ("PP Class",   "ppc",   115),
-    ("PP Score",   "pps",    62),
     ("Mut pLDDT",  "mpld",   72),
     ("PAE",        "pae",    48),
     ("Patients",   "pts",    62),
-    ("Disrupting", "dis",    68),
 ]
 
 
@@ -220,8 +217,7 @@ class App(ctk.CTk):
         pipeline_tab = self._tabview.add("Pipeline")
         results_tab = self._tabview.add("Results")
         viz_tab = self._tabview.add("Visualization")
-        radius_sweep_tab = self._tabview.add("Radius Sweep")
-        cif_variance_tab = self._tabview.add("CIF Variance")
+        analysis_tools_tab = self._tabview.add("Analysis Tools")
         help_tab = self._tabview.add("Help / Documentation")
 
         # ── Pipeline tab ──
@@ -298,8 +294,7 @@ class App(ctk.CTk):
             ("PTM Proximity", "ptm-proximity"),
             ("Mutation Clustering", "mutation-clustering"),
             ("Single Protein", "single-protein"),
-            ("Radius Sweep", "radius-sweep"),
-            ("CIF Variance", "cif-variance"),
+            ("Analysis Tools", "analysis-tools"),
             ("CA Coordinates", "ca-coordinates"),
         ]:
             ctk.CTkRadioButton(
@@ -526,11 +521,8 @@ class App(ctk.CTk):
         # ── Visualization tab ──
         self._build_viz_tab(viz_tab)
 
-        # ── Radius Sweep tab ──
-        self._build_radius_sweep_tab(radius_sweep_tab)
-
-        # ── CIF Variance tab ──
-        self._build_cif_variance_tab(cif_variance_tab)
+        # ── Analysis Tools tab ──
+        self._build_analysis_tools_tab(analysis_tools_tab)
 
         # ── Help / Documentation tab ──
         self._build_help_tab(help_tab)
@@ -592,11 +584,8 @@ class App(ctk.CTk):
         if mode == "single-protein":
             self._build_single_protein_panel()
             return
-        if mode == "radius-sweep":
-            self._build_radius_sweep_panel()
-            return
-        if mode == "cif-variance":
-            self._build_cif_variance_panel()
+        if mode == "analysis-tools":
+            self._build_analysis_tools_panel()
             return
         if mode == "ca-coordinates":
             self._build_ca_coordinates_panel()
@@ -697,17 +686,38 @@ class App(ctk.CTk):
             parent_name = Path(path).parent.name
             self._single_uniprot_var.set(parent_name)
 
-    def _build_radius_sweep_panel(self):
-        """Build the input fields for radius-sweep analysis mode."""
+    def _build_analysis_tools_panel(self):
+        """Build the combined Radius Sweep / CIF Variance analysis panel.
+
+        Both tools share one mode and one segmented-button toggle (also used by
+        the Analysis Tools results tab) since they're both auxiliary structural
+        analyses rather than pipeline steps — only the parameter fields below the
+        toggle, and which script actually runs, differ per sub-tool.
+        """
         ctk.CTkLabel(
             self._steps_outer,
-            text="Radius Sweep Analysis",
+            text="Analysis Tools",
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=4, padx=12, pady=(8, 2), sticky="w")
 
+        if not hasattr(self, "_analysis_subtool_var"):
+            self._analysis_subtool_var = ctk.StringVar(value="Radius Sweep")
+        ctk.CTkSegmentedButton(
+            self._steps_outer, values=["Radius Sweep", "CIF Variance"],
+            variable=self._analysis_subtool_var,
+            command=lambda _v: self._rebuild_step_rows(),
+        ).grid(row=1, column=0, columnspan=4, padx=12, pady=(0, 8), sticky="w")
+
+        if self._analysis_subtool_var.get() == "Radius Sweep":
+            self._build_radius_sweep_fields()
+        else:
+            self._build_cif_variance_fields()
+
+    def _build_radius_sweep_fields(self):
+        """Radius Sweep parameter fields — rows 2-5 of the Analysis Tools panel."""
         # Genes
         ctk.CTkLabel(self._steps_outer, text="Genes:", anchor="w").grid(
-            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         if not hasattr(self, "_radius_genes_var"):
             from radius_sweep import DEFAULT_GENES
@@ -715,14 +725,14 @@ class App(ctk.CTk):
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._radius_genes_var, width=400,
             placeholder_text="Space-separated gene symbols",
-        ).grid(row=1, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
+        ).grid(row=2, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
 
         # Radius range
         ctk.CTkLabel(self._steps_outer, text="Radius range (Å):", anchor="w").grid(
-            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=3, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         range_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        range_frame.grid(row=2, column=1, columnspan=3, padx=6, pady=6, sticky="w")
+        range_frame.grid(row=3, column=1, columnspan=3, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_radius_start_var"):
             self._radius_start_var = ctk.StringVar(value="4")
             self._radius_stop_var = ctk.StringVar(value="20")
@@ -742,33 +752,27 @@ class App(ctk.CTk):
             self._steps_outer, text="Include unfiltered COSMIC comparison",
             variable=self._radius_unfiltered_var,
             checkbox_width=18, checkbox_height=18,
-        ).grid(row=3, column=0, columnspan=4, padx=12, pady=6, sticky="w")
+        ).grid(row=4, column=0, columnspan=4, padx=12, pady=6, sticky="w")
 
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=4, column=1, columnspan=3, padx=12, pady=6, sticky="e")
+        status.grid(row=5, column=1, columnspan=3, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=4, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=5, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 
-    def _build_cif_variance_panel(self):
-        """Build the input fields for CIF-variance analysis mode."""
-        ctk.CTkLabel(
-            self._steps_outer,
-            text="CIF Variance Analysis",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
-
+    def _build_cif_variance_fields(self):
+        """CIF Variance parameter fields — rows 2-9 of the Analysis Tools panel."""
         # Input folder
         ctk.CTkLabel(self._steps_outer, text="Input folder:", anchor="w").grid(
-            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         if not hasattr(self, "_variance_input_dir_var"):
             from cif_variance import DEFAULT_INPUT_DIR
@@ -776,35 +780,35 @@ class App(ctk.CTk):
             self._variance_input_dir_var.trace_add("write", self._update_variance_cif_count)
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._variance_input_dir_var, width=340,
-        ).grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+        ).grid(row=2, column=1, padx=6, pady=6, sticky="ew")
         ctk.CTkButton(
             self._steps_outer, text="Browse", width=70, height=26,
             font=ctk.CTkFont(size=12),
             command=self._browse_variance_input_dir,
-        ).grid(row=1, column=2, padx=12, pady=6, sticky="e")
+        ).grid(row=2, column=2, padx=12, pady=6, sticky="e")
 
         self._variance_cif_count_label = ctk.CTkLabel(
             self._steps_outer, text="", anchor="w", font=ctk.CTkFont(size=11),
         )
-        self._variance_cif_count_label.grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="w")
+        self._variance_cif_count_label.grid(row=3, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="w")
         self._update_variance_cif_count()
 
         # Top N
         ctk.CTkLabel(self._steps_outer, text="Top N residues:", anchor="w").grid(
-            row=3, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=4, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         if not hasattr(self, "_variance_top_var"):
             self._variance_top_var = ctk.StringVar(value="10")
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._variance_top_var, width=60,
-        ).grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        ).grid(row=4, column=1, padx=6, pady=6, sticky="w")
 
         # Report range
         ctk.CTkLabel(self._steps_outer, text="Report range:", anchor="w").grid(
-            row=4, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=5, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         report_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        report_frame.grid(row=4, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        report_frame.grid(row=5, column=1, columnspan=2, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_variance_range_start_var"):
             self._variance_range_start_var = ctk.StringVar(value="")
             self._variance_range_end_var = ctk.StringVar(value="")
@@ -815,10 +819,10 @@ class App(ctk.CTk):
 
         # Align range
         ctk.CTkLabel(self._steps_outer, text="Align range:", anchor="w").grid(
-            row=5, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=6, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         align_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        align_frame.grid(row=5, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        align_frame.grid(row=6, column=1, columnspan=2, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_variance_align_start_var"):
             self._variance_align_start_var = ctk.StringVar(value="")
             self._variance_align_end_var = ctk.StringVar(value="")
@@ -829,36 +833,36 @@ class App(ctk.CTk):
 
         # UniProt / gene overrides
         ctk.CTkLabel(self._steps_outer, text="UniProt override:", anchor="w").grid(
-            row=6, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=7, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         if not hasattr(self, "_variance_uniprot_var"):
             self._variance_uniprot_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._variance_uniprot_var, width=150,
             placeholder_text="auto-detected from CIF",
-        ).grid(row=6, column=1, padx=6, pady=6, sticky="w")
+        ).grid(row=7, column=1, padx=6, pady=6, sticky="w")
 
         ctk.CTkLabel(self._steps_outer, text="Gene override:", anchor="w").grid(
-            row=7, column=0, padx=(12, 6), pady=6, sticky="w"
+            row=8, column=0, padx=(12, 6), pady=6, sticky="w"
         )
         if not hasattr(self, "_variance_gene_var"):
             self._variance_gene_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._variance_gene_var, width=150,
             placeholder_text="optional, for UniProt lookup",
-        ).grid(row=7, column=1, padx=6, pady=6, sticky="w")
+        ).grid(row=8, column=1, padx=6, pady=6, sticky="w")
 
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=8, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=9, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=8, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=9, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 
@@ -1113,7 +1117,7 @@ class App(ctk.CTk):
                 from tkinter import messagebox
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
                 return
-        elif mode == "radius-sweep":
+        elif mode == "analysis-tools" and self._analysis_subtool_var.get() == "Radius Sweep":
             from tkinter import messagebox
             genes = self._radius_genes_var.get().split()
             if not genes:
@@ -1139,7 +1143,7 @@ class App(ctk.CTk):
                     f"Run the PTM Proximity or Mutation Clustering pipeline (step 1) first.",
                 )
                 return
-        elif mode == "cif-variance":
+        elif mode == "analysis-tools" and self._analysis_subtool_var.get() == "CIF Variance":
             from tkinter import messagebox
             input_dir = Path(self._variance_input_dir_var.get().strip())
             n_cifs = len(list(input_dir.glob("*.cif"))) if input_dir.is_dir() else 0
@@ -1388,11 +1392,11 @@ class App(ctk.CTk):
         if mode == "single-protein":
             self._run_single_protein()
             return
-        if mode == "radius-sweep":
-            self._run_radius_sweep()
-            return
-        if mode == "cif-variance":
-            self._run_cif_variance()
+        if mode == "analysis-tools":
+            if self._analysis_subtool_var.get() == "Radius Sweep":
+                self._run_radius_sweep()
+            else:
+                self._run_cif_variance()
             return
         if mode == "ca-coordinates":
             self._run_ca_coordinates()
@@ -1862,13 +1866,14 @@ class App(ctk.CTk):
                     self._show_append_dialog(cif_path, uniprot)
                 elif kind == "viz_data":
                     _, which, result = msg
+                    self._tabview.set("Analysis Tools")
                     if which == "radius-sweep":
                         self._radius_sweep_result = result
-                        self._tabview.set("Radius Sweep")
+                        self._analysis_subtool_var.set("Radius Sweep")
                         self._draw_radius_sweep_plot()
                     elif which == "cif-variance":
                         self._cif_variance_result = result
-                        self._tabview.set("CIF Variance")
+                        self._analysis_subtool_var.set("CIF Variance")
                         self._draw_cif_variance_plot()
                 elif kind == "enable_open":
                     self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
@@ -2085,7 +2090,7 @@ class App(ctk.CTk):
         col_ids = [c[1] for c in col_defs]
         tv["columns"] = col_ids
 
-        numeric_cols = {"#col", "near", "far", "total", "pts", "cosmic", "seqd", "dist", "pps", "pae", "mpld"}
+        numeric_cols = {"#col", "near", "far", "total", "pts", "cosmic", "seqd", "dist", "pae", "mpld", "maxlin"}
         for display, col_id, width in col_defs:
             anchor = "e" if col_id in numeric_cols else "w"
             tv.heading(col_id, text=display,
@@ -2662,13 +2667,16 @@ class App(ctk.CTk):
                 for text in legend.get_texts():
                     text.set_color("#dcdcdc")
 
-    # ── Radius Sweep tab ────────────────────────────────────────────────────
+    # ── Analysis Tools tab (Radius Sweep + CIF Variance, shared toggle) ─────
 
-    def _build_radius_sweep_tab(self, tab) -> None:
+    def _build_analysis_tools_tab(self, tab) -> None:
         import matplotlib
         matplotlib.use("TkAgg")
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        if not hasattr(self, "_analysis_subtool_var"):
+            self._analysis_subtool_var = ctk.StringVar(value="Radius Sweep")
 
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
@@ -2676,26 +2684,56 @@ class App(ctk.CTk):
         controls = ctk.CTkFrame(tab)
         controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
 
+        ctk.CTkSegmentedButton(
+            controls, values=["Radius Sweep", "CIF Variance"],
+            variable=self._analysis_subtool_var,
+            command=lambda _v: self._show_active_analysis_plot(),
+        ).pack(side="left", padx=(12, 12), pady=10)
+
         ctk.CTkButton(
             controls, text="Save PNG", width=100,
             fg_color="gray30", hover_color="gray40",
-            command=self._save_radius_sweep_plot,
-        ).pack(side="left", padx=(12, 12), pady=10)
+            command=self._save_active_analysis_plot,
+        ).pack(side="left", padx=(0, 12), pady=10)
 
-        self._radius_sweep_status = ctk.CTkLabel(
-            controls, text="Run Radius Sweep mode from the Pipeline tab to see results here.",
+        self._analysis_tools_status = ctk.CTkLabel(
+            controls, text="Run Radius Sweep or CIF Variance mode from the Pipeline tab to see results here.",
             text_color="gray60", font=ctk.CTkFont(size=11),
         )
-        self._radius_sweep_status.pack(side="left", padx=(0, 12), pady=10)
+        self._analysis_tools_status.pack(side="left", padx=(0, 12), pady=10)
 
         canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
         canvas_frame.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
         canvas_frame.grid_columnconfigure(0, weight=1)
         canvas_frame.grid_rowconfigure(0, weight=1)
 
+        # Both figures live in the same canvas_frame; only one is gridded at a time
+        # (toggled by the segmented button above) so switching is instant and each
+        # tool keeps its own plot in memory without re-running anything.
         self._radius_sweep_fig = Figure(figsize=(14, 9), dpi=100, facecolor="#2b2b2b")
         self._radius_sweep_canvas = FigureCanvasTkAgg(self._radius_sweep_fig, master=canvas_frame)
         self._radius_sweep_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        self._cif_variance_fig = Figure(figsize=(14, 8), dpi=100, facecolor="#2b2b2b")
+        self._cif_variance_canvas = FigureCanvasTkAgg(self._cif_variance_fig, master=canvas_frame)
+        self._cif_variance_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        self._show_active_analysis_plot()
+
+    def _show_active_analysis_plot(self) -> None:
+        """Show whichever canvas matches the current segmented-button selection."""
+        if self._analysis_subtool_var.get() == "Radius Sweep":
+            self._cif_variance_canvas.get_tk_widget().grid_remove()
+            self._radius_sweep_canvas.get_tk_widget().grid()
+        else:
+            self._radius_sweep_canvas.get_tk_widget().grid_remove()
+            self._cif_variance_canvas.get_tk_widget().grid()
+
+    def _save_active_analysis_plot(self) -> None:
+        if self._analysis_subtool_var.get() == "Radius Sweep":
+            self._save_radius_sweep_plot()
+        else:
+            self._save_cif_variance_plot()
 
     def _draw_radius_sweep_plot(self) -> None:
         from radius_sweep import build_sweep_figure
@@ -2704,11 +2742,12 @@ class App(ctk.CTk):
         build_sweep_figure(self._radius_sweep_result, fig=self._radius_sweep_fig)
         self._style_dark_figure(self._radius_sweep_fig)
         self._radius_sweep_canvas.draw()
-        self._radius_sweep_status.configure(text="Sweep complete.", text_color=_GREEN)
+        self._show_active_analysis_plot()
+        self._analysis_tools_status.configure(text="Sweep complete.", text_color=_GREEN)
 
     def _save_radius_sweep_plot(self) -> None:
         if not self._radius_sweep_fig.axes:
-            self._radius_sweep_status.configure(text="Run a sweep before saving.", text_color=_RED)
+            self._analysis_tools_status.configure(text="Run a sweep before saving.", text_color=_RED)
             return
         out_dir = self._output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -2716,42 +2755,7 @@ class App(ctk.CTk):
         self._radius_sweep_fig.savefig(
             out_path, dpi=200, facecolor=self._radius_sweep_fig.get_facecolor(), bbox_inches="tight",
         )
-        self._radius_sweep_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
-
-    # ── CIF Variance tab ────────────────────────────────────────────────────
-
-    def _build_cif_variance_tab(self, tab) -> None:
-        import matplotlib
-        matplotlib.use("TkAgg")
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(1, weight=1)
-
-        controls = ctk.CTkFrame(tab)
-        controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
-
-        ctk.CTkButton(
-            controls, text="Save PNG", width=100,
-            fg_color="gray30", hover_color="gray40",
-            command=self._save_cif_variance_plot,
-        ).pack(side="left", padx=(12, 12), pady=10)
-
-        self._cif_variance_status = ctk.CTkLabel(
-            controls, text="Run CIF Variance mode from the Pipeline tab to see results here.",
-            text_color="gray60", font=ctk.CTkFont(size=11),
-        )
-        self._cif_variance_status.pack(side="left", padx=(0, 12), pady=10)
-
-        canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
-        canvas_frame.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
-        canvas_frame.grid_columnconfigure(0, weight=1)
-        canvas_frame.grid_rowconfigure(0, weight=1)
-
-        self._cif_variance_fig = Figure(figsize=(14, 8), dpi=100, facecolor="#2b2b2b")
-        self._cif_variance_canvas = FigureCanvasTkAgg(self._cif_variance_fig, master=canvas_frame)
-        self._cif_variance_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._analysis_tools_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
 
     def _draw_cif_variance_plot(self) -> None:
         from cif_variance import build_variance_figure
@@ -2760,11 +2764,12 @@ class App(ctk.CTk):
         build_variance_figure(self._cif_variance_result, fig=self._cif_variance_fig)
         self._style_dark_figure(self._cif_variance_fig)
         self._cif_variance_canvas.draw()
-        self._cif_variance_status.configure(text="Analysis complete.", text_color=_GREEN)
+        self._show_active_analysis_plot()
+        self._analysis_tools_status.configure(text="Analysis complete.", text_color=_GREEN)
 
     def _save_cif_variance_plot(self) -> None:
         if not self._cif_variance_fig.axes:
-            self._cif_variance_status.configure(text="Run an analysis before saving.", text_color=_RED)
+            self._analysis_tools_status.configure(text="Run an analysis before saving.", text_color=_RED)
             return
         out_dir = self._output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -2772,7 +2777,7 @@ class App(ctk.CTk):
         self._cif_variance_fig.savefig(
             out_path, dpi=200, facecolor=self._cif_variance_fig.get_facecolor(), bbox_inches="tight",
         )
-        self._cif_variance_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
+        self._analysis_tools_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)
 
     # ── Results tab: search/filter ───────────────────────────────────────────
 
@@ -2856,12 +2861,14 @@ class App(ctk.CTk):
                 total_muts: int | str = near_unique + far_unique
             except ValueError:
                 total_muts = ""
-            disrupt  = "Yes" if row.get("confirmed_disrupting_mutations", "").strip() else ""
-            diseases = row.get("ptm_diseases", "")
-            if len(diseases) > 50:
-                diseases = diseases[:47] + "…"
+            linear_dists = [d for d in row.get("morethan5_linear_distance", "").split(",") if d.strip()]
+            try:
+                max_linear_dist: int | str = max(int(d) for d in linear_dists)
+            except ValueError:
+                max_linear_dist = ""
             tv.insert("", "end", iid=str(i), values=(
                 i,
+                row.get("UniProt", ""),
                 row.get("gene", ""),
                 row.get("ptm_site", ""),
                 row.get("ptm_type", ""),
@@ -2871,10 +2878,10 @@ class App(ctk.CTk):
                 total_pts,
                 row.get("total_cosmic_missense_patients", ""),
                 row.get("mutation_at_ptm_site", ""),
-                disrupt,
                 row.get("1433pred_binding_site", ""),
-                row.get("1433_confirmed_site", ""),
-                diseases,
+                row.get("ptm_is_disordered", ""),
+                row.get("ptm_is_binding", ""),
+                max_linear_dist,
             ), tags=("odd" if i % 2 else "even",))
         self._ptm_tv_all_rows = self._capture_tv_rows(tv)
         self._filter_ptm_tv()
@@ -2925,16 +2932,12 @@ class App(ctk.CTk):
                 r.get("mutation", ""),
                 r.get("sequence_distance", ""),
                 r.get("distance_angstrom", ""),
-                r.get("mut_aiupred_binding", ""),
                 r.get("mut_is_binding", ""),
-                r.get("mut_aiupred_general", ""),
                 r.get("mut_is_disordered", ""),
                 r.get("polyphen_class", ""),
-                r.get("polyphen_score", ""),
                 r.get("mutation_plddt", ""),
                 r.get("pair_pae", ""),
                 r.get("patient_count", ""),
-                r.get("confirmed_disrupting_mutation", ""),
             ), tags=("odd" if i % 2 else "even",))
         self._mut_tv_all_rows = self._capture_tv_rows(tv)
         self._filter_mut_tv()
@@ -2967,14 +2970,12 @@ class App(ctk.CTk):
                     m.group(1),
                     seq_d,
                     m.group(4),
-                    "", "",  # binding score / is_binding (unavailable in wide format)
-                    "", "",  # disorder score / is_disordered (unavailable in wide format)
+                    "",  # is_binding (unavailable in wide format)
+                    "",  # is_disordered (unavailable in wide format)
                     _PP_LABEL.get(pp_code, ""),
-                    m.group(3) or "",
-                    "",
+                    "",  # mut pLDDT (unavailable in wide format)
                     m.group(5) or "",
-                    "",
-                    "",
+                    "",  # patient count (unavailable in wide format)
                 ), tags=("odd" if i % 2 else "even",))
         self._mut_tv_all_rows = self._capture_tv_rows(tv)
         self._filter_mut_tv()
