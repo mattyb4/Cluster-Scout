@@ -229,8 +229,6 @@ uv run scripts/radius_sweep.py --radii 4 25 1
 
 Output is written to `Output/radius_sweep.png` (a 2- or 4-panel plot depending on whether `--unfiltered` was used) and a matching `Output/radius_sweep.tsv` with the raw per-radius data. Elbow points and average optimal radius are also printed to the console.
 
-*Note: this script depends on the `kneed` package, which is not currently listed in `pyproject.toml` — install it manually (`uv pip install kneed`) before running.*
-
 ## Comparing Structural Variance Across CIF Models
 
 `scripts/cif_variance.py` compares multiple AlphaFold CIF predictions of the same protein (e.g., different seeds or model versions) to assess structural confidence. It aligns the structures to an iteratively-refined average reference, then reports per-residue positional variance and pLDDT agreement, cross-referenced against PTM and mutation sites from the pipeline's intermediate data.
