@@ -170,8 +170,8 @@ PTM_PROXIMITY_STEPS = [
      "Downloading AlphaFold CIF models and PAE files"),
     ("Find nearby mutations and compute distances",
      "Finding nearby mutations and computing distances"),
-    ("Annotate results (14-3-3, PolyPhen-2, kinase predictions)",
-     "Annotating results (14-3-3, PolyPhen-2, kinase predictions)"),
+    ("Annotate results (14-3-3, PolyPhen-2, kinase, AIUPred predictions)",
+     "Annotating results (14-3-3, PolyPhen-2, kinase, AIUPred predictions)"),
 ]
 
 MUTATION_CLUSTERING_STEPS = [

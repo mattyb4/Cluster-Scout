@@ -2,6 +2,7 @@ import argparse
 import ast
 import re
 import sys
+import time
 import requests
 import pandas as pd
 from pathlib import Path
@@ -19,6 +20,17 @@ HOTSPOT_MIN_AFFECTED_CASES = 3
 UNMATCHED_GENES_LOG = PROJECT_ROOT / "Output" / "logs" / "ptm_genes_without_cosmic_mutations.tsv"
 
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+
+# Gene/UniProt mapping and isoform-mismatch checking are reported to the app as one
+# continuous progress bar (rather than two bars that complete and restart) by treating
+# them as two equal-weighted phases of a single overall percentage.
+_NUM_PHASES = 2
+
+
+def _emit_progress(phase: int, phase_pct: float, desc: str) -> None:
+    """Print overall progress for the app to parse. phase is 0-indexed, phase_pct is 0-100."""
+    overall = int((phase * 100 + phase_pct) / _NUM_PHASES)
+    print(f"\r##PROGRESS## {overall} {desc}", end="", flush=True)
 
 
 def _load_cache(filename, columns):
@@ -133,7 +145,9 @@ def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
     if missing:
         uniprot_release = None
         total_batches = (len(missing) + batch_size - 1) // batch_size
-        for i in tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt gene names", total=total_batches):
+        for batch_num, i in enumerate(
+            tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt gene names", total=total_batches), 1,
+        ):
             batch = missing[i : i + batch_size]
             query = " OR ".join(f"accession:{uid}" for uid in batch)
             url = "https://rest.uniprot.org/uniprotkb/search"
@@ -160,9 +174,14 @@ def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
             for uid in batch:
                 cache.setdefault(uid, ("",))
 
+            _emit_progress(0, batch_num / total_batches * 100,
+                           f"Fetching UniProt gene names: batch {batch_num}/{total_batches}")
+
         if uniprot_release:
             print(f"Using UniProt release: {uniprot_release}")
         _save_cache(UNIPROT_GENE_CACHE_FILE, cache, ["UniProt", "gene"])
+    else:
+        _emit_progress(0, 100, "UniProt gene names: all cached")
 
     rows = [{"UniProt": uid, "gene": cache[uid][0]} for uid in ids if cache.get(uid, ("",))[0]]
     return pd.DataFrame(rows, columns=["UniProt", "gene"])
@@ -189,7 +208,9 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
     if missing:
         missing_set = set(missing)
         total_batches = (len(missing) + batch_size - 1) // batch_size
-        for i in tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt IDs for genes", total=total_batches):
+        for batch_num, i in enumerate(
+            tqdm(range(0, len(missing), batch_size), desc="Fetching UniProt IDs for genes", total=total_batches), 1,
+        ):
             batch = missing[i : i + batch_size]
             gene_query = " OR ".join(f"gene_exact:{g}" for g in batch)
             query = f"({gene_query}) AND organism_id:9606 AND reviewed:true"
@@ -222,7 +243,12 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
             for g in batch:
                 cache.setdefault(g, ("",))
 
+            _emit_progress(0, batch_num / total_batches * 100,
+                           f"Fetching UniProt IDs for genes: batch {batch_num}/{total_batches}")
+
         _save_cache(GENE_TO_UNIPROT_CACHE_FILE, cache, ["gene", "UniProt"])
+    else:
+        _emit_progress(0, 100, "UniProt IDs for genes: all cached")
 
     rows = [{"gene": g, "UniProt": cache[g][0]} for g in genes if cache.get(g, ("",))[0]]
     if not rows:
@@ -312,7 +338,9 @@ def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size
     if missing:
         total_batches = (len(missing) + batch_size - 1) // batch_size
 
-        for i in tqdm(range(0, len(missing), batch_size), desc="Checking COSMIC transcripts for isoform mismatches", total=total_batches):
+        for batch_num, i in enumerate(
+            tqdm(range(0, len(missing), batch_size), desc="Checking COSMIC transcripts for isoform mismatches", total=total_batches), 1,
+        ):
             batch = missing[i : i + batch_size]
             enst_noversion = [gene_to_transcript[g].split(".")[0] for g in batch]
             query = " OR ".join(f"xref:ensembl-{e}" for e in enst_noversion)
@@ -350,7 +378,12 @@ def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size
 
                 cache[gene] = (gene_to_transcript[gene], isoform_safe_length)
 
+            _emit_progress(1, batch_num / total_batches * 100,
+                           f"Checking isoform mismatches: batch {batch_num}/{total_batches}")
+
         _save_cache(ISOFORM_SAFE_LENGTH_CACHE_FILE, cache, ["gene", "transcript_accession", "isoform_safe_length"])
+    else:
+        _emit_progress(1, 100, "Isoform mismatches: all cached")
 
     rows = [
         {"gene": g, "isoform_safe_length": int(cache[g][1])}
@@ -383,7 +416,9 @@ def _run_ptm_proximity_filter(output_file):
     # -----------------------
     uniprot_ids = ptmd["UniProt"].dropna().unique().tolist()
     print(f"Mapping {len(uniprot_ids)} UniProt IDs to gene names via UniProt API...")
+    t0 = time.time()
     idmap = fetch_uniprot_gene_mapping(uniprot_ids)
+    print(f"  UniProt gene mapping completed in {time.time() - t0:.1f}s")
 
     ptmd = ptmd.merge(idmap, on="UniProt", how="left")
 
@@ -491,7 +526,9 @@ def _run_ptm_proximity_filter(output_file):
     # -----------------------
     print("Checking for COSMIC/canonical isoform mismatches...")
     gene_to_uniprot = dict(zip(merged["gene"], merged["uniprot_id"]))
+    t0 = time.time()
     isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
+    print(f"  Isoform mismatch check completed in {time.time() - t0:.1f}s")
     merged = merged.merge(isoform_lengths, on="gene", how="left")
 
     # -----------------------
@@ -530,7 +567,9 @@ def _run_mutation_clustering_filter(output_file):
 
     gene_names = cosmic_grouped["gene"].tolist()
     print(f"Mapping {len(gene_names)} genes to UniProt IDs via UniProt API...")
+    t0 = time.time()
     gene_map = fetch_gene_to_uniprot_mapping(gene_names)
+    print(f"  UniProt ID mapping completed in {time.time() - t0:.1f}s")
 
     result = cosmic_grouped.merge(gene_map, on="gene", how="left")
     unmapped = result["UniProt"].isna().sum()
@@ -544,7 +583,9 @@ def _run_mutation_clustering_filter(output_file):
     # -----------------------
     print("Checking for COSMIC/canonical isoform mismatches...")
     gene_to_uniprot = dict(zip(result["gene"], result["uniprot_id"]))
+    t0 = time.time()
     isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
+    print(f"  Isoform mismatch check completed in {time.time() - t0:.1f}s")
     result = result.merge(isoform_lengths, on="gene", how="left")
 
     # -----------------------

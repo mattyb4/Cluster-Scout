@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -434,6 +435,7 @@ def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
     print("\n── Phase 3: Kinase predictions ──")
 
     unique_uniprots = df["UniProt"].unique().tolist()
+    print(f"  Loading sequences for {len(unique_uniprots)} proteins...")
     seq_maps: dict[str, dict[int, str]] = {}
     skipped = 0
     for uid in unique_uniprots:
@@ -693,12 +695,13 @@ def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, flo
 
 
 def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]]:
-    """Phase 4: fetch general, binding, and linker disorder scores for each protein.
+    """Phase 4: fetch general and binding disorder scores for each protein.
 
-    Makes two API calls per protein: binding (yields general+binding) and linker.
-    Returns {type_name: {uniprot_id: {position: score}}} for types general/binding/linker.
+    Makes one API call per protein (binding), which yields both general and
+    binding scores. Returns {type_name: {uniprot_id: {position: score}}} for
+    types general/binding.
     """
-    print("\n── Phase 4: AIUPred disorder scores (general + binding + linker) ──")
+    print("\n── Phase 4: AIUPred disorder scores (general + binding) ──")
     cache = _aiupred_load_cache()
     uniprots = [u for u in df["UniProt"].unique() if u]
 
@@ -719,7 +722,8 @@ def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]
             for t, scores in fetch_aiupred_all(api_type, uid).items():
                 cache[(uid, t)] = scores
             done += 1
-            _emit_progress(3, done / max(total_fetches, 1) * 100, f"AIUPred {uid}")
+            _emit_progress(3, done / max(total_fetches, 1) * 100,
+                           f"AIUPred {uid}: {done}/{total_fetches}")
         any_new = True
 
     if any_new:
@@ -856,11 +860,21 @@ def main() -> None:
                      keep_default_na=False)
     print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
 
+    t0 = time.time()
     score_maps, confirmed_sites = run_1433_phase(df)
-    pp_cache = run_polyphen_phase(df)
-    seq_maps, kin_cache = run_kinase_phase(df)
+    print(f"  Phase 1 (14-3-3) completed in {time.time() - t0:.1f}s")
 
+    t0 = time.time()
+    pp_cache = run_polyphen_phase(df)
+    print(f"  Phase 2 (PolyPhen-2) completed in {time.time() - t0:.1f}s")
+
+    t0 = time.time()
+    seq_maps, kin_cache = run_kinase_phase(df)
+    print(f"  Phase 3 (Kinase) completed in {time.time() - t0:.1f}s")
+
+    t0 = time.time()
     disorder_maps = run_aiupred_phase(df)
+    print(f"  Phase 4 (AIUPred) completed in {time.time() - t0:.1f}s")
     for atype in ("general", "binding"):
         col_vals = []
         for _, row in df.iterrows():
