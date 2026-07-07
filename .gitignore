@@ -44,3 +44,4 @@ Output/logs/ptm_skipped.tsv
 Output/logs/mutation_cluster_skipped.tsv
 Output/logs/ptm_genes_without_cosmic_mutations.tsv
 Output/logs/pipeline_runtimes.json
+Output/logs/results_column_prefs.json
