@@ -19,6 +19,7 @@ from pipeline_utils import (  # noqa: E402
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
     input_dir, resolve_input_file, extract_uniprot_from_cif,
     COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES, fmt_time as _fmt_time,
 )
 
 _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str]] = {
@@ -121,13 +122,6 @@ _MUT_TV_COLS = [
     ("PAE",        "pae",    48),
     ("Patients",   "pts",    62),
 ]
-
-
-def _fmt_time(seconds: float) -> str:
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    return f"{s // 60}m {s % 60:02d}s"
 
 
 RUNTIMES_FILE = OUTPUT_DIR / "logs" / "pipeline_runtimes.json"

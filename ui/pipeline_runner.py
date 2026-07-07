@@ -28,6 +28,7 @@ from ui.common import (
     _fmt_time, _load_runtimes, _save_runtimes, _detect_run_type,
     _CACHE_ITEMS, _cache_entry_count,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
+    input_dir, resolve_input_file, COSMIC_INPUT_DIR, COSMIC_SOMATIC_STATUSES,
 )
 
 
@@ -343,12 +344,40 @@ class PipelineRunnerMixin:
         cache_dir = PROJECT_ROOT / "data" / "cache"
         models_dir = PROJECT_ROOT / "cif_models"
 
-        # Count proteins from intermediate TSV (if exists) or estimate from input
+        # Count proteins from the intermediate TSV if a previous run produced one;
+        # otherwise step 1 hasn't run yet, so estimate from the raw input files.
         n_proteins = 0
         if input_tsv.exists():
             try:
                 df = pd.read_csv(input_tsv, sep="\t", usecols=["uniprot_id"], dtype=str)
                 n_proteins = df["uniprot_id"].nunique()
+            except Exception:
+                pass
+
+        if n_proteins == 0:
+            # Estimate from COSMIC directly, applying the same somatic-status and
+            # hotspot-recurrence filtering step 1 will apply, so the count approximates
+            # genes that will actually survive filtering (not just genes mentioned
+            # anywhere in COSMIC). This works for both modes: in ptm-proximity mode,
+            # PTMD's PTM-site coverage is broad enough that COSMIC's hotspot threshold
+            # — not the PTMD intersection — is the dominant bottleneck in practice, and
+            # PTMD's own "Gene name" column is too sparse to use directly (most rows
+            # only resolve to a gene via a UniProt API lookup, which isn't available
+            # before step 1 has run).
+            try:
+                cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+                cosmic_cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
+                cosmic_df = pd.read_csv(cosmic_file, sep="\t", usecols=cosmic_cols,
+                                        dtype=str, low_memory=False)
+                cosmic_df = cosmic_df[cosmic_df["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)]
+                try:
+                    min_samples = int(self._min_samples_var.get().strip() or 3)
+                except ValueError:
+                    min_samples = 3
+                affected_cases = cosmic_df.groupby(["GENE_SYMBOL", "MUTATION_AA"])["COSMIC_SAMPLE_ID"].nunique()
+                hotspot_genes = affected_cases[affected_cases >= min_samples].index.get_level_values("GENE_SYMBOL")
+                n_proteins = hotspot_genes.nunique()
+                self._q("log", f"Step 1 hasn't run yet — estimated {n_proteins} proteins from COSMIC hotspots")
             except Exception:
                 pass
 

@@ -19,6 +19,7 @@ import sys
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -27,7 +28,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, AA3TO1, MUT_RE, SITE_RE,
+    project_root, AA3TO1, MUT_RE, SITE_RE, fmt_time,
     find_canonical_cif, load_first_chain,
     input_dir, resolve_input_file, INTERACTORS_1433_INPUT_DIR,
 )
@@ -375,6 +376,7 @@ def run_polyphen_phase(df: pd.DataFrame) -> dict:
 _KIN_TOP_K = 5
 _KIN_WINDOW = 7
 _KIN_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "kinase_predictions.tsv"
+_KIN_MAX_WORKERS = 6
 
 
 def _kin_load_cache() -> dict[str, str]:
@@ -415,9 +417,30 @@ def build_kinase_window(pos_to_aa: dict[int, str], site_pos: int) -> str | None:
     return "".join(chars)
 
 
+def _speed_up_kinase_library() -> None:
+    """Memoize kinase_library's reference-data loaders for this process.
+
+    Profiling showed Substrate.predict() re-reads the same kinome/matrix
+    reference files from disk on every single call (~50 pd.read_csv calls per
+    prediction) rather than caching them, even though those files never change
+    during a run. get_kinase_list/get_kinome_info are the two most-called
+    loaders and, in every call path reachable from predict(), are only ever
+    invoked with hashable scalar arguments (kin_type, non_canonical) — so
+    wrapping them in an unbounded in-memory cache is safe and eliminates the
+    bulk of that redundant I/O. Idempotent: safe to call more than once.
+    """
+    import kinase_library.modules.data as kl_data
+    if getattr(kl_data, "_cluster_scout_cached", False):
+        return
+    kl_data.get_kinase_list = lru_cache(maxsize=None)(kl_data.get_kinase_list)
+    kl_data.get_kinome_info = lru_cache(maxsize=None)(kl_data.get_kinome_info)
+    kl_data._cluster_scout_cached = True
+
+
 def predict_kinases(window: str) -> str:
     """Run the Kinase Library on a 15-mer window and return a formatted top-5 string."""
     import kinase_library as kl
+    _speed_up_kinase_library()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         sub = kl.Substrate(window)
@@ -455,62 +478,64 @@ def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
     print(f"  Loaded sequences for {len(seq_maps)} proteins")
 
     cache = _kin_load_cache()
-    cache_hits = 0
-    new_predictions = 0
 
-    predictions: list[str] = []
-    annotated = 0
-    total_rows = len(df)
-    for row_idx, (_, row) in enumerate(tqdm(df.iterrows(), total=total_rows,
-                                            desc="Predicting kinases")):
+    # First pass: resolve each row's kinase window (or None if not applicable),
+    # without predicting anything yet, so identical windows shared across rows
+    # (a common case — many PTM sites recur across proteins) are only ever
+    # predicted once instead of once per row.
+    row_windows: list[str | None] = []
+    for _, row in df.iterrows():
         uid = row.get("UniProt", "")
         ptm_site = row.get("ptm_site", "")
         ptm_type = row.get("ptm_type", "")
 
-        _emit_progress(2, (row_idx + 1) / total_rows * 100,
-                       f"Kinase predictions: {row_idx + 1}/{total_rows}")
+        window = None
+        if "phosphorylation" in ptm_type.lower():
+            m = SITE_RE.match(ptm_site.strip()) if ptm_site else None
+            if m:
+                pos_to_aa = seq_maps.get(uid)
+                if pos_to_aa is not None:
+                    window = build_kinase_window(pos_to_aa, int(m.group(2)))
+        row_windows.append(window)
 
-        if "phosphorylation" not in ptm_type.lower():
-            predictions.append("")
-            continue
+    all_windows = {w for w in row_windows if w is not None}
+    to_predict = sorted(all_windows - cache.keys())
+    print(f"  {len(all_windows) - len(to_predict)}/{len(all_windows)} windows cached; "
+          f"predicting {len(to_predict)} new...")
 
-        m = SITE_RE.match(ptm_site.strip()) if ptm_site else None
-        if not m:
-            predictions.append("")
-            continue
+    failed_windows: set[str] = set()
+    if to_predict:
+        with ThreadPoolExecutor(max_workers=_KIN_MAX_WORKERS) as pool:
+            futures = {pool.submit(predict_kinases, w): w for w in to_predict}
+            done = 0
+            total = len(futures)
+            for future in tqdm(as_completed(futures), total=total, desc="Predicting kinases"):
+                window = futures[future]
+                try:
+                    cache[window] = future.result()
+                except Exception:
+                    failed_windows.add(window)
+                done += 1
+                _emit_progress(2, done / total * 100, f"Kinase predictions: {done}/{total}")
+        new_count = len(to_predict) - len(failed_windows)
+        if new_count:
+            _kin_save_cache(cache)
+    else:
+        new_count = 0
+        _emit_progress(2, 100, "Kinase predictions: all cached")
 
-        pos = int(m.group(2))
-        pos_to_aa = seq_maps.get(uid)
-        if pos_to_aa is None:
-            predictions.append("")
-            continue
-
-        window = build_kinase_window(pos_to_aa, pos)
-        if window is None:
-            predictions.append("")
-            continue
-
-        if window in cache:
-            predictions.append(cache[window])
-            cache_hits += 1
-            annotated += 1
-            continue
-
-        try:
-            pred = predict_kinases(window)
-            cache[window] = pred
-            predictions.append(pred)
-            annotated += 1
-            new_predictions += 1
-        except Exception:
-            predictions.append("")
-
-    if new_predictions:
-        _kin_save_cache(cache)
+    # Second pass: assemble the final per-row predictions from the (now fully
+    # populated) cache, in the original row order.
+    predictions = [
+        "" if w is None or w in failed_windows else cache.get(w, "")
+        for w in row_windows
+    ]
+    annotated = sum(1 for p in predictions if p)
 
     df["kinase_predictions"] = predictions
     print(f"  Annotated {annotated}/{len(df)} rows "
-          f"({cache_hits} cached, {new_predictions} newly predicted)")
+          f"({len(all_windows) - len(to_predict)} windows cached, "
+          f"{new_count} windows newly predicted)")
     return seq_maps, cache
 
 
@@ -621,6 +646,9 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
 _AIUPRED_API_URL = "https://aiupred.elte.hu/rest_api"
 _AIUPRED_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "aiupred_disorder.tsv"
 _aiupred_session = requests.Session()
+# Modest concurrency: aiupred.elte.hu is a single-instance academic server, not a
+# scalable production API (unlike myvariant.info in Phase 2) — stay polite to it.
+_AIUPRED_MAX_WORKERS = 5
 
 # Maps response JSON keys to canonical type names stored in the cache
 _AIUPRED_KEY_MAP = {
@@ -718,12 +746,15 @@ def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]
             print(f"  {api_type}: all {len(uniprots)} proteins cached")
             continue
         print(f"  Fetching {len(need)} proteins via {api_type} call")
-        for uid in tqdm(need, desc=f"  AIUPred/{api_type}"):
-            for t, scores in fetch_aiupred_all(api_type, uid).items():
-                cache[(uid, t)] = scores
-            done += 1
-            _emit_progress(3, done / max(total_fetches, 1) * 100,
-                           f"AIUPred {uid}: {done}/{total_fetches}")
+        with ThreadPoolExecutor(max_workers=_AIUPRED_MAX_WORKERS) as pool:
+            futures = {pool.submit(fetch_aiupred_all, api_type, uid): uid for uid in need}
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"  AIUPred/{api_type}"):
+                uid = futures[future]
+                for t, scores in future.result().items():
+                    cache[(uid, t)] = scores
+                done += 1
+                _emit_progress(3, done / max(total_fetches, 1) * 100,
+                               f"AIUPred {uid}: {done}/{total_fetches}")
         any_new = True
 
     if any_new:
@@ -862,19 +893,19 @@ def main() -> None:
 
     t0 = time.time()
     score_maps, confirmed_sites = run_1433_phase(df)
-    print(f"  Phase 1 (14-3-3) completed in {time.time() - t0:.1f}s")
+    print(f"  Phase 1 (14-3-3) completed in {fmt_time(time.time() - t0)}")
 
     t0 = time.time()
     pp_cache = run_polyphen_phase(df)
-    print(f"  Phase 2 (PolyPhen-2) completed in {time.time() - t0:.1f}s")
+    print(f"  Phase 2 (PolyPhen-2) completed in {fmt_time(time.time() - t0)}")
 
     t0 = time.time()
     seq_maps, kin_cache = run_kinase_phase(df)
-    print(f"  Phase 3 (Kinase) completed in {time.time() - t0:.1f}s")
+    print(f"  Phase 3 (Kinase) completed in {fmt_time(time.time() - t0)}")
 
     t0 = time.time()
     disorder_maps = run_aiupred_phase(df)
-    print(f"  Phase 4 (AIUPred) completed in {time.time() - t0:.1f}s")
+    print(f"  Phase 4 (AIUPred) completed in {fmt_time(time.time() - t0)}")
     for atype in ("general", "binding"):
         col_vals = []
         for _, row in df.iterrows():

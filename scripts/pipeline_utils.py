@@ -18,6 +18,14 @@ def project_root(script_file: str) -> Path:
     return Path(script_file).resolve().parent.parent
 
 
+def fmt_time(seconds: float) -> str:
+    """Format a duration as '12s' or '4m 05s', matching the app's runtime display."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60:02d}s"
+
+
 # ── Input folder resolution ───────────────────────────────────────────────────
 
 COSMIC_INPUT_DIR = "cosmic"

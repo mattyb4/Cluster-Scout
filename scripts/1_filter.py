@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, COSMIC_SOMATIC_STATUSES,
+    project_root, COSMIC_SOMATIC_STATUSES, fmt_time,
     input_dir, resolve_input_file, COSMIC_INPUT_DIR, PTMD_INPUT_DIR,
 )
 
@@ -418,7 +418,7 @@ def _run_ptm_proximity_filter(output_file):
     print(f"Mapping {len(uniprot_ids)} UniProt IDs to gene names via UniProt API...")
     t0 = time.time()
     idmap = fetch_uniprot_gene_mapping(uniprot_ids)
-    print(f"  UniProt gene mapping completed in {time.time() - t0:.1f}s")
+    print(f"  UniProt gene mapping completed in {fmt_time(time.time() - t0)}")
 
     ptmd = ptmd.merge(idmap, on="UniProt", how="left")
 
@@ -528,7 +528,7 @@ def _run_ptm_proximity_filter(output_file):
     gene_to_uniprot = dict(zip(merged["gene"], merged["uniprot_id"]))
     t0 = time.time()
     isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
-    print(f"  Isoform mismatch check completed in {time.time() - t0:.1f}s")
+    print(f"  Isoform mismatch check completed in {fmt_time(time.time() - t0)}")
     merged = merged.merge(isoform_lengths, on="gene", how="left")
 
     # -----------------------
@@ -569,7 +569,7 @@ def _run_mutation_clustering_filter(output_file):
     print(f"Mapping {len(gene_names)} genes to UniProt IDs via UniProt API...")
     t0 = time.time()
     gene_map = fetch_gene_to_uniprot_mapping(gene_names)
-    print(f"  UniProt ID mapping completed in {time.time() - t0:.1f}s")
+    print(f"  UniProt ID mapping completed in {fmt_time(time.time() - t0)}")
 
     result = cosmic_grouped.merge(gene_map, on="gene", how="left")
     unmapped = result["UniProt"].isna().sum()
@@ -585,7 +585,7 @@ def _run_mutation_clustering_filter(output_file):
     gene_to_uniprot = dict(zip(result["gene"], result["uniprot_id"]))
     t0 = time.time()
     isoform_lengths = compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot)
-    print(f"  Isoform mismatch check completed in {time.time() - t0:.1f}s")
+    print(f"  Isoform mismatch check completed in {fmt_time(time.time() - t0)}")
     result = result.merge(isoform_lengths, on="gene", how="left")
 
     # -----------------------
