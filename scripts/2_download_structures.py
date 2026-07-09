@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -13,6 +14,11 @@ from tqdm import tqdm
 
 AF_PRED_ENDPOINT = "https://alphafold.ebi.ac.uk/api/prediction/{}"
 ACC_RE = re.compile(r"^(?:[A-NR-Z0-9][A-Z0-9]{5}|[OPQ][0-9][A-Z0-9]{3}[0-9])(?:-\d+)?$")
+
+# Be polite to the shared EBI-hosted API — same modest-concurrency convention
+# used elsewhere in this project for other academic servers (kinase_library,
+# AIUPred).
+_DOWNLOAD_MAX_WORKERS = 6
 
 
 def clean_accession(cell: Any) -> Optional[str]:
@@ -98,23 +104,36 @@ def download(url: str, outpath: Path, session: requests.Session, retries: int = 
     raise RuntimeError(f"Failed download after retries: {url}")
 
 
-def _is_cached(acc_dir: Path, acc: str, also_pae: bool) -> bool:
-    """Return True when all needed files for this accession are already present locally.
+_VERSION_RE = re.compile(r"model_v(\d+)\.", re.IGNORECASE)
+_PAE_VERSION_RE = re.compile(r"predicted_aligned_error_v(\d+)\.", re.IGNORECASE)
 
-    AlphaFold encodes the model version in the filename (e.g. model_v6.cif), so this
-    check is implicitly version-aware: a version bump produces a new filename that won't
-    exist yet, causing the cache check to fail and triggering a fresh download.
-    """
+
+def _cached_version(acc_dir: Path, acc: str, pattern: str) -> Optional[int]:
+    """Return the highest version number already downloaded for *acc* matching
+    *pattern* (structure or PAE), or None if nothing is cached. Multi-fragment
+    proteins are expected to share one version across all fragments, so the
+    max is representative."""
     if not acc_dir.is_dir():
-        return False
-    struct_re = re.compile(rf"^AF-{re.escape(acc)}-F\d+-model_v\d+\.", re.IGNORECASE)
-    pae_re    = re.compile(rf"^AF-{re.escape(acc)}-F\d+-predicted_aligned_error_v\d+\.", re.IGNORECASE)
-    files = list(acc_dir.iterdir())
-    if not any(struct_re.match(f.name) for f in files):
-        return False
-    if also_pae and not any(pae_re.match(f.name) for f in files):
-        return False
-    return True
+        return None
+    pat = re.compile(rf"^AF-{re.escape(acc)}-F\d+-{pattern}_v(\d+)\.", re.IGNORECASE)
+    versions = [int(m.group(1)) for f in acc_dir.iterdir() if (m := pat.match(f.name))]
+    return max(versions) if versions else None
+
+
+def _remove_stale_version(acc_dir: Path, acc: str, keep_version: int) -> None:
+    """Delete structure/PAE files for *acc* whose version isn't *keep_version*.
+
+    Without this, an update would leave both the old and new version files
+    present — and find_canonical_cif's alphabetical glob sort would pick
+    whichever sorts first as a string (e.g. "v4" < "v6"), silently using the
+    STALE file even after a newer one was downloaded.
+    """
+    for pattern in ("model", "predicted_aligned_error"):
+        pat = re.compile(rf"^AF-{re.escape(acc)}-F\d+-{pattern}_v(\d+)\.", re.IGNORECASE)
+        for f in acc_dir.iterdir():
+            m = pat.match(f.name)
+            if m and int(m.group(1)) != keep_version:
+                f.unlink()
 
 
 def read_table(path: str) -> pd.DataFrame:
@@ -133,8 +152,111 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "Output" / "logs"
 
 
+def _check_and_download(
+    acc: str, out_base: Path, prefer: str, also_pae: bool, delay: float,
+    session: requests.Session,
+) -> dict:
+    """Check AlphaFold DB's current version for *acc* against what's cached,
+    and (re)download only if it's missing or outdated. Runs in a worker
+    thread — returns a report row rather than printing directly, so all
+    console output happens back on the main thread.
+    """
+    row = {"UniProt": acc, "status": "", "structure_file": "", "pae_file": "", "note": ""}
+    acc_dir = out_base / acc
+    cached_struct_v = _cached_version(acc_dir, acc, "model")
+    cached_pae_v = _cached_version(acc_dir, acc, "predicted_aligned_error") if also_pae else None
+
+    try:
+        meta = fetch_prediction(acc, session)
+        if not meta:
+            if cached_struct_v is not None:
+                row["status"] = "ALREADY_CACHED"
+                row["note"] = f"AlphaFold DB has no record now (404) — kept cached v{cached_struct_v}"
+            else:
+                row["status"] = "NO_ENTRY"
+                row["note"] = "No AlphaFold DB record (404)"
+            return row
+
+        records = meta if isinstance(meta, list) else [meta]
+        # Keep only canonical records (uniprotAccession == acc, no isoform dash-suffix).
+        # Isoform records have uniprotAccession like "P11362-9" and model different sequences.
+        canonical_records = [r for r in records if r.get("uniprotAccession") == acc]
+        if not canonical_records:
+            row["status"] = "NO_CANONICAL_MODEL"
+            row["note"] = f"No canonical AFDB model; {len(records)} isoform-only record(s)"
+            return row
+
+        record_urls = [pick_urls(r, prefer=prefer) for r in canonical_records]
+        latest_struct_v = None
+        latest_pae_v = None
+        for urls in record_urls:
+            m = _VERSION_RE.search(urls.get("structure_url", ""))
+            if m:
+                latest_struct_v = max(latest_struct_v or 0, int(m.group(1)))
+            if also_pae:
+                m = _PAE_VERSION_RE.search(urls.get("pae_url", ""))
+                if m:
+                    latest_pae_v = max(latest_pae_v or 0, int(m.group(1)))
+
+        up_to_date = (
+            cached_struct_v is not None and latest_struct_v is not None
+            and cached_struct_v >= latest_struct_v
+            and (not also_pae or (cached_pae_v is not None and latest_pae_v is not None
+                                   and cached_pae_v >= latest_pae_v))
+        )
+        if up_to_date:
+            row["status"] = "ALREADY_CACHED"
+            row["note"] = f"Up to date (v{cached_struct_v})"
+            return row
+
+        was_cached = cached_struct_v is not None
+        downloaded = 0
+        struct_name = ""
+        for urls in record_urls:
+            if not urls.get("structure_url"):
+                continue
+            struct_url = urls["structure_url"]
+            struct_name = struct_url.split("/")[-1]
+            struct_path = acc_dir / struct_name
+            download(struct_url, struct_path, session)
+            row["structure_file"] = str(struct_path)
+            downloaded += 1
+            if also_pae and urls.get("pae_url"):
+                pae_url = urls["pae_url"]
+                pae_name = pae_url.split("/")[-1]
+                pae_path = acc_dir / pae_name
+                download(pae_url, pae_path, session)
+                row["pae_file"] = str(pae_path)
+            time.sleep(delay)
+
+        if not downloaded:
+            row["status"] = "NO_STRUCTURE_URL"
+            row["note"] = f"No structure URL in any of {len(canonical_records)} record(s)"
+            return row
+
+        if was_cached and latest_struct_v is not None:
+            _remove_stale_version(acc_dir, acc, latest_struct_v)
+            row["status"] = "UPDATED"
+            row["note"] = f"v{cached_struct_v} -> v{latest_struct_v}"
+        else:
+            row["status"] = "DOWNLOADED"
+            row["note"] = struct_name
+        return row
+
+    except Exception as e:
+        row["status"] = "ERROR"
+        row["note"] = str(e)
+        return row
+
+
 def main(in_path: str, id_column: str, out_dir: str, prefer: str, also_pae: bool, delay: float, logs_dir: Path) -> None:
-    """Download AlphaFold CIF structures (and optionally PAE files) for all UniProt IDs in the input table."""
+    """Download AlphaFold CIF structures (and optionally PAE files) for all UniProt IDs in the input table.
+
+    Every accession is checked against AlphaFold DB's current version, in
+    parallel (_DOWNLOAD_MAX_WORKERS workers) — not just skipped outright when
+    something with a matching name already exists locally — so a newer
+    release on AlphaFold DB gets picked up automatically.
+    """
     df = read_table(in_path)
     if id_column not in df.columns:
         raise ValueError(f"Column '{id_column}' not found. Columns: {list(df.columns)}")
@@ -147,91 +269,52 @@ def main(in_path: str, id_column: str, out_dir: str, prefer: str, also_pae: bool
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     report_rows = []
-    cached_count = 0
 
     with requests.Session() as s:
         s.headers.update({"User-Agent": "bulk-afdb-downloader/1.0"})
-        for acc in tqdm(accs, desc="Downloading AlphaFold structures"):
-            row = {"UniProt": acc, "status": "", "structure_file": "", "pae_file": "", "note": ""}
-
-            if _is_cached(out_base / acc, acc, also_pae):
-                row["status"] = "ALREADY_CACHED"
-                row["note"] = "Files already present; skipped API call"
+        with ThreadPoolExecutor(max_workers=_DOWNLOAD_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_check_and_download, acc, out_base, prefer, also_pae, delay, s): acc
+                for acc in accs
+            }
+            for future in tqdm(as_completed(futures), total=len(futures),
+                                desc="Checking/downloading AlphaFold structures"):
+                acc = futures[future]
+                try:
+                    row = future.result()
+                except Exception as e:
+                    row = {"UniProt": acc, "status": "ERROR", "structure_file": "",
+                           "pae_file": "", "note": str(e)}
                 report_rows.append(row)
-                cached_count += 1
-                continue
-
-            try:
-                meta = fetch_prediction(acc, s)
-                if not meta:
-                    row["status"] = "NO_ENTRY"
-                    row["note"] = "No AlphaFold DB record (404)"
-                    report_rows.append(row)
+                if row["status"] == "NO_ENTRY":
                     tqdm.write(f"  {acc}: no AlphaFold DB entry (404)")
-                    continue
-
-                records = meta if isinstance(meta, list) else [meta]
-                # Keep only canonical records (uniprotAccession == acc, no isoform dash-suffix).
-                # Isoform records have uniprotAccession like "P11362-9" and model different sequences.
-                canonical_records = [r for r in records if r.get("uniprotAccession") == acc]
-                if not canonical_records:
-                    row["status"] = "NO_CANONICAL_MODEL"
-                    row["note"] = f"No canonical AFDB model; {len(records)} isoform-only record(s)"
-                    report_rows.append(row)
+                elif row["status"] == "NO_CANONICAL_MODEL":
                     tqdm.write(f"  {acc}: no canonical model (isoforms only)")
-                    continue
-                records = canonical_records
-                downloaded = 0
-                for record in records:
-                    urls = pick_urls(record, prefer=prefer)
-                    if not urls.get("structure_url"):
-                        continue
-                    struct_url = urls["structure_url"]
-                    struct_name = struct_url.split("/")[-1]
-                    struct_path = out_base / acc / struct_name
-                    download(struct_url, struct_path, s)
-                    row["structure_file"] = str(struct_path)
-                    downloaded += 1
-                    if also_pae and urls.get("pae_url"):
-                        pae_url = urls["pae_url"]
-                        pae_name = pae_url.split("/")[-1]
-                        pae_path = out_base / acc / pae_name
-                        download(pae_url, pae_path, s)
-                        row["pae_file"] = str(pae_path)
-                    time.sleep(delay)
-
-                if not downloaded:
-                    row["status"] = "NO_STRUCTURE_URL"
-                    row["note"] = f"No structure URL in any of {len(records)} record(s)"
-                    report_rows.append(row)
+                elif row["status"] == "NO_STRUCTURE_URL":
                     tqdm.write(f"  {acc}: no structure URL found")
-                    continue
-
-                row["status"] = "DOWNLOADED"
-                row["note"] = struct_name
-                report_rows.append(row)
-
-            except Exception as e:
-                row["status"] = "ERROR"
-                row["note"] = str(e)
-                report_rows.append(row)
-                tqdm.write(f"  {acc}: ERROR — {e}")
+                elif row["status"] == "UPDATED":
+                    tqdm.write(f"  {acc}: updated ({row['note']})")
+                elif row["status"] == "ERROR":
+                    tqdm.write(f"  {acc}: ERROR — {row['note']}")
 
     rep = pd.DataFrame(report_rows)
     rep_path = logs_dir / "download_report.tsv"
     rep.to_csv(rep_path, sep="\t", index=False)
     print(f"\nWrote report: {rep_path}")
 
+    cached_count = (rep["status"] == "ALREADY_CACHED").sum()
     downloaded_count = (rep["status"] == "DOWNLOADED").sum()
-    print(f"Already cached (skipped): {cached_count}  |  Downloaded this run: {downloaded_count}")
+    updated_count = (rep["status"] == "UPDATED").sum()
+    print(f"Already up to date: {cached_count}  |  Newly downloaded: {downloaded_count}  |  "
+          f"Updated to a newer AlphaFold version: {updated_count}")
 
-    error_rows = rep[~rep["status"].isin({"DOWNLOADED", "ALREADY_CACHED"})]
+    error_rows = rep[~rep["status"].isin({"DOWNLOADED", "ALREADY_CACHED", "UPDATED"})]
     if not error_rows.empty:
         err_path = logs_dir / "download_errors.tsv"
         error_rows.to_csv(err_path, sep="\t", index=False)
         print(f"Wrote error log ({len(error_rows)} failed): {err_path}")
     else:
-        print("No errors — all accessions downloaded successfully.")
+        print("No errors — all accessions checked successfully.")
 
 
 if __name__ == "__main__":

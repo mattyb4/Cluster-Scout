@@ -15,8 +15,10 @@ __pycache__/
 # ── User-provided input data (uploaded via the app or placed manually) ────
 data/input/cosmic/
 data/input/ptmd/
-data/input/1433_interactors/
 data/cif_comparison/
+
+# 14-3-3 confirmed interactors: NOT user-provided — small, rarely-updated
+# reference data bundled with the app (see data/input/1433_interactors/).
 
 # ── Machine-generated API caches (regenerated/extended automatically) ─────
 data/cache/
@@ -36,6 +38,7 @@ Output/radius_sweep.*
 Output/*.png
 Output/coordinates/
 Output/cif_variance/
+*.bak
 
 # ── Pipeline logs (regenerated each run) ───────────────────────────────────
 Output/logs/download_report.tsv

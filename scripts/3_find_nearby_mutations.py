@@ -549,10 +549,14 @@ def main():
                     gene = parse_gene_name(uniprot)
                     ptm_entries = parse_ptm_entries(uniprot)
                     if not ptm_entries:
+                        write_skip(skip_writer, uniprot, gene, "", "",
+                                   "no_ptm_entries", "no PTM sites parsed from PTMD data for this protein")
                         continue
                     mutation_entries = parse_mutation_positions(uniprot=uniprot)
                     known_disruptions = parse_ptm_known_disruptions(uniprot)
                     if not mutation_entries:
+                        write_skips(skip_writer, uniprot, gene, ptm_entries, "no_mutation_entries",
+                                    "no COSMIC hotspot mutations parsed for this protein")
                         continue
 
                     model_file = find_model_file(uniprot_dir)
@@ -564,6 +568,8 @@ def main():
 
                     chain = load_first_chain(model_file)
                     if chain is None:
+                        write_skips(skip_writer, uniprot, gene, ptm_entries, "cif_parse_failed",
+                                    "canonical CIF file exists but could not be parsed")
                         continue
 
                     # Build residue -> 1-letter AA map for mismatch checking
@@ -623,6 +629,11 @@ def main():
 
                         nearby = find_nearby_mutations(chain, ptm_position, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF, max_pae=MAX_PAE)
                         if not nearby:
+                            detail = f"no mutations within {DISTANCE_CUTOFF:.0f}A of position {ptm_position}"
+                            if MAX_PAE is not None:
+                                detail += f" (or all excluded by the max PAE {MAX_PAE} filter)"
+                            write_skip(skip_writer, uniprot, gene, ptm_site, ptm_type,
+                                       "no_nearby_mutations", detail)
                             continue
                         within_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) <= 5]
                         beyond_5 = [hit for hit in nearby if abs(hit["mutation_pos"] - ptm_position) > 5]
