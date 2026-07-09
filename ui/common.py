@@ -46,6 +46,11 @@ _GREEN = "#2ecc71"
 _RED = "#e74c3c"
 _YELLOW = "#f1c40f"
 
+# Ctrl+scroll UI zoom (see App._on_ctrl_scroll_zoom)
+MIN_UI_SCALE = 0.6
+MAX_UI_SCALE = 2.0
+UI_SCALE_STEP = 0.1
+
 _CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 _CACHE_ITEMS = [
     # (step_label, display_name, path, is_dir)

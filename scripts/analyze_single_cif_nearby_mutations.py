@@ -16,7 +16,7 @@ parser = MMCIFParser(QUIET=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-DEFAULT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+DEFAULT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
 DEFAULT_OUTPUT_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 
 OUTPUT_COLUMNS_STEP3 = [

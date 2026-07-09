@@ -163,11 +163,59 @@ class PipelineRunnerMixin:
                 from tkinter import messagebox
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
                 return
-        elif mode == "analysis-tools" and self._analysis_subtool_var.get() == "Radius Sweep":
+        elif mode == "ca-coordinates":
             from tkinter import messagebox
-            genes = self._radius_genes_var.get().split()
+            if not self._ca_uniprot_var.get().strip():
+                messagebox.showwarning("Missing input", "Enter a UniProt accession.")
+                return
+
+        self._running = True
+        self._stop_requested = False
+        self._suspended = False
+        self._set_run_controls(True)
+        self._stop_btn.configure(state="normal", fg_color=_RED)
+        self._timer_label.configure(text="")
+
+        self._log.configure(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.configure(state="disabled")
+
+        for lbl in self._step_status_labels:
+            lbl.configure(text="●  Waiting", text_color=_GRAY)
+        for bar in self._step_progress_bars:
+            bar.set(0)
+            bar.grid_remove()
+
+        mode = self._mode.get()
+        threading.Thread(target=self._run_pipeline, args=(mode,), daemon=True).start()
+
+    def _set_run_controls(self, running: bool) -> None:
+        """Keep the Pipeline tab's and Analysis Tools tab's Run buttons in sync —
+        only one run (of any kind) can be active at a time, app-wide, since both
+        share the same `self._running` flag and background-thread execution engine.
+        """
+        state = "disabled" if running else "normal"
+        self._run_btn.configure(state=state)
+        self._at_run_btn.configure(state=state)
+
+    def _start_analysis_tool_run(self, kind: str) -> None:
+        """Validate and launch a Radius Sweep / CIF Variance run triggered from
+        the Analysis Tools tab. Shares `self._running` with `_start_pipeline` —
+        only one run of any kind can be active at a time.
+
+        Unlike `_start_pipeline`, this skips the locked-output-file check and
+        `_backup_outputs()`: those only guard the 3 main-pipeline TSVs
+        (`_DEFAULT_OUTPUT_FILES`), which radius_sweep.tsv/cif_variance/ aren't
+        part of.
+        """
+        if self._running:
+            return
+
+        from tkinter import messagebox
+        if kind == "radius-sweep":
+            genes = list(self._radius_genes)
             if not genes:
-                messagebox.showwarning("Missing input", "Enter at least one gene symbol.")
+                messagebox.showwarning("Missing input", "Add at least one gene symbol.")
                 return
             try:
                 start = float(self._radius_start_var.get())
@@ -181,7 +229,16 @@ class PipelineRunnerMixin:
                     "Radius start/stop/step must be numeric, with stop > start and step > 0.",
                 )
                 return
-            ptm_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+            try:
+                min_cases = int(self._radius_min_cases_var.get())
+                if min_cases < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Invalid input", "Min samples must be a whole number of 1 or more.",
+                )
+                return
+            ptm_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
             if not ptm_tsv.exists():
                 messagebox.showerror(
                     "Missing data",
@@ -189,8 +246,7 @@ class PipelineRunnerMixin:
                     f"Run the PTM Proximity or Mutation Clustering pipeline (step 1) first.",
                 )
                 return
-        elif mode == "analysis-tools" and self._analysis_subtool_var.get() == "CIF Variance":
-            from tkinter import messagebox
+        else:  # "cif-variance"
             input_dir = Path(self._variance_input_dir_var.get().strip())
             n_cifs = len(list(input_dir.glob("*.cif"))) if input_dir.is_dir() else 0
             if n_cifs < 2:
@@ -212,31 +268,22 @@ class PipelineRunnerMixin:
                             "Invalid input", f"{label} must be two whole numbers with start < end.",
                         )
                         return
-        elif mode == "ca-coordinates":
-            from tkinter import messagebox
-            if not self._ca_uniprot_var.get().strip():
-                messagebox.showwarning("Missing input", "Enter a UniProt accession.")
-                return
 
         self._running = True
+        self._at_run_active = True
         self._stop_requested = False
         self._suspended = False
-        self._run_btn.configure(state="disabled")
-        self._stop_btn.configure(state="normal", fg_color=_RED)
-        self._timer_label.configure(text="")
+        self._set_run_controls(True)
 
-        self._log.configure(state="normal")
-        self._log.delete("1.0", "end")
-        self._log.configure(state="disabled")
+        self._at_progress_bar.set(0)
+        self._at_progress_bar.grid_remove()
+        self._at_status_label.configure(text="●  Starting…", text_color=_GRAY)
+        self._at_log.configure(state="normal")
+        self._at_log.delete("1.0", "end")
+        self._at_log.configure(state="disabled")
 
-        for lbl in self._step_status_labels:
-            lbl.configure(text="●  Waiting", text_color=_GRAY)
-        for bar in self._step_progress_bars:
-            bar.set(0)
-            bar.grid_remove()
-
-        mode = self._mode.get()
-        threading.Thread(target=self._run_pipeline, args=(mode,), daemon=True).start()
+        target = self._run_radius_sweep if kind == "radius-sweep" else self._run_cif_variance
+        threading.Thread(target=target, daemon=True).start()
 
     def _stop_pipeline(self):
         """Suspend the running subprocess immediately and show Resume/Cancel options."""
@@ -340,7 +387,7 @@ class PipelineRunnerMixin:
         self._q("log", "Initializing pipeline...")
         self._q("log", "")
 
-        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
         cache_dir = PROJECT_ROOT / "data" / "cache"
         models_dir = PROJECT_ROOT / "cif_models"
 
@@ -466,18 +513,12 @@ class PipelineRunnerMixin:
         if mode == "single-protein":
             self._run_single_protein()
             return
-        if mode == "analysis-tools":
-            if self._analysis_subtool_var.get() == "Radius Sweep":
-                self._run_radius_sweep()
-            else:
-                self._run_cif_variance()
-            return
         if mode == "ca-coordinates":
             self._run_ca_coordinates()
             return
 
         python = [sys.executable, "-u"]
-        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
         models_dir = PROJECT_ROOT / "cif_models"
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
@@ -653,7 +694,7 @@ class PipelineRunnerMixin:
         """Run the radius-sweep analysis in-process, in the background thread."""
         import numpy as np
 
-        genes = self._radius_genes_var.get().split()
+        genes = list(self._radius_genes)
         try:
             start = float(self._radius_start_var.get())
             stop = float(self._radius_stop_var.get())
@@ -664,20 +705,21 @@ class PipelineRunnerMixin:
             return
         radii = list(np.arange(start, stop + step / 2, step))
         unfiltered = self._radius_unfiltered_var.get()
+        min_cases = int(self._radius_min_cases_var.get())
 
         self._q("pipeline_start", 1, "radius-sweep", "warm")
         self._q("show_log")
         self._q("status", 0, "▶  Running sweep…", _BLUE)
         self._q("show_progress", 0)
         self._q("log", f"Testing radii {radii[0]:.0f}-{radii[-1]:.0f} Å in {step:.0f} Å steps "
-                        f"for {len(genes)} gene(s)")
+                        f"for {len(genes)} gene(s) (hotspot threshold: >= {min_cases} samples)")
         self._q("log", "")
 
         t0 = time.time()
         try:
             from radius_sweep import run_sweep
             result = run_sweep(
-                genes, radii, unfiltered=unfiltered,
+                genes, radii, min_cases=min_cases, unfiltered=unfiltered,
                 output_tsv_path=self._output_dir / "radius_sweep.tsv",
                 log_cb=lambda line: self._q("log", line),
             )
@@ -878,6 +920,24 @@ class PipelineRunnerMixin:
     def _q(self, *args):
         self._queue.put(args)
 
+    def _status_target(self, idx: int):
+        """Resolve which status label a "status"/"progress" queue message should
+        update: the Analysis Tools tab's single persistent label when a run was
+        triggered from there, otherwise the Pipeline tab's step-indexed one.
+
+        Not a cached list reference — `_rebuild_step_rows` rebinds
+        `self._step_status_labels` to a brand-new list on every Pipeline-tab
+        mode change, so anything resolved once up front would go stale.
+        """
+        if self._at_run_active:
+            return self._at_status_label
+        return self._step_status_labels[idx] if 0 <= idx < len(self._step_status_labels) else None
+
+    def _progress_target(self, idx: int):
+        if self._at_run_active:
+            return self._at_progress_bar
+        return self._step_progress_bars[idx] if 0 <= idx < len(self._step_progress_bars) else None
+
     def _poll_queue(self):
         try:
             while True:
@@ -886,31 +946,38 @@ class PipelineRunnerMixin:
                 if kind == "log":
                     self._append_log(msg[1])
                 elif kind == "show_log":
-                    if not self._log_visible:
+                    if self._at_run_active:
+                        if not self._at_log_visible:
+                            self._at_toggle_log()
+                    elif not self._log_visible:
                         self._toggle_log()
                 elif kind == "status":
                     _, idx, text, color = msg
-                    if 0 <= idx < len(self._step_status_labels):
-                        self._step_status_labels[idx].configure(text=text, text_color=color)
+                    target = self._status_target(idx)
+                    if target is not None:
+                        target.configure(text=text, text_color=color)
                 elif kind == "progress":
                     _, idx, pct, status_text = msg
-                    if 0 <= idx < len(self._step_progress_bars):
-                        self._step_progress_bars[idx].set(pct)
-                        self._step_status_labels[idx].configure(
-                            text=status_text, text_color=_BLUE
-                        )
+                    bar = self._progress_target(idx)
+                    status = self._status_target(idx)
+                    if bar is not None:
+                        bar.set(pct)
+                    if status is not None:
+                        status.configure(text=status_text, text_color=_BLUE)
                 elif kind == "progress_log":
                     self._update_progress_line(msg[1])
                 elif kind == "show_progress":
                     _, idx = msg
                     self._using_overall_progress = False
-                    if 0 <= idx < len(self._step_progress_bars):
-                        self._step_progress_bars[idx].set(0)
-                        self._step_progress_bars[idx].grid()
+                    bar = self._progress_target(idx)
+                    if bar is not None:
+                        bar.set(0)
+                        bar.grid()
                 elif kind == "hide_progress":
                     _, idx = msg
-                    if 0 <= idx < len(self._step_progress_bars):
-                        self._step_progress_bars[idx].grid_remove()
+                    bar = self._progress_target(idx)
+                    if bar is not None:
+                        bar.grid_remove()
                 elif kind == "pipeline_start":
                     _, total, mode, run_type = msg
                     self._pipeline_start = time.time()
@@ -954,6 +1021,7 @@ class PipelineRunnerMixin:
                 elif kind == "finished":
                     was_cancelled = self._stop_requested
                     self._running = False
+                    self._at_run_active = False
                     self._stop_requested = False
                     self._suspended = False
                     self._current_proc = None
@@ -966,6 +1034,7 @@ class PipelineRunnerMixin:
                         state="normal", text="▶  Run Pipeline",
                         command=self._start_pipeline,
                     )
+                    self._at_run_btn.configure(state="normal")
                     self._stop_btn.configure(state="disabled", fg_color="gray30")
                     self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
                     if was_cancelled:
@@ -984,10 +1053,11 @@ class PipelineRunnerMixin:
         self.after(100, self._poll_queue)
 
     def _append_log(self, line: str):
-        self._log.configure(state="normal")
-        self._log.insert("end", line + "\n")
-        self._log.see("end")
-        self._log.configure(state="disabled")
+        log = self._at_log if self._at_run_active else self._log
+        log.configure(state="normal")
+        log.insert("end", line + "\n")
+        log.see("end")
+        log.configure(state="disabled")
         self._last_log_was_progress = False
 
     def _update_progress_line(self, text: str):

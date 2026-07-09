@@ -13,7 +13,7 @@ import subprocess
 
 import customtkinter as ctk
 
-from ui.common import PROJECT_ROOT
+from ui.common import PROJECT_ROOT, MIN_UI_SCALE, MAX_UI_SCALE, UI_SCALE_STEP, _BLUE
 from ui.pipeline_panels import PipelineTabMixin
 from ui.pipeline_runner import PipelineRunnerMixin
 from ui.results_tab import ResultsTabMixin
@@ -47,6 +47,7 @@ class App(
         self._radius_sweep_result = None
         self._cif_variance_result = None
         self._running = False
+        self._at_run_active = False
         self._stop_requested = False
         self._suspended = False
         self._current_proc: subprocess.Popen | None = None
@@ -57,10 +58,13 @@ class App(
         self._total_steps = 0
         self._step_times: list[float] = []
         self._historical_times: list[float] | None = None
+        self._ui_scale = 1.0
+        self._zoom_indicator_hide_job: str | None = None
 
         self._build_ui()
         self._refresh_file_status()
         self._poll_queue()
+        self._bind_zoom_shortcuts()
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -83,12 +87,71 @@ class App(
         self._build_analysis_tools_tab(analysis_tools_tab)
         self._build_help_tab(help_tab)
 
+        # Transient zoom-percentage toast (see _show_zoom_indicator) — a sibling
+        # of the tabview, floated on top via place() so it stays visible
+        # regardless of which tab is active.
+        self._zoom_indicator = ctk.CTkLabel(
+            self, font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#242424", text_color=_BLUE, corner_radius=8,
+            padx=16, pady=8,
+        )
+
     def _on_tab_change(self) -> None:
         tab = self._tabview.get()
         if tab == "Results":
             self._load_results()
         elif tab == "Visualization" and self._results_df_wide is None:
             self._load_results()
+
+    # ── Ctrl+scroll zoom ─────────────────────────────────────────────────────
+
+    def _bind_zoom_shortcuts(self) -> None:
+        """App-wide Ctrl+scroll zoom (Windows/macOS wheel + X11 button-4/5)."""
+        self.bind_all("<Control-MouseWheel>", self._on_ctrl_scroll_zoom)
+        self.bind_all("<Control-Button-4>", self._on_ctrl_scroll_zoom)
+        self.bind_all("<Control-Button-5>", self._on_ctrl_scroll_zoom)
+
+    def _on_ctrl_scroll_zoom(self, event) -> str:
+        """Nudge the app-wide CTk widget scaling up/down a step and re-clamp.
+
+        Bound both at bind_all (app-wide) and directly on the Results-tab
+        treeviews (see ResultsTabMixin) — Tk's unmodified `<MouseWheel>`
+        class-binding on Treeview still matches Ctrl+wheel events (extra
+        modifiers don't block a pattern that doesn't specify them), so
+        without the widget-level override, scrolling those tables would
+        also fire alongside the zoom.
+        """
+        if getattr(event, "num", None) == 4:
+            direction = 1
+        elif getattr(event, "num", None) == 5:
+            direction = -1
+        else:
+            direction = 1 if event.delta > 0 else -1
+
+        new_scale = round(max(MIN_UI_SCALE, min(MAX_UI_SCALE, self._ui_scale + direction * UI_SCALE_STEP)), 2)
+        if new_scale != self._ui_scale:
+            self._ui_scale = new_scale
+            ctk.set_widget_scaling(new_scale)
+        self._show_zoom_indicator()
+        return "break"
+
+    _ZOOM_INDICATOR_HIDE_MS = 1200
+
+    def _show_zoom_indicator(self) -> None:
+        """Flash the current zoom % in a corner toast, browser-style, then
+        auto-hide after a short delay — rescheduled on every scroll so it
+        stays up while the user keeps zooming.
+        """
+        self._zoom_indicator.configure(text=f"{round(self._ui_scale * 100)}%")
+        self._zoom_indicator.place(relx=0.98, rely=0.02, anchor="ne")
+        self._zoom_indicator.lift()
+        if self._zoom_indicator_hide_job is not None:
+            self.after_cancel(self._zoom_indicator_hide_job)
+        self._zoom_indicator_hide_job = self.after(self._ZOOM_INDICATOR_HIDE_MS, self._hide_zoom_indicator)
+
+    def _hide_zoom_indicator(self) -> None:
+        self._zoom_indicator.place_forget()
+        self._zoom_indicator_hide_job = None
 
 
 if __name__ == "__main__":

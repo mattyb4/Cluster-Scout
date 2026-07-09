@@ -628,7 +628,7 @@ def main():
     args = parser.parse_args()
     HOTSPOT_MIN_AFFECTED_CASES = args.min_samples
 
-    output_file = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+    output_file = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     if args.mode == "mutation-clustering":

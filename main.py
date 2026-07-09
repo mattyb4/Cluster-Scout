@@ -11,7 +11,7 @@ from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS  # noq
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
-INPUT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+INPUT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
 MODELS_DIR = PROJECT_ROOT / "cif_models"
 
 RUN_ONLY_UNIPROT: str | None = None

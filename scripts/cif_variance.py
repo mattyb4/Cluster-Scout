@@ -34,7 +34,7 @@ from pipeline_utils import project_root, AA3TO1, extract_uniprot_from_cif  # noq
 PROJECT_ROOT = project_root(__file__)
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "cif_comparison"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output" / "cif_variance"
-PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
 
 _parser = MMCIFParser(QUIET=True)
 

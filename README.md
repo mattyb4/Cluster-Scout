@@ -176,9 +176,9 @@ If you would like to output it to a new tsv file instead, run it like this:
 uv run scripts/analyze_single_cif_nearby_mutations.py P35222/AF-P35222-F1-model_v6.cif --append-to-db --output-db Output/outputfilename.tsv
 ```
 
-Keep in mind that this will still be running analyses based on the input data from PTMD_TCGA_hotspots_by_protein.tsv generated during the pipeline.
+Keep in mind that this will still be running analyses based on the input data from PTMD_COSMIC_hotspots_by_protein.tsv generated during the pipeline.
 
-Whichever protein you are running analysis on, in order for it to work, the UniProt ID in "PTMD_TCGA_hotspots_by_protein.tsv needs to match the name of the folder the .cif file is put in (within the cif_models directory) exactly.
+Whichever protein you are running analysis on, in order for it to work, the UniProt ID in "PTMD_COSMIC_hotspots_by_protein.tsv needs to match the name of the folder the .cif file is put in (within the cif_models directory) exactly.
 
 ## Exporting Alpha-Carbon Coordinates
 
@@ -225,7 +225,12 @@ uv run scripts/radius_sweep.py --genes EGFR TP53 VHL
 uv run scripts/radius_sweep.py --radii 4 25 1
 ```
 
-**Compare against unfiltered COSMIC mutations** (not just hotspot-filtered ones) with `--unfiltered`. This requires pipeline step 1 to have already been run, since it reads the intermediate `PTMD_TCGA_hotspots_by_protein.tsv` file, and requires CIF files for the target genes to already be downloaded.
+**Choose a custom hotspot threshold** (minimum distinct COSMIC samples for a mutation to count as a hotspot, default 3). This is computed live from the raw COSMIC file and is independent of whatever "Min samples" value the main pipeline's step 1 used:
+```bash
+uv run scripts/radius_sweep.py --min-samples 5
+```
+
+**Compare against unfiltered COSMIC mutations** (not just hotspot-filtered ones) with `--unfiltered`. This requires pipeline step 1 to have already been run, since PTM site positions are read from the intermediate `PTMD_COSMIC_hotspots_by_protein.tsv` file, and requires CIF files for the target genes to already be downloaded.
 
 Output is written to `Output/radius_sweep.png` (a 2- or 4-panel plot depending on whether `--unfiltered` was used) and a matching `Output/radius_sweep.tsv` with the raw per-radius data. Elbow points and average optimal radius are also printed to the console.
 

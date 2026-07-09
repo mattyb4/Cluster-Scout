@@ -1,7 +1,7 @@
 """Unit tests for the PTM-row parsing helpers in scripts/3_find_nearby_mutations.py.
 
 These functions read from the module-level _PTM_ROWS cache (normally populated
-from data/steps/PTMD_TCGA_hotspots_by_protein.tsv via get_ptm_rows()). Tests
+from data/steps/PTMD_COSMIC_hotspots_by_protein.tsv via get_ptm_rows()). Tests
 inject synthetic rows directly into _PTM_ROWS to avoid touching that file.
 """
 import pytest

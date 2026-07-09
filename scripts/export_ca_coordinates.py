@@ -1,6 +1,8 @@
 """Export alpha-carbon coordinates for a protein from its AlphaFold CIF.
 
-Produces two TSV files in Output/coordinates/:
+Produces two TSV files in Output/coordinates/, each with a patients_within_10A
+column giving the total COSMIC patient count summed across all missense
+mutations whose CA coordinate is within 10 Angstroms:
 
   {UniProt}_all_ca.tsv       — CA coordinates for every residue
   {UniProt}_mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -37,6 +40,7 @@ GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
 OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
 
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
+NEARBY_PATIENT_RADIUS_A = 10.0
 
 
 @dataclass
@@ -217,6 +221,33 @@ def _load_cosmic_mutations(
     return pos_mutations, pos_patients
 
 
+def _compute_patients_within_radius(
+    ca_df: pd.DataFrame,
+    pos_patients: dict[int, int],
+    radius: float = NEARBY_PATIENT_RADIUS_A,
+) -> dict[int, int]:
+    """For every residue in *ca_df*, sum COSMIC patient counts across all mutation
+    positions in *pos_patients* whose CA coordinate is within *radius* Angstroms
+    (inclusive), matching the <= cutoff convention used elsewhere in the pipeline.
+    A mutation at the residue's own position (distance 0) counts toward its own total.
+    """
+    if not pos_patients:
+        return {int(p): 0 for p in ca_df["position"]}
+
+    mut_rows = ca_df[ca_df["position"].isin(pos_patients)]
+    if mut_rows.empty:
+        return {int(p): 0 for p in ca_df["position"]}
+
+    mut_coords = mut_rows[["x", "y", "z"]].to_numpy()
+    mut_counts = np.array([pos_patients[int(p)] for p in mut_rows["position"]])
+
+    all_coords = ca_df[["x", "y", "z"]].to_numpy()
+    dists = np.linalg.norm(all_coords[:, None, :] - mut_coords[None, :, :], axis=2)
+    totals = (dists <= radius) @ mut_counts
+
+    return {int(pos): int(total) for pos, total in zip(ca_df["position"], totals)}
+
+
 def run_export(
     uniprot: str,
     gene: str | None = None,
@@ -280,7 +311,11 @@ def run_export(
     pos_mutations, pos_patients = _load_cosmic_mutations(resolved_gene, cosmic_file, log_cb)
     log_cb(f"Missense mutation positions in COSMIC: {len(pos_mutations)}")
 
-    # ── 5. Filter to mutation positions ───────────────────────────────────────
+    # ── 5. Patient counts within radius of each coordinate ────────────────────
+    patients_within = _compute_patients_within_radius(all_ca_df, pos_patients)
+    all_ca_df["patients_within_10A"] = all_ca_df["position"].map(patients_within).astype(int)
+
+    # ── 6. Filter to mutation positions ───────────────────────────────────────
     mut_rows = []
     for _, row in all_ca_df.iterrows():
         pos = int(row["position"])
@@ -294,15 +329,16 @@ def run_export(
             "z": row["z"],
             "mutations": "; ".join(sorted(pos_mutations[pos])),
             "total_patients": pos_patients[pos],
+            "patients_within_10A": patients_within.get(pos, 0),
         })
 
     mut_ca_df = pd.DataFrame(
         mut_rows,
-        columns=["residue", "position", "x", "y", "z", "mutations", "total_patients"],
+        columns=["residue", "position", "x", "y", "z", "mutations", "total_patients", "patients_within_10A"],
     )
     log_cb(f"CA atoms at mutation positions: {len(mut_ca_df)}")
 
-    # ── 6. Write outputs ──────────────────────────────────────────────────────
+    # ── 7. Write outputs ──────────────────────────────────────────────────────
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     all_out = output_dir / f"{uid}_all_ca.tsv"

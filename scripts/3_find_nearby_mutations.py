@@ -17,7 +17,7 @@ from pipeline_utils import (  # noqa: E402
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
-PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_TCGA_hotspots_by_protein.tsv"
+PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
 
 _PTM_ROWS: list[dict[str, Any]] | None = None
 
