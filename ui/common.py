@@ -18,8 +18,9 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from pipeline_utils import (  # noqa: E402
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
     input_dir, resolve_input_file, extract_uniprot_from_cif,
-    COSMIC_INPUT_DIR, PTMD_INPUT_DIR,
+    COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES, fmt_time as _fmt_time,
+    validate_cosmic_file, validate_ptmd_file, validate_1433_file,
 )
 
 # The 14-3-3 confirmed-interactors file isn't listed here: unlike COSMIC/PTMD,
@@ -28,16 +29,18 @@ from pipeline_utils import (  # noqa: E402
 # provide — scripts/4_annotate.py still reads it from that same folder via
 # INTERACTORS_1433_INPUT_DIR, this just keeps it out of the Pipeline tab's
 # input-file browse/status UI.
-_INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str]] = {
+_INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
     "COSMIC": (
         input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR),
         (".tsv",),
         "COSMIC Mutant Census TSV",
+        validate_cosmic_file,
     ),
     "PTMD": (
         input_dir(PROJECT_ROOT, PTMD_INPUT_DIR),
         (".tsv",),
         "PTMD disease-associated PTMs TSV",
+        validate_ptmd_file,
     ),
 }
 

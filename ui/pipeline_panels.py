@@ -66,7 +66,7 @@ class PipelineTabMixin:
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
 
-        for i, (name, (folder, exts, desc)) in enumerate(_INPUT_FOLDERS.items(), 1):
+        for i, (name, (folder, exts, desc, validator)) in enumerate(_INPUT_FOLDERS.items(), 1):
             lbl = ctk.CTkLabel(self._file_frame, text=f"{name} …", anchor="w")
             lbl.grid(row=i, column=0, columnspan=2, padx=(12, 6), pady=3, sticky="ew")
             self._file_indicators[name] = lbl
@@ -78,7 +78,7 @@ class PipelineTabMixin:
                 width=70,
                 height=26,
                 font=ctk.CTkFont(size=12),
-                command=lambda n=name, f=folder, ft=filetypes: self._browse_file(n, f, ft),
+                command=lambda n=name, f=folder, ft=filetypes, v=validator: self._browse_file(n, f, ft, v),
             )
             btn.grid(row=i, column=2, padx=12, pady=3, sticky="e")
             self._file_buttons[name] = btn
@@ -475,7 +475,7 @@ class PipelineTabMixin:
 
     def _refresh_file_status(self):
         """Update the status indicator for each input folder."""
-        for name, (folder, exts, _desc) in _INPUT_FOLDERS.items():
+        for name, (folder, exts, _desc, _validator) in _INPUT_FOLDERS.items():
             lbl = self._file_indicators[name]
             try:
                 f = resolve_input_file(folder, exts)
@@ -485,8 +485,17 @@ class PipelineTabMixin:
             except RuntimeError:
                 lbl.configure(text=f"⚠  {name}: multiple files", text_color=_YELLOW)
 
-    def _browse_file(self, name: str, folder: Path, filetypes: list) -> None:
-        """Open a file dialog, copy the selected file into the input folder, and refresh status."""
+    def _browse_file(self, name: str, folder: Path, filetypes: list, validator) -> None:
+        """Open a file dialog, validate the selected file's content, then swap it
+        into the input folder and refresh status.
+
+        Copies to a hidden staging name inside `folder` first and only clears the
+        existing file(s) once the new file is confirmed fully copied AND valid.
+        This deliberately never deletes-then-copies directly: a prior version did,
+        which left the input folder permanently empty if the copy failed partway,
+        or if the selected source file happened to already live inside `folder`
+        (its own delete step would unlink the source out from under the copy).
+        """
         path = filedialog.askopenfilename(
             title=f"Select {name} input file",
             filetypes=filetypes + [("All files", "*.*")],
@@ -494,14 +503,36 @@ class PipelineTabMixin:
         if not path:
             return
 
-        src = Path(path)
+        src = Path(path).resolve()
+        folder = folder.resolve()
         folder.mkdir(parents=True, exist_ok=True)
 
-        for existing in folder.iterdir():
-            if existing.is_file():
-                existing.unlink()
+        staged = folder / f".browsing_{src.name}"
+        try:
+            shutil.copy2(src, staged)
+        except OSError as exc:
+            from tkinter import messagebox
+            messagebox.showerror("Copy Failed", f"Could not copy {src.name}:\n\n{exc}")
+            staged.unlink(missing_ok=True)
+            return
 
-        shutil.copy2(src, folder / src.name)
+        problems = [p.replace(staged.name, src.name) for p in validator(staged)]
+        if problems:
+            staged.unlink(missing_ok=True)
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Invalid File",
+                f"{src.name} doesn't look like a valid {name} file — it was NOT "
+                f"copied in (your existing file, if any, is untouched):\n\n"
+                + "\n".join(f"  • {p}" for p in problems),
+            )
+            return
+
+        for existing in folder.iterdir():
+            if existing.is_file() and existing != staged:
+                existing.unlink()
+        staged.replace(folder / src.name)
+
         self._refresh_file_status()
 
     def _toggle_log(self):

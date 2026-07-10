@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from biotite.structure.io.pdbx import CIFFile, get_structure  # type: ignore[import-untyped]
 
 
@@ -61,6 +62,59 @@ def resolve_input_file(
             "Remove extras so only one input file remains."
         )
     return matches[0]
+
+
+# ── Input file content validation ─────────────────────────────────────────────
+
+# Required columns are only the ones the pipeline scripts index directly
+# (df["col"]) — a missing one would crash a run partway through rather than
+# at the upfront check this backs. Columns only ever accessed via .get(...)
+# with a default are intentionally left out.
+COSMIC_REQUIRED_COLUMNS = (
+    "GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID",
+    "MUTATION_SOMATIC_STATUS", "TRANSCRIPT_ACCESSION",
+)
+PTMD_REQUIRED_COLUMNS = (
+    "State", "UniProt", "Disease", "MutationSite", "Residue", "Position", "Type",
+)
+INTERACTORS_1433_REQUIRED_COLUMNS = ("Residue", "PMID")
+
+
+def _peek_columns(path: Path, is_excel: bool) -> list[str]:
+    """Read only the header row of *path*, so this stays fast even on multi-GB TSVs."""
+    if is_excel:
+        df = pd.read_excel(path, nrows=0)
+    else:
+        df = pd.read_csv(path, sep="\t", nrows=0)
+    return [c.strip() for c in df.columns]
+
+
+def _validate_columns(path: Path, required: tuple[str, ...], is_excel: bool = False) -> list[str]:
+    """Check that *path* contains all of *required* as columns.
+
+    Returns a list of human-readable problem descriptions; empty means valid.
+    """
+    try:
+        columns = _peek_columns(path, is_excel)
+    except Exception as exc:
+        return [f"{path.name}: could not be read as a {'spreadsheet' if is_excel else 'TSV'} file ({exc})"]
+    missing = [c for c in required if c not in columns]
+    return [f"{path.name}: missing expected column '{c}'" for c in missing]
+
+
+def validate_cosmic_file(path: Path) -> list[str]:
+    """Validate that *path* looks like a COSMIC Mutant Census TSV."""
+    return _validate_columns(path, COSMIC_REQUIRED_COLUMNS)
+
+
+def validate_ptmd_file(path: Path) -> list[str]:
+    """Validate that *path* looks like a PTMD disease-associated PTMs TSV."""
+    return _validate_columns(path, PTMD_REQUIRED_COLUMNS)
+
+
+def validate_1433_file(path: Path) -> list[str]:
+    """Validate that *path* looks like a 14-3-3 confirmed interactors spreadsheet."""
+    return _validate_columns(path, INTERACTORS_1433_REQUIRED_COLUMNS, is_excel=True)
 
 
 # ── CIF metadata extraction ───────────────────────────────────────────────────

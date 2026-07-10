@@ -28,7 +28,10 @@ from ui.common import (
     _fmt_time, _load_runtimes, _save_runtimes, _detect_run_type,
     _CACHE_ITEMS, _cache_entry_count,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    input_dir, resolve_input_file, COSMIC_INPUT_DIR, COSMIC_SOMATIC_STATUSES,
+    input_dir, resolve_input_file,
+    COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES,
+    validate_cosmic_file, validate_ptmd_file, validate_1433_file,
 )
 
 
@@ -136,6 +139,44 @@ class PipelineRunnerMixin:
             except Exception as exc:
                 self._q("log", f"Warning: could not delete {bak.name}: {exc}")
 
+    def _validate_input_files(self, mode: str) -> list[str]:
+        """Check the input files *mode* will read have the expected content
+        (required columns), not just a plausible filename/extension.
+
+        Returns a list of human-readable problems; empty means everything
+        relevant to *mode* checked out. Modes that don't read raw input files
+        (single-protein, ca-coordinates aside from COSMIC) are left alone.
+        """
+        problems: list[str] = []
+
+        needs_cosmic = mode in ("ptm-proximity", "mutation-clustering", "ca-coordinates")
+        needs_ptmd = mode == "ptm-proximity"
+
+        if needs_cosmic:
+            try:
+                cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+                problems.extend(validate_cosmic_file(cosmic_file))
+            except (FileNotFoundError, RuntimeError) as exc:
+                problems.append(str(exc))
+
+        if needs_ptmd:
+            try:
+                ptmd_file = resolve_input_file(input_dir(PROJECT_ROOT, PTMD_INPUT_DIR), (".tsv",))
+                problems.extend(validate_ptmd_file(ptmd_file))
+            except (FileNotFoundError, RuntimeError) as exc:
+                problems.append(str(exc))
+
+            # Bundled reference data, not user-provided — only checked if present,
+            # since a missing/misconfigured copy shouldn't block the whole run.
+            interactors_dir = input_dir(PROJECT_ROOT, INTERACTORS_1433_INPUT_DIR)
+            try:
+                interactors_file = resolve_input_file(interactors_dir, (".xlsx", ".xls"))
+                problems.extend(validate_1433_file(interactors_file))
+            except (FileNotFoundError, RuntimeError):
+                pass
+
+        return problems
+
     def _start_pipeline(self):
         if self._running:
             return
@@ -157,6 +198,18 @@ class PipelineRunnerMixin:
             return
 
         mode = self._mode.get()
+
+        input_problems = self._validate_input_files(mode)
+        if input_problems:
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Input File Problem",
+                "Cannot start the pipeline — one or more input files look invalid:\n\n"
+                + "\n".join(f"  • {p}" for p in input_problems)
+                + "\n\nCheck that the correct file is in the input folder and try again.",
+            )
+            return
+
         if mode == "single-protein":
             cif = getattr(self, "_single_cif_var", None)
             if not cif or not cif.get().strip():
