@@ -38,6 +38,7 @@ Output/radius_sweep.*
 Output/*.png
 Output/coordinates/
 Output/cif_variance/
+Output/prototype_hotspot_significance*.tsv
 *.bak
 
 # ── Pipeline logs (regenerated each run) ───────────────────────────────────

@@ -220,6 +220,96 @@ def load_pae_matrix(uniprot_dir: Path):
     return np.array(matrix) if matrix else None
 
 
+# ── Structural-hotspot significance testing (prototype) ──────────────────────
+#
+# Permutation-test + FDR significance for PTM-mutation 3D proximity, adapted
+# from the general method used by HotMAPS for cancer mutation hotspots, and
+# from the standard multiple-testing correction it applies:
+#
+#   Tokheim C, Bhattacharya R, Niknafs N, Gygax DM, Kim R, Ryan M, Masica DL,
+#   Karchin R. "Exome-Scale Discovery of Hotspot Mutation Regions in Human
+#   Cancer Using 3D Protein Structure." Cancer Research. 2016;76(13):3719-31.
+#   https://doi.org/10.1158/0008-5472.CAN-15-3190
+#
+#   Benjamini Y, Hochberg Y. "Controlling the False Discovery Rate: A
+#   Practical and Powerful Approach to Multiple Testing." Journal of the
+#   Royal Statistical Society: Series B. 1995;57(1):289-300.
+#
+# Null hypothesis for a given PTM site: if the same number of distinct
+# mutated positions observed in this protein had instead been placed
+# uniformly at random among its structurally-resolved residues, how often
+# would at least as many of them land within `cutoff` Angstroms of the PTM
+# site as were actually observed? This normalizes for protein size/shape —
+# a fixed Angstrom cutoff alone treats every protein as if it had the same
+# residue density, which isn't true.
+#
+# Prototype status: these are standalone statistical primitives, not wired
+# into the production pipeline (scripts/3_find_nearby_mutations.py still
+# uses the fixed-cutoff filter). See scripts/prototype_hotspot_significance.py
+# for a runnable demo against real pipeline data.
+
+def sample_permutation_indices(
+    n_residues: int, n_mutations: int, n_permutations: int, rng: np.random.Generator,
+) -> np.ndarray:
+    """Return an (n_permutations, n_mutations) array of residue indices, each
+    row an independent uniform-random sample without replacement from
+    range(n_residues) — i.e. n_permutations simulated "random mutation sets".
+
+    Vectorized via argsort-of-random-keys rather than a per-trial
+    ``rng.choice(..., replace=False)`` loop: generating thousands of
+    independent without-replacement samples one at a time is the dominant
+    cost otherwise, whereas one batched argsort is not. Safe to compute once
+    and reuse across every PTM site tested in the same protein, since
+    n_mutations (the count of distinct hotspot mutations observed in that
+    protein) doesn't vary by site — only which residues fall within cutoff
+    of each site does.
+    """
+    n_mutations = min(n_mutations, n_residues)
+    random_keys = rng.random((n_permutations, n_residues))
+    return np.argsort(random_keys, axis=1)[:, :n_mutations]
+
+
+def permutation_pvalue(
+    site_coord: np.ndarray,
+    residue_coords: np.ndarray,
+    observed_count: int,
+    cutoff: float,
+    sampled_idx: np.ndarray,
+) -> tuple[float, np.ndarray]:
+    """Empirical one-sided permutation p-value for one PTM site: how often
+    does a random placement of the same number of mutations produce at
+    least as many within `cutoff` of `site_coord` as were actually observed?
+
+    Returns (p_value, null_counts); null_counts is the simulated null
+    distribution, kept for inspection/plotting.
+    """
+    dists = np.linalg.norm(residue_coords - site_coord, axis=1)
+    sampled_dists = dists[sampled_idx]
+    null_counts = np.sum(sampled_dists <= cutoff, axis=1)
+    n_permutations = len(null_counts)
+    # +1 smoothing avoids a meaningless p=0 from finite resampling.
+    # (Davison AC, Hinkley DV. "Bootstrap Methods and Their Application."
+    # Cambridge University Press, 1997, section 4.2.)
+    p = (np.sum(null_counts >= observed_count) + 1) / (n_permutations + 1)
+    return float(p), null_counts
+
+
+def benjamini_hochberg(pvalues) -> np.ndarray:
+    """Benjamini-Hochberg FDR-adjusted q-values (Benjamini & Hochberg, 1995).
+
+    Matches R's ``p.adjust(method="BH")`` / statsmodels' ``fdr_bh``.
+    """
+    p = np.asarray(pvalues, dtype=float)
+    m = len(p)
+    order = np.argsort(p)
+    ranked = p[order] * m / (np.arange(m) + 1)
+    q_sorted = np.minimum.accumulate(ranked[::-1])[::-1]  # enforce monotonicity
+    q_sorted = np.clip(q_sorted, 0, 1)
+    q = np.empty(m, dtype=float)
+    q[order] = q_sorted
+    return q
+
+
 # ── Pipeline step labels (single source of truth) ────────────────────────────
 
 # Each step is (panel_label, log_label):
