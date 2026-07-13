@@ -13,8 +13,9 @@ import customtkinter as ctk
 
 from ui.common import (
     _MUT_ENTRY_RE, _PP_LABEL, _PTM_TV_COLS, _MUT_TV_COLS, _MUT_LONG_SRC_MAP,
+    _PTM_COL_HELP, _MUT_COL_HELP,
     _RED, _GREEN, _YELLOW, _BLUE,
-    _load_column_prefs, _save_column_prefs,
+    _load_column_prefs, _save_column_prefs, help_icon,
 )
 
 _PTM_TV_SRC_IDS = [c[1] for c in _PTM_TV_COLS if c[1] != "#col"]
@@ -122,6 +123,7 @@ class ResultsTabMixin:
 
     def _open_column_picker(self, which: str) -> None:
         registry = _PTM_TV_COLS if which == "ptm" else _MUT_TV_COLS
+        col_help = _PTM_COL_HELP if which == "ptm" else _MUT_COL_HELP
         current = set(self._ptm_visible_cols if which == "ptm" else self._mut_visible_cols)
         title = "PTM Sites Columns" if which == "ptm" else "Mutation Details Columns"
 
@@ -140,7 +142,12 @@ class ResultsTabMixin:
                 continue
             var = ctk.BooleanVar(value=col_id in current)
             vars_by_id[col_id] = var
-            ctk.CTkCheckBox(scroll, text=display, variable=var).pack(anchor="w", pady=2, padx=4)
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(anchor="w", fill="x", pady=2, padx=4)
+            ctk.CTkCheckBox(row, text=display, variable=var).pack(side="left")
+            help_text = col_help.get(col_id)
+            if help_text:
+                help_icon(row, help_text).pack(side="left", padx=(6, 0))
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(4, 10))

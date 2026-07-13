@@ -17,7 +17,7 @@ from ui.common import (
     PROJECT_ROOT, OUTPUT_DIR, _INPUT_FOLDERS,
     _GRAY, _RED, _GREEN, _YELLOW,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    resolve_input_file, extract_uniprot_from_cif,
+    resolve_input_file, extract_uniprot_from_cif, help_icon,
 )
 
 
@@ -142,18 +142,36 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(12, 8), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Cutoff (Å):").pack(side="left", padx=(8, 4), pady=8)
+        help_icon(
+            settings_frame,
+            "Maximum 3D distance, in Ångströms, between a PTM site and a "
+            "mutation for them to be counted as \"nearby.\" Default: 10.0 Å.",
+        ).pack(side="left", padx=(0, 4), pady=8)
         self._cutoff_var = ctk.StringVar(value="10.0")
         ctk.CTkEntry(
             settings_frame, textvariable=self._cutoff_var, width=60,
         ).pack(side="left", padx=(0, 16), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Min samples:").pack(side="left", padx=(8, 4), pady=8)
+        help_icon(
+            settings_frame,
+            "Minimum number of distinct COSMIC patient samples a mutation "
+            "must appear in to count as a recurrent hotspot. Lower values "
+            "include rarer mutations; higher values restrict to mutations "
+            "seen more often.",
+        ).pack(side="left", padx=(0, 4), pady=8)
         self._min_samples_var = ctk.StringVar(value="3")
         ctk.CTkEntry(
             settings_frame, textvariable=self._min_samples_var, width=60,
         ).pack(side="left", padx=(0, 16), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Min pLDDT:").pack(side="left", padx=(8, 4), pady=8)
+        help_icon(
+            settings_frame,
+            "Minimum AlphaFold per-residue confidence score (0-100). "
+            "Residues below this threshold are excluded, since the model "
+            "is less certain about their position. Leave blank to disable.",
+        ).pack(side="left", padx=(0, 4), pady=8)
         self._min_plddt_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             settings_frame, textvariable=self._min_plddt_var, width=60,
@@ -161,6 +179,13 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(0, 16), pady=8)
 
         ctk.CTkLabel(settings_frame, text="Max PAE:").pack(side="left", padx=(8, 4), pady=8)
+        help_icon(
+            settings_frame,
+            "Maximum Predicted Aligned Error, in Ångströms, allowed between "
+            "a PTM site and mutation pair. Filters out pairs where AlphaFold "
+            "isn't confident about their relative position, even if the raw "
+            "distance looks close. Leave blank to disable.",
+        ).pack(side="left", padx=(0, 4), pady=8)
         self._max_pae_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             settings_frame, textvariable=self._max_pae_var, width=60,

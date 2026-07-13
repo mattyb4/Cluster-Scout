@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tkinter as tk
 from pathlib import Path
+
+import customtkinter as ctk
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
@@ -43,6 +46,75 @@ _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
         validate_ptmd_file,
     ),
 }
+
+
+# ── Hover-tooltip help icons ──────────────────────────────────────────────────
+
+class _Tooltip:
+    """Hover pop-up bubble anchored to a single widget.
+
+    A plain tk.Toplevel/tk.Label rather than CTk widgets: it's a short-lived,
+    unmanaged popup outside the normal widget tree, so there's nothing to gain
+    from CTk's theming machinery here — just fixed colors that match the
+    app's dark theme (see app.py's `ctk.set_appearance_mode("dark")`).
+    """
+    _DELAY_MS = 400
+
+    def __init__(self, widget, text: str):
+        self._widget = widget
+        self._text = text
+        self._after_id: str | None = None
+        self._popup: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._hide)
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self._widget.after(self._DELAY_MS, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            self._widget.after_cancel(self._after_id)
+            self._after_id = None
+
+    def _show(self) -> None:
+        if self._popup is not None:
+            return
+        x = self._widget.winfo_rootx() + self._widget.winfo_width() // 2
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+
+        self._popup = tk.Toplevel(self._widget)
+        self._popup.wm_overrideredirect(True)
+        self._popup.wm_geometry(f"+{x}+{y}")
+        self._popup.attributes("-topmost", True)
+
+        tk.Label(
+            self._popup, text=self._text, justify="left",
+            background="#2b2b2b", foreground="#dce4ee",
+            font=("Segoe UI", 11), padx=10, pady=6,
+            wraplength=280, borderwidth=1, relief="solid",
+        ).pack()
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._popup is not None:
+            self._popup.destroy()
+            self._popup = None
+
+
+def help_icon(parent, text: str) -> ctk.CTkLabel:
+    """A small "?" badge that shows *text* in a hover tooltip.
+
+    Pack/grid the returned label right next to whatever it explains.
+    """
+    badge = ctk.CTkLabel(
+        parent, text="?", width=16, height=16, corner_radius=8,
+        fg_color="gray30", text_color="#cfcfcf",
+        font=ctk.CTkFont(size=10, weight="bold"),
+    )
+    _Tooltip(badge, text)
+    return badge
+
 
 _GRAY = "gray"
 _BLUE = "#3a86ff"
@@ -171,6 +243,140 @@ _MUT_TV_COLS = [
     ("PTM Type",             "ptm_type_l",       110, False, False),
     ("PTM pLDDT",            "ptm_plddt",         72, True,  False),
 ]
+
+# Column-picker hover help, keyed by col_id. Two separate dicts (not one
+# shared by col_id) because a few ids mean different things in each table —
+# e.g. "pts" is the PTM table's total patient count across ALL nearby
+# mutations, but the per-mutation patient count in the mutation table.
+_PTM_COL_HELP: dict[str, str] = {
+    "uniprot": "UniProt accession for this protein.",
+    "gene": "Gene symbol for this protein.",
+    "site": "The modified residue and its position (e.g. S557), from PTMD.",
+    "type": "The type of post-translational modification at this site "
+            "(e.g. Phosphorylation, Ubiquitination).",
+    "near": "Number of nearby mutations (within the distance cutoff) that are "
+            "also within 5 residues of this site in the linear sequence - "
+            "likely to directly disrupt the modified residue itself.",
+    "far": "Number of nearby mutations (within the distance cutoff) that are "
+           "more than 5 residues away in the linear sequence - close in 3D "
+           "space but not sequence-adjacent, suggesting fold-mediated or "
+           "allosteric proximity rather than direct disruption.",
+    "near_pts": "Total COSMIC patient count summed across the ≤ 5 pos "
+                "(sequence-adjacent) nearby mutations.",
+    "far_pts": "Total COSMIC patient count summed across the > 5 pos "
+               "(sequence-distant) nearby mutations.",
+    "near_unique": "Number of distinct mutated positions among the ≤ 5 pos "
+                   "group (vs. ≤ 5 pos itself, which counts every mutation, "
+                   "including multiple substitutions at the same position).",
+    "far_unique": "Number of distinct mutated positions among the > 5 pos group.",
+    "total": "Total number of distinct nearby mutation positions "
+             "(≤ 5 pos + > 5 pos, unique positions only).",
+    "pts": "Total COSMIC patient count across every nearby mutation for this "
+           "PTM site (≤ 5 pos + > 5 pos combined).",
+    "cosmic": "Total number of COSMIC patients with any missense mutation in "
+              "this gene, regardless of distance to this PTM site - for "
+              "context on how mutated the gene is overall.",
+    "atptm": "Whether any nearby mutation occurs exactly at the modified "
+             "residue itself, not just nearby - the most direct possible "
+             "disruption.",
+    "confirmed_disrupt": "Nearby mutations experimentally confirmed, in "
+                          "PTMD's literature, to disrupt this specific PTM site.",
+    "diseases": "Cancer-related diseases associated with this PTM site in "
+                "PTMD's literature-curated data.",
+    "pred14": "Predicted 14-3-3 binding at this site (14-3-3 proteins often "
+              "bind phosphorylated motifs).",
+    "pred14_consensus": "Agreement across multiple 14-3-3 binding predictors "
+                         "for this site.",
+    "conf14": "Whether this site is a literature-confirmed 14-3-3 binding "
+              "site (from the bundled confirmed-interactors reference).",
+    "conf14_pmid": "PubMed ID citing the literature confirmation for this "
+                   "14-3-3 site.",
+    "kinases": "Kinases predicted to phosphorylate this site.",
+    "aiupred_gen": "AIUPred intrinsic disorder score (0-1) at this PTM "
+                   "residue; above 0.5 is classified \"Disordered.\"",
+    "aiupred_bind": "AIUPred binding-region disorder score (0-1) at this PTM "
+                    "residue - disorder specifically linked to protein-binding "
+                    "regions; above 0.5 is classified \"Binding.\"",
+    "disord": "Yes/no: is this PTM residue predicted to be intrinsically "
+              "disordered (AIUPred general score > 0.5)?",
+    "bind": "Yes/no: is this PTM residue predicted to be a disordered "
+            "binding region (AIUPred binding score > 0.5)?",
+    "maxlin": "The largest linear (sequence) distance among the > 5 pos "
+              "nearby mutations - how far the most sequence-distant-but-"
+              "3D-close mutation actually is.",
+    "near_muts_raw": "The individual ≤ 5 pos mutations, each with its 3D "
+                     "distance (and PAE, if available) to this PTM site.",
+    "far_muts_raw": "The individual > 5 pos mutations, each with its 3D "
+                    "distance (and PAE, if available) to this PTM site.",
+    "lin_dist_raw": "Linear (sequence) distance from this PTM site to each "
+                    "individual > 5 pos mutation.",
+}
+
+_MUT_COL_HELP: dict[str, str] = {
+    "mut": "The specific mutation (e.g. R175H) shown in this row.",
+    "seqd": "Linear (sequence) distance, in residues, between this mutation "
+            "and the PTM site.",
+    "dist": "3D spatial distance, in Ångströms, between this mutation and "
+            "the PTM site in the AlphaFold structure - the core proximity "
+            "measurement.",
+    "isbnd": "Yes/no: is this mutation's residue predicted to be a "
+             "disordered binding region (AIUPred binding score > 0.5)?",
+    "isdis": "Yes/no: is this mutation's residue predicted to be "
+             "intrinsically disordered (AIUPred general score > 0.5)?",
+    "ppc": "PolyPhen-2's classification of this mutation's predicted effect "
+           "on protein function: benign, possibly damaging, or probably "
+           "damaging.",
+    "pps": "PolyPhen-2's raw score (0-1) for this mutation; higher means "
+           "more likely to be damaging.",
+    "mpld": "AlphaFold's per-residue confidence (pLDDT, 0-100) at this "
+            "mutation's position.",
+    "pae": "Predicted Aligned Error (Å), between the PTM site and this "
+           "mutation - AlphaFold's confidence in their relative 3D position, "
+           "independent of each residue's individual confidence. High PAE "
+           "means the distance shown may not be reliable even if both "
+           "residues have good pLDDT.",
+    "pts": "Number of distinct COSMIC patient samples carrying this "
+           "specific mutation.",
+    "total_near_pts": "Total COSMIC patient count summed across every "
+                       "mutation nearby this PTM site, not just this row - "
+                       "for context.",
+    "cosmic": "Total number of COSMIC patients with any missense mutation in "
+              "this gene, regardless of distance to the PTM site - for "
+              "context on how mutated the gene is overall.",
+    "near_mut_count": "Total number of distinct mutations found nearby this "
+                      "PTM site, not just this row - for context.",
+    "confirmed_disrupt": "Nearby mutations experimentally confirmed, in "
+                          "PTMD's literature, to disrupt this PTM site.",
+    "diseases": "Cancer-related diseases associated with this PTM site in "
+                "PTMD's literature-curated data.",
+    "pred14": "Predicted 14-3-3 binding at this PTM site (14-3-3 proteins "
+              "often bind phosphorylated motifs).",
+    "pred14_consensus": "Agreement across multiple 14-3-3 binding predictors "
+                         "for this PTM site.",
+    "conf14": "Whether this PTM site is a literature-confirmed 14-3-3 "
+              "binding site (from the bundled confirmed-interactors reference).",
+    "kinases": "Kinases predicted to phosphorylate this PTM site.",
+    "ptm_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at the PTM "
+                       "residue.",
+    "ptm_aiupred_bind": "AIUPred binding-region disorder score (0-1) at the "
+                        "PTM residue.",
+    "ptm_disord": "Yes/no: is the PTM residue predicted to be intrinsically "
+                  "disordered (AIUPred general score > 0.5)?",
+    "ptm_bind": "Yes/no: is the PTM residue predicted to be a disordered "
+                "binding region (AIUPred binding score > 0.5)?",
+    "mut_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at this "
+                       "mutation's residue.",
+    "mut_aiupred_bind": "AIUPred binding-region disorder score (0-1) at "
+                        "this mutation's residue.",
+    "gene": "Gene symbol for this protein.",
+    "uniprot": "UniProt accession for this protein.",
+    "ptm_position": "The modified residue and its position (e.g. S557) that "
+                    "this mutation is being compared against.",
+    "ptm_type_l": "The type of post-translational modification at the PTM "
+                  "site (e.g. Phosphorylation, Ubiquitination).",
+    "ptm_plddt": "AlphaFold's per-residue confidence (pLDDT, 0-100) at the "
+                 "PTM site's position.",
+}
 
 # df_long column names for every _MUT_TV_COLS entry that's a direct pass-through
 # (i.e. everything except "#col", the synthetic row index).
