@@ -116,6 +116,128 @@ def help_icon(parent, text: str) -> ctk.CTkLabel:
     return badge
 
 
+def add_resize_grip(widget, min_height: int = 60, max_height: int = 800) -> ctk.CTkFrame:
+    """A thin draggable handle that resizes *widget* vertically, the same way
+    an OS window's edge can be dragged.
+
+    *widget* must support ``.configure(height=...)`` / ``.cget("height")``
+    (CTkTextbox does). Pack or grid the returned frame immediately after
+    *widget*, in the same parent, so it reads as an edge of *widget*.
+    """
+    grip = ctk.CTkFrame(
+        widget.master, height=7, fg_color="gray25", cursor="sb_v_double_arrow",
+    )
+    grip.grid_propagate(False)
+    grip.pack_propagate(False)
+
+    drag_state: dict[str, int] = {}
+
+    def _start_drag(event) -> None:
+        drag_state["y"] = event.y_root
+        drag_state["height"] = int(widget.cget("height"))
+
+    def _do_drag(event) -> None:
+        delta = event.y_root - drag_state["y"]
+        new_height = max(min_height, min(max_height, drag_state["height"] + delta))
+        widget.configure(height=new_height)
+
+    grip.bind("<Button-1>", _start_drag)
+    grip.bind("<B1-Motion>", _do_drag)
+    return grip
+
+
+def isolate_textbox_scroll(textbox: ctk.CTkTextbox) -> None:
+    """Keep mouse-wheel scrolling over *textbox* from also scrolling the
+    outer page it sits on.
+
+    CTkScrollableFrame binds ``<MouseWheel>`` at bind_all (app-wide) and
+    scrolls itself whenever the event's target widget has its canvas
+    anywhere in its ancestor chain — true for anything placed on a
+    scrollable tab, textboxes included. Tk's own unmodified class-binding on
+    Text widgets already scrolls the textbox itself, but bind_all still runs
+    afterward regardless (it isn't skipped just because something else
+    handled the event first), so scrolling the log also scrolled the whole
+    page underneath it. A widget-level binding on the real ``tkinter.Text``
+    instance replicates the scroll and returns "break" to stop the event
+    before it reaches that bind_all handler — the same intercept-before-
+    bind_all pattern used for Ctrl+scroll zoom on the Results-tab treeviews
+    (see App._on_ctrl_scroll_zoom / ResultsTabMixin._bind_treeview_zoom_override).
+    """
+    real_text = textbox._textbox
+
+    def _on_wheel(event):
+        if getattr(event, "num", None) == 4:
+            real_text.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            real_text.yview_scroll(1, "units")
+        else:
+            real_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    real_text.bind("<MouseWheel>", _on_wheel)
+    real_text.bind("<Button-4>", _on_wheel)
+    real_text.bind("<Button-5>", _on_wheel)
+
+
+# Pipeline tab mode-selector hover help, keyed by mode value.
+_MODE_HELP: dict[str, str] = {
+    "ptm-proximity": "Find cancer mutations that cluster near, or directly "
+                      "disrupt, known PTM (post-translational modification) "
+                      "sites in 3D protein structure. Merges PTMD's PTM-site "
+                      "data with recurrent COSMIC hotspot mutations, then "
+                      "annotates results with PolyPhen-2, kinase, 14-3-3, "
+                      "and AIUPred predictions.",
+    "mutation-clustering": "Find recurrent COSMIC hotspot mutations that "
+                           "cluster together in 3D space, independent of PTM "
+                           "sites - reveals spatial mutation hotspots a "
+                           "linear sequence view wouldn't show.",
+    "single-protein": "Run proximity analysis on one CIF structure file you "
+                      "provide directly, without running the full pipeline "
+                      "- useful for a quick, one-off look at a single protein.",
+    "ca-coordinates": "Export alpha-carbon coordinates for every residue of "
+                      "one protein (by UniProt ID or gene), along with its "
+                      "COSMIC missense mutation positions, for use in "
+                      "external visualization tools.",
+}
+
+# Analysis Tools tab hover help, keyed by field name.
+_RADIUS_SWEEP_HELP: dict[str, str] = {
+    "genes": "Add one or more proteins, by gene symbol or UniProt accession, "
+             "to test. Each one is validated upfront - checked for hotspot "
+             "mutation data and a downloaded AlphaFold structure - before "
+             "being added.",
+    "radius_range": "The range of distance cutoffs, in Ångströms, to test - "
+                    "start, stop, and step size. The sweep re-runs the "
+                    "proximity search at each radius in this range, so you "
+                    "can see how results change as the cutoff changes.",
+    "unfiltered": "Also run the sweep against every COSMIC missense mutation "
+                  "for these genes, not just the recurrent hotspot ones - "
+                  "lets you compare hotspot-filtered results against the "
+                  "full, unfiltered mutation set at each radius.",
+}
+
+_CIF_VARIANCE_HELP: dict[str, str] = {
+    "input_dir": "Folder of multiple CIF files for the SAME protein to "
+                 "compare - e.g. different AlphaFold seeds or model "
+                 "versions. Structures are aligned and compared to compute "
+                 "per-residue positional variance.",
+    "top_n": "Number of most structurally-variable residues to report.",
+    "report_range": "Restrict the reported output to this residue range "
+                    "(e.g. 0-630). Leave blank to report all residues.",
+    "align_range": "Use only these residues for structural alignment, "
+                   "rather than the whole protein. Defaults to the Report "
+                   "range if left blank. Useful for excluding disordered "
+                   "regions from alignment while still reporting their "
+                   "variance.",
+    "uniprot_override": "UniProt accession to use for PTM/mutation "
+                        "cross-referencing. Auto-detected from the CIF file "
+                        "if left blank.",
+    "gene_override": "Gene symbol used to look up the UniProt ID from the "
+                     "pipeline's intermediate data, if the UniProt override "
+                     "above is left blank.",
+}
+
+
 _GRAY = "gray"
 _BLUE = "#3a86ff"
 _GREEN = "#2ecc71"

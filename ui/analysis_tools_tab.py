@@ -17,7 +17,10 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from ui.common import _GRAY, _GREEN, _RED, _YELLOW
+from ui.common import (
+    _GRAY, _GREEN, _RED, _YELLOW, add_resize_grip, isolate_textbox_scroll,
+    help_icon, _RADIUS_SWEEP_HELP, _CIF_VARIANCE_HELP,
+)
 
 
 class AnalysisToolsTabMixin:
@@ -102,7 +105,13 @@ class AnalysisToolsTabMixin:
         # Parameter fields — cleared and rebuilt by _rebuild_analysis_tool_fields
         # whenever the segmented button above toggles Radius Sweep <-> CIF Variance.
         self._at_params_frame = ctk.CTkFrame(p)
-        self._at_params_frame.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        # sticky="w", not "ew": this frame shares its grid column with the much
+        # wider plot canvas below it (canvas_frame, row 5 -- the matplotlib
+        # figure alone renders at 1400px). With "ew" this frame was forced to
+        # stretch to match that column width, dragging its own Browse button
+        # far past the edge of any normal-sized window. "w" keeps it sized to
+        # its own natural content instead of the unrelated plot's width.
+        self._at_params_frame.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
         self._at_params_frame.grid_columnconfigure(1, weight=1)
 
         # Run trigger + status/progress — persistent, built once (unlike the
@@ -141,10 +150,14 @@ class AnalysisToolsTabMixin:
         )
         self._at_log_toggle.grid(row=3, column=0, padx=12, pady=(0, 4), sticky="w")
 
+        self._at_log_frame = ctk.CTkFrame(p, fg_color="transparent")
         self._at_log = ctk.CTkTextbox(
-            p, height=120, font=ctk.CTkFont(family="Courier New", size=12),
+            self._at_log_frame, height=120, font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word", state="disabled",
         )
+        self._at_log.pack(fill="both", expand=True)
+        isolate_textbox_scroll(self._at_log)
+        add_resize_grip(self._at_log).pack(fill="x")
 
         # Plot area: a plain frame, part of the same single scrollable section
         # as everything above it — no independent scrollbar of its own.
@@ -195,11 +208,11 @@ class AnalysisToolsTabMixin:
     def _at_toggle_log(self) -> None:
         """Show or hide this tab's own collapsible log panel."""
         if self._at_log_visible:
-            self._at_log.grid_remove()
+            self._at_log_frame.grid_remove()
             self._at_log_toggle.configure(text="Show Details")
             self._at_log_visible = False
         else:
-            self._at_log.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
+            self._at_log_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
             self._at_log_toggle.configure(text="Hide Details")
             self._at_log_visible = True
 
@@ -217,9 +230,10 @@ class AnalysisToolsTabMixin:
         """Radius Sweep parameter fields, built into self._at_params_frame."""
         # Genes — added one at a time (no pre-filled defaults); self._radius_genes
         # is the source of truth, persisted across sub-tool toggles via the guard.
-        ctk.CTkLabel(self._at_params_frame, text="Genes / UniProt IDs:", anchor="w").grid(
-            row=0, column=0, padx=(12, 6), pady=6, sticky="nw"
-        )
+        genes_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        genes_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="nw")
+        ctk.CTkLabel(genes_label_frame, text="Genes / UniProt IDs:", anchor="w").pack(side="left")
+        help_icon(genes_label_frame, _RADIUS_SWEEP_HELP["genes"]).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_radius_genes"):
             self._radius_genes: list[str] = []
 
@@ -252,9 +266,10 @@ class AnalysisToolsTabMixin:
         self._refresh_radius_gene_chips()
 
         # Radius range
-        ctk.CTkLabel(self._at_params_frame, text="Radius range (Å):", anchor="w").grid(
-            row=3, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        range_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        range_label_frame.grid(row=3, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(range_label_frame, text="Radius range (Å):", anchor="w").pack(side="left")
+        help_icon(range_label_frame, _RADIUS_SWEEP_HELP["radius_range"]).pack(side="left", padx=(4, 0))
         range_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
         range_frame.grid(row=3, column=1, columnspan=3, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_radius_start_var"):
@@ -290,11 +305,14 @@ class AnalysisToolsTabMixin:
         # Unfiltered comparison
         if not hasattr(self, "_radius_unfiltered_var"):
             self._radius_unfiltered_var = ctk.BooleanVar(value=False)
+        unfiltered_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        unfiltered_frame.grid(row=5, column=0, columnspan=4, padx=12, pady=(6, 10), sticky="w")
         ctk.CTkCheckBox(
-            self._at_params_frame, text="Include unfiltered COSMIC comparison",
+            unfiltered_frame, text="Include unfiltered COSMIC comparison",
             variable=self._radius_unfiltered_var,
             checkbox_width=18, checkbox_height=18,
-        ).grid(row=5, column=0, columnspan=4, padx=12, pady=(6, 10), sticky="w")
+        ).pack(side="left")
+        help_icon(unfiltered_frame, _RADIUS_SWEEP_HELP["unfiltered"]).pack(side="left", padx=(4, 0))
 
     def _add_radius_gene(self) -> None:
         """Add a gene, accepting either a gene symbol or a UniProt accession
@@ -397,15 +415,16 @@ class AnalysisToolsTabMixin:
     def _build_cif_variance_fields(self):
         """CIF Variance parameter fields, built into self._at_params_frame."""
         # Input folder
-        ctk.CTkLabel(self._at_params_frame, text="Input folder:", anchor="w").grid(
-            row=0, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        input_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        input_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(input_label_frame, text="Input folder:", anchor="w").pack(side="left")
+        help_icon(input_label_frame, _CIF_VARIANCE_HELP["input_dir"]).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_variance_input_dir_var"):
             from cif_variance import DEFAULT_INPUT_DIR
             self._variance_input_dir_var = ctk.StringVar(value=str(DEFAULT_INPUT_DIR))
             self._variance_input_dir_var.trace_add("write", self._update_variance_cif_count)
         ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._variance_input_dir_var, width=340,
+            self._at_params_frame, textvariable=self._variance_input_dir_var, width=280,
         ).grid(row=0, column=1, padx=6, pady=6, sticky="ew")
         ctk.CTkButton(
             self._at_params_frame, text="Browse", width=70, height=26,
@@ -420,9 +439,10 @@ class AnalysisToolsTabMixin:
         self._update_variance_cif_count()
 
         # Top N
-        ctk.CTkLabel(self._at_params_frame, text="Top N residues:", anchor="w").grid(
-            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        top_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        top_label_frame.grid(row=2, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(top_label_frame, text="Top N residues:", anchor="w").pack(side="left")
+        help_icon(top_label_frame, _CIF_VARIANCE_HELP["top_n"]).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_variance_top_var"):
             self._variance_top_var = ctk.StringVar(value="10")
         ctk.CTkEntry(
@@ -430,9 +450,10 @@ class AnalysisToolsTabMixin:
         ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
 
         # Report range
-        ctk.CTkLabel(self._at_params_frame, text="Report range:", anchor="w").grid(
-            row=3, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        report_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        report_label_frame.grid(row=3, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(report_label_frame, text="Report range:", anchor="w").pack(side="left")
+        help_icon(report_label_frame, _CIF_VARIANCE_HELP["report_range"]).pack(side="left", padx=(4, 0))
         report_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
         report_frame.grid(row=3, column=1, columnspan=2, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_variance_range_start_var"):
@@ -444,9 +465,10 @@ class AnalysisToolsTabMixin:
                      placeholder_text="end (blank = all)").pack(side="left")
 
         # Align range
-        ctk.CTkLabel(self._at_params_frame, text="Align range:", anchor="w").grid(
-            row=4, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        align_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        align_label_frame.grid(row=4, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(align_label_frame, text="Align range:", anchor="w").pack(side="left")
+        help_icon(align_label_frame, _CIF_VARIANCE_HELP["align_range"]).pack(side="left", padx=(4, 0))
         align_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
         align_frame.grid(row=4, column=1, columnspan=2, padx=6, pady=6, sticky="w")
         if not hasattr(self, "_variance_align_start_var"):
@@ -458,9 +480,10 @@ class AnalysisToolsTabMixin:
                      placeholder_text="end (blank = same as report range)").pack(side="left")
 
         # UniProt / gene overrides
-        ctk.CTkLabel(self._at_params_frame, text="UniProt override:", anchor="w").grid(
-            row=5, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        uniprot_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        uniprot_label_frame.grid(row=5, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(uniprot_label_frame, text="UniProt override:", anchor="w").pack(side="left")
+        help_icon(uniprot_label_frame, _CIF_VARIANCE_HELP["uniprot_override"]).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_variance_uniprot_var"):
             self._variance_uniprot_var = ctk.StringVar(value="")
         ctk.CTkEntry(
@@ -468,9 +491,10 @@ class AnalysisToolsTabMixin:
             placeholder_text="auto-detected from CIF",
         ).grid(row=5, column=1, padx=6, pady=6, sticky="w")
 
-        ctk.CTkLabel(self._at_params_frame, text="Gene override:", anchor="w").grid(
-            row=6, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        gene_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        gene_label_frame.grid(row=6, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(gene_label_frame, text="Gene override:", anchor="w").pack(side="left")
+        help_icon(gene_label_frame, _CIF_VARIANCE_HELP["gene_override"]).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_variance_gene_var"):
             self._variance_gene_var = ctk.StringVar(value="")
         ctk.CTkEntry(

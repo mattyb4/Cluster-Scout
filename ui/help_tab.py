@@ -42,8 +42,19 @@ class HelpTabMixin:
         full_html = f"<html><head>{css}</head><body>{html_body}</body></html>"
 
         try:
+            import webbrowser
             from tkinterweb import HtmlFrame
-            frame = HtmlFrame(tab, messages_enabled=False)
+            frame = HtmlFrame(
+                tab, messages_enabled=False,
+                # Without this, clicking a link (e.g. the COSMIC/PTMD sources)
+                # navigates this embedded frame itself to that external site,
+                # replacing the help content with no way back short of
+                # restarting the app. Providing on_link_click replaces the
+                # default in-place navigation entirely, so opening the URL in
+                # the system browser instead means this frame never navigates
+                # away from the docs at all.
+                on_link_click=lambda url: webbrowser.open(url),
+            )
             frame.load_html(full_html)
             frame.grid(row=0, column=0, sticky="nsew")
         except ImportError:

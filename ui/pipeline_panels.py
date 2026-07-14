@@ -17,7 +17,8 @@ from ui.common import (
     PROJECT_ROOT, OUTPUT_DIR, _INPUT_FOLDERS,
     _GRAY, _RED, _GREEN, _YELLOW,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    resolve_input_file, extract_uniprot_from_cif, help_icon,
+    resolve_input_file, extract_uniprot_from_cif, help_icon, add_resize_grip,
+    isolate_textbox_scroll, _MODE_HELP,
 )
 
 
@@ -104,7 +105,8 @@ class PipelineTabMixin:
                 variable=self._mode,
                 value=value,
                 command=self._rebuild_step_rows,
-            ).pack(side="left", padx=8, pady=10)
+            ).pack(side="left", padx=(8, 0), pady=10)
+            help_icon(mode_frame, _MODE_HELP[value]).pack(side="left", padx=(4, 8), pady=10)
 
         # Output folder selector
         out_frame = ctk.CTkFrame(p)
@@ -308,13 +310,17 @@ class PipelineTabMixin:
         )
         self._log_toggle.grid(row=9, column=0, padx=24, pady=(8, 0), sticky="w")
 
+        self._log_frame = ctk.CTkFrame(p, fg_color="transparent")
         self._log = ctk.CTkTextbox(
-            p,
+            self._log_frame,
             height=140,
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
         )
+        self._log.pack(fill="both", expand=True)
+        isolate_textbox_scroll(self._log)
+        add_resize_grip(self._log).pack(fill="x")
         self._toggle_log()  # visible by default
 
         # Hide the scrollbar when content fits; show it only when scrolling is needed
@@ -563,11 +569,11 @@ class PipelineTabMixin:
     def _toggle_log(self):
         """Show or hide the raw log output panel (a normal part of the scrollable content)."""
         if self._log_visible:
-            self._log.grid_remove()
+            self._log_frame.grid_remove()
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log.grid(row=10, column=0, padx=24, pady=(6, 12), sticky="ew")
+            self._log_frame.grid(row=10, column=0, padx=24, pady=(6, 12), sticky="ew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 

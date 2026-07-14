@@ -220,6 +220,7 @@ dependencies = [
     { name = "pandas" },
     { name = "psutil" },
     { name = "requests" },
+    { name = "tkinterweb" },
     { name = "tqdm" },
 ]
 
@@ -241,6 +242,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=3.0.1" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "requests", specifier = ">=2.32.5" },
+    { name = "tkinterweb", specifier = ">=4.25.3" },
     { name = "tqdm", specifier = ">=4.67.3" },
 ]
 
@@ -1122,6 +1124,35 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "tkinterweb"
+version = "4.25.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tkinterweb-tkhtml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/54/b587e73e1563398913099b71d5283a51656c43534541499a76239a9d937f/tkinterweb-4.25.3.tar.gz", hash = "sha256:5540407b77d0b6663afb88b4030c3f57766eeaa48bd1c83293a43bc59e82e3e8", size = 112943, upload-time = "2026-05-29T21:15:27.868Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/86/5409c1958607e719cd30cea69a21c84af327ea8faf24cbfb7805485030b7/tkinterweb-4.25.3-py3-none-any.whl", hash = "sha256:a12cef5c5b97e1a8eb49a7a1f117787dc72b855728f0f66563054a388da8f23e", size = 116894, upload-time = "2026-05-29T21:15:26.425Z" },
+]
+
+[[package]]
+name = "tkinterweb-tkhtml"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/a5/50281c38e6adc59a36158713cd6620cbb46b38bc73eb1929511a9cb3a700/tkinterweb_tkhtml-2.1.1.tar.gz", hash = "sha256:62b0db0fdb442d46e551c357e2d14de38c47b954ce93b670b6beb31fd75a548b", size = 1440291, upload-time = "2026-02-06T15:38:49.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/cd/6d4a80defa1e6ffb358b65219a5bcb71ea4bfa3061f89783af19792df052/tkinterweb_tkhtml-2.1.1-py3-none-any.whl", hash = "sha256:51541db4cb118ef06329777bada7b2464a05085f15d8712d0608cab0f48452ac", size = 1447595, upload-time = "2026-02-06T15:38:09.426Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/dc/69df895211500db39721b91f0574773014c9b29c76fce2fff828da920dcc/tkinterweb_tkhtml-2.1.1-py3-none-linux_armv7l.whl", hash = "sha256:0f7d93d3e96aa57bbab2af2465f69d83870e0269877830b105873f5c391a8fad", size = 152989, upload-time = "2026-02-06T15:38:14.102Z" },
+    { url = "https://files.pythonhosted.org/packages/64/e0/40910bbb0c308dc620cd77537468461ba32def037e56148825effc159e5b/tkinterweb_tkhtml-2.1.1-py3-none-macosx_10_6_x86_64.whl", hash = "sha256:0cfb20bfa38a025f99127c43c2383ee37c38652620c055f26551b3080aa595a7", size = 134802, upload-time = "2026-02-06T15:38:16.438Z" },
+    { url = "https://files.pythonhosted.org/packages/48/1f/0e4dcf6a3087f6c1f5c31787d7594167ff30494c5e68846663334e4f484d/tkinterweb_tkhtml-2.1.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a55c1979ae7ff7f17bfbad9c67b5f2f9c463da2a20a7697eaa4a0fdb51052bc6", size = 131254, upload-time = "2026-02-06T15:38:18.517Z" },
+    { url = "https://files.pythonhosted.org/packages/11/46/5141be37bc4e438704c28b7c8233becf26e8e653de277bd6415cb00484f9/tkinterweb_tkhtml-2.1.1-py3-none-manylinux1_i686.whl", hash = "sha256:38fc20afb50788f11a71d56db5982368b9c2b5bb5aaeb6bb8fda8b11c63812d8", size = 185437, upload-time = "2026-02-06T15:38:21.584Z" },
+    { url = "https://files.pythonhosted.org/packages/9a/26/86c0735d22069354324470738cff85c6d182f5ff39cad60ce69766c86762/tkinterweb_tkhtml-2.1.1-py3-none-manylinux1_x86_64.whl", hash = "sha256:45de2140df75086d9b31ed4f326d8a0e24f849520de36883805d60ca8755d1e7", size = 172150, upload-time = "2026-02-06T15:38:24.066Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/a7/2fcd3e91845e6283887c089b882b020960c38ff80b6d184cc3412b7b4bdb/tkinterweb_tkhtml-2.1.1-py3-none-manylinux2014_aarch64.whl", hash = "sha256:c737250ea9d6ff82a1fe325991a17c734444a5d992667eac082034cfaa0c7e9c", size = 169432, upload-time = "2026-02-06T15:38:27.117Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/ce/a814da1089f50f9c6f36ebe179187b235014aca8ff6446d66c7270c474a9/tkinterweb_tkhtml-2.1.1-py3-none-win32.whl", hash = "sha256:bfe25007fb6b99ac74b4bda47a1ac99e79a73982bdcdbd56494b37abf8976771", size = 269074, upload-time = "2026-02-06T15:38:30.52Z" },
+    { url = "https://files.pythonhosted.org/packages/87/26/cdc82baedd923afe1ca062ba50fedf4adf058239eafad3087b2bcf778a69/tkinterweb_tkhtml-2.1.1-py3-none-win_amd64.whl", hash = "sha256:5a1f9e5a49e8ff15488557377f3f25f8e7e781bea94f9d63884a887ddbd18d58", size = 269564, upload-time = "2026-02-06T15:38:34.432Z" },
 ]
 
 [[package]]

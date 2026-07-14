@@ -482,7 +482,6 @@ class ResultsTabMixin:
         top_frame.grid_columnconfigure(0, weight=1)
         self._ptm_tv = self._make_treeview(top_frame, _PTM_TV_COLS, self._ptm_visible_cols)
         self._ptm_tv.bind("<<TreeviewSelect>>", self._on_ptm_select)
-        self._ptm_tv.bind("<Double-Button-1>", lambda _e: self._visualize_selected_ptm())
         self._bind_treeview_zoom_override(self._ptm_tv)
 
         # ── Detail panel header ──
@@ -705,13 +704,42 @@ class ResultsTabMixin:
         else:
             self._populate_mut_tv_wide(row)
 
+    _RESULTS_STATUS_FLASH_MS = 3000
+
+    def _flash_results_status(self, text: str, color: str) -> None:
+        """Show a temporary message in the Results-tab status label, then
+        revert to whatever it displayed before.
+
+        Unlike the persistent "N PTM sites / M proteins" summary this label
+        normally shows, a warning like "select a PTM site first" has no
+        natural moment where something else overwrites it — left as a plain
+        .configure(), it would just sit there indefinitely with no way to
+        dismiss it. Repeated flashes reuse the same saved original text
+        rather than saving over each other, so they don't end up "reverting"
+        to a previous warning instead of the real original status.
+        """
+        if not getattr(self, "_results_status_flashing", False):
+            self._results_status_prev = (
+                self._results_status.cget("text"), self._results_status.cget("text_color"),
+            )
+        self._results_status_flashing = True
+        self._results_status.configure(text=text, text_color=color)
+
+        if getattr(self, "_results_status_flash_id", None):
+            self.after_cancel(self._results_status_flash_id)
+
+        def _restore():
+            prev_text, prev_color = self._results_status_prev
+            self._results_status.configure(text=prev_text, text_color=prev_color)
+            self._results_status_flashing = False
+
+        self._results_status_flash_id = self.after(self._RESULTS_STATUS_FLASH_MS, _restore)
+
     def _visualize_selected_ptm(self) -> None:
         """Jump to the Visualization tab and render the lollipop plot for the selected PTM row."""
         sel = self._ptm_tv.selection()
         if not sel or self._results_df_wide is None:
-            self._results_status.configure(
-                text="Select a PTM site in the table first.", text_color=_YELLOW,
-            )
+            self._flash_results_status("Select a PTM site in the table first.", _YELLOW)
             return
         row = self._results_df_wide.iloc[int(sel[0]) - 1]
         label = f"{row.get('gene', '?')}  {row.get('ptm_site', '?')}  ({row.get('UniProt', '?')})"
