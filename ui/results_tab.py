@@ -37,7 +37,7 @@ class ResultsTabMixin:
             )
             style.configure(f"{name}.Heading",
                 background=heading_bg, foreground=fg,
-                relief="flat", borderwidth=1,
+                relief="groove", borderwidth=1,
                 font=("Segoe UI", 10, "bold"),
             )
             style.map(name,
