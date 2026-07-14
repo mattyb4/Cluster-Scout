@@ -78,7 +78,7 @@ class ResultsTabMixin:
         if visible_ids is None:
             visible_ids = [c[1] for c in col_defs if c[4]]
         tv["displaycolumns"] = visible_ids
-        self._apply_tv_stretch(tv)
+        self._disable_tv_stretch(tv)
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
         hsb = ttk.Scrollbar(frame, orient="horizontal", command=tv.xview)
@@ -103,18 +103,26 @@ class ResultsTabMixin:
         tv.bind("<Control-Button-4>", self._on_ctrl_scroll_zoom)
         tv.bind("<Control-Button-5>", self._on_ctrl_scroll_zoom)
 
-    def _apply_tv_stretch(self, tv) -> None:
-        """Make the last currently-visible column absorb extra width."""
+    def _disable_tv_stretch(self, tv) -> None:
+        """Keep every column at exactly its configured width, always.
+
+        ttk.Treeview's `stretch=True` doesn't just grow a column into extra
+        room when there's space to spare -- if the visible columns'
+        configured widths already add up to more than the widget's actual
+        width, ttk instead shrinks the stretchy column below its configured
+        width (down to `minwidth`) to force everything to fit. Rather than
+        try to distinguish those two cases, no column ever stretches: any
+        leftover space after the last column is just left blank, and
+        overflow is handled by the horizontal scrollbar. Every column then
+        reliably renders at the width set for it in the registry.
+        """
         for c in tv["columns"]:
             tv.column(c, stretch=False)
-        display = list(tv["displaycolumns"])
-        if display:
-            tv.column(display[-1], stretch=True)
 
     def _set_visible_columns(self, which: str, col_ids: list) -> None:
         tv = self._ptm_tv if which == "ptm" else self._mut_tv
         tv.configure(displaycolumns=col_ids)
-        self._apply_tv_stretch(tv)
+        self._disable_tv_stretch(tv)
         if which == "ptm":
             self._ptm_visible_cols = col_ids
         else:
@@ -674,8 +682,6 @@ class ResultsTabMixin:
                 "disord": row.get("ptm_is_disordered", ""),
                 "bind": row.get("ptm_is_binding", ""),
                 "maxlin": max_linear_dist,
-                "near_muts_raw": row.get("mutations_within_5_positions", ""),
-                "far_muts_raw": row.get("mutations_more_than_5_positions", ""),
                 "lin_dist_raw": row.get("morethan5_linear_distance", ""),
             }
             values = [i] + [values_map.get(c, "") for c in _PTM_TV_SRC_IDS]
@@ -733,9 +739,10 @@ class ResultsTabMixin:
         """Populate the Mutation Details tv from a wide-format PTM row.
 
         Per-mutation fields (binding/disordered/pLDDT/patient count/etc.) aren't
-        available at this granularity in the wide format, so they're left blank;
-        PTM-level fields (diseases, kinases, aiupred, ...) are shared across all
-        mutation rows derived from the same PTM site.
+        available at this granularity in the wide format, so they're left blank.
+        "PTM pLDDT" is the one PTM-level exception kept in this table (it has no
+        equivalent in the PTM Sites table), so it's also left blank here since
+        the wide format doesn't carry it per-row either.
         """
         import re as _re
         tv = self._mut_tv
@@ -743,23 +750,13 @@ class ResultsTabMixin:
         ptm_m = _re.search(r"(\d+)", str(row.get("ptm_site", "")))
         ptm_pos = int(ptm_m.group(1)) if ptm_m else None
 
-        shared = {
-            "confirmed_disrupt": row.get("confirmed_disrupting_mutations", ""),
-            "diseases": row.get("ptm_diseases", ""),
-            "pred14": row.get("1433pred_binding_site", ""),
-            "pred14_consensus": row.get("1433pred_consensus", ""),
-            "conf14": row.get("1433_confirmed_site", ""),
-            "kinases": row.get("kinase_predictions", ""),
-            "ptm_aiupred_gen": row.get("ptm_aiupred_general", ""),
-            "ptm_aiupred_bind": row.get("ptm_aiupred_binding", ""),
-            "ptm_disord": row.get("ptm_is_disordered", ""),
-            "ptm_bind": row.get("ptm_is_binding", ""),
-            "cosmic": row.get("total_cosmic_missense_patients", ""),
-            "gene": row.get("gene", ""),
-            "uniprot": row.get("UniProt", ""),
-            "ptm_position": row.get("ptm_site", ""),
-            "ptm_type_l": row.get("ptm_type", ""),
-        }
+        # Mutation names confirmed to disrupt this PTM site, so each row below
+        # can report "yes"/"no" for itself rather than repeating the whole list.
+        confirmed_muts = set()
+        for entry in (row.get("confirmed_disrupting_mutations", "") or "").split(", "):
+            cm = _MUT_ENTRY_RE.match(entry.strip())
+            if cm:
+                confirmed_muts.add(cm.group(1))
 
         i = 0
         for col_key in ("mutations_within_5_positions", "mutations_more_than_5_positions"):
@@ -786,12 +783,10 @@ class ResultsTabMixin:
                     "mpld": "",
                     "pae": m.group(5) or "",
                     "pts": "",
-                    "total_near_pts": "",
-                    "near_mut_count": "",
+                    "confirmed_disrupt": "yes" if m.group(1) in confirmed_muts else "no",
                     "ptm_plddt": "",
                     "mut_aiupred_gen": "",
                     "mut_aiupred_bind": "",
-                    **shared,
                 }
                 values = [i] + [per_row.get(c, "") for c in _MUT_TV_SRC_IDS]
                 tv.insert("", "end", iid=str(i), values=values, tags=("odd" if i % 2 else "even",))

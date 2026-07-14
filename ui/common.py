@@ -189,24 +189,23 @@ _PTM_TV_COLS = [
     (">5 pos patients",      "far_pts",           90, True,  False),
     ("≤5 unique pos",        "near_unique",       90, True,  False),
     (">5 unique pos",        "far_unique",        90, True,  False),
-    ("Unique pos",           "total",             68, True,  True),
+    ("Unique pos",           "total",             75, True,  True),
     ("Patients",             "pts",               65, True,  True),
-    ("COSMIC",               "cosmic",            65, True,  True),
+    ("Total gene pts",       "cosmic",            95, True,  True),
     ("At PTM",               "atptm",             52, False, True),
-    ("Confirmed disrupting", "confirmed_disrupt",110, False, False),
+    ("Confirmed disrupted", "confirmed_disrupt",110, False, False),
     ("PTM diseases",         "diseases",         140, False, False),
     ("14-3-3",               "pred14",            58, False, True),
-    ("14-3-3 consensus",     "pred14_consensus",  90, False, False),
+    ("14-3-3 consensus score", "pred14_consensus",  90, False, False),
     ("14-3-3 confirmed",     "conf14",            90, False, False),
     ("14-3-3 PMID",          "conf14_pmid",       90, False, False),
-    ("Kinases",              "kinases",          160, False, False),
+    ("Predicted kinases",    "kinases",          160, False, False),
     ("PTM AIUPred gen.",     "aiupred_gen",       90, True,  False),
     ("PTM AIUPred bind.",    "aiupred_bind",      90, True,  False),
     ("Disordered?",          "disord",            78, False, True),
     ("Binding?",             "bind",              58, False, True),
     ("Max lin. dist.",       "maxlin",            90, True,  True),
-    ("≤5 pos mutations",     "near_muts_raw",    200, False, False),
-    (">5 pos mutations",     "far_muts_raw",     200, False, False),
+    ("PTM pLDDT",            "ptm_plddt",         72, True,  False),
     ("Linear distances",     "lin_dist_raw",     150, False, False),
 ]
 
@@ -219,29 +218,13 @@ _MUT_TV_COLS = [
     ("Disordered?",          "isdis",             78, False, True),
     ("PP Class",             "ppc",              115, False, True),
     ("PP Score",             "pps",               62, True,  False),
-    ("Mut pLDDT",            "mpld",              72, True,  True),
+    ("Mut pLDDT",            "mpld",              75, True,  True),
     ("PAE",                  "pae",               48, True,  True),
     ("Patients",             "pts",               62, True,  True),
-    ("Total nearby pts",     "total_near_pts",   100, True,  False),
-    ("COSMIC",               "cosmic",            65, True,  False),
-    ("Nearby mut count",     "near_mut_count",   100, True,  False),
     ("Confirmed disrupting", "confirmed_disrupt",110, False, False),
-    ("PTM diseases",         "diseases",         140, False, False),
-    ("14-3-3",               "pred14",            58, False, False),
-    ("14-3-3 consensus",     "pred14_consensus",  90, False, False),
-    ("14-3-3 confirmed",     "conf14",            90, False, False),
-    ("Kinases",              "kinases",          160, False, False),
-    ("PTM AIUPred gen.",     "ptm_aiupred_gen",   90, True,  False),
-    ("PTM AIUPred bind.",    "ptm_aiupred_bind",  90, True,  False),
-    ("PTM disordered?",      "ptm_disord",        90, False, False),
-    ("PTM binding?",         "ptm_bind",          80, False, False),
     ("Mut AIUPred gen.",     "mut_aiupred_gen",   90, True,  False),
     ("Mut AIUPred bind.",    "mut_aiupred_bind",  90, True,  False),
-    ("Gene",                 "gene",              58, False, False),
-    ("UniProt",              "uniprot",           70, False, False),
-    ("PTM Site",             "ptm_position",      65, False, False),
-    ("PTM Type",             "ptm_type_l",       110, False, False),
-    ("PTM pLDDT",            "ptm_plddt",         72, True,  False),
+    
 ]
 
 # Column-picker hover help, keyed by col_id. Two separate dicts (not one
@@ -285,8 +268,13 @@ _PTM_COL_HELP: dict[str, str] = {
                 "PTMD's literature-curated data.",
     "pred14": "Predicted 14-3-3 binding at this site (14-3-3 proteins often "
               "bind phosphorylated motifs).",
-    "pred14_consensus": "Agreement across multiple 14-3-3 binding predictors "
-                         "for this site.",
+    "pred14_consensus": "14-3-3-Pred's combined \"Consensus\" score for this "
+                         "site, combining its individual prediction methods "
+                         "(ANN, PSSM) into one number, roughly -1 to +1.5 in "
+                         "practice. Positive is what the separate \"14-3-3\" "
+                         "Yes/No column is based on - the more positive, the "
+                         "stronger the predicted binding signal; negative "
+                         "means predicted non-binding.",
     "conf14": "Whether this site is a literature-confirmed 14-3-3 binding "
               "site (from the bundled confirmed-interactors reference).",
     "conf14_pmid": "PubMed ID citing the literature confirmation for this "
@@ -304,10 +292,6 @@ _PTM_COL_HELP: dict[str, str] = {
     "maxlin": "The largest linear (sequence) distance among the > 5 pos "
               "nearby mutations - how far the most sequence-distant-but-"
               "3D-close mutation actually is.",
-    "near_muts_raw": "The individual ≤ 5 pos mutations, each with its 3D "
-                     "distance (and PAE, if available) to this PTM site.",
-    "far_muts_raw": "The individual > 5 pos mutations, each with its 3D "
-                    "distance (and PAE, if available) to this PTM site.",
     "lin_dist_raw": "Linear (sequence) distance from this PTM site to each "
                     "individual > 5 pos mutation.",
 }
@@ -337,45 +321,16 @@ _MUT_COL_HELP: dict[str, str] = {
            "residues have good pLDDT.",
     "pts": "Number of distinct COSMIC patient samples carrying this "
            "specific mutation.",
-    "total_near_pts": "Total COSMIC patient count summed across every "
-                       "mutation nearby this PTM site, not just this row - "
-                       "for context.",
-    "cosmic": "Total number of COSMIC patients with any missense mutation in "
-              "this gene, regardless of distance to the PTM site - for "
-              "context on how mutated the gene is overall.",
-    "near_mut_count": "Total number of distinct mutations found nearby this "
-                      "PTM site, not just this row - for context.",
-    "confirmed_disrupt": "Nearby mutations experimentally confirmed, in "
-                          "PTMD's literature, to disrupt this PTM site.",
-    "diseases": "Cancer-related diseases associated with this PTM site in "
-                "PTMD's literature-curated data.",
-    "pred14": "Predicted 14-3-3 binding at this PTM site (14-3-3 proteins "
-              "often bind phosphorylated motifs).",
-    "pred14_consensus": "Agreement across multiple 14-3-3 binding predictors "
-                         "for this PTM site.",
-    "conf14": "Whether this PTM site is a literature-confirmed 14-3-3 "
-              "binding site (from the bundled confirmed-interactors reference).",
-    "kinases": "Kinases predicted to phosphorylate this PTM site.",
-    "ptm_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at the PTM "
-                       "residue.",
-    "ptm_aiupred_bind": "AIUPred binding-region disorder score (0-1) at the "
-                        "PTM residue.",
-    "ptm_disord": "Yes/no: is the PTM residue predicted to be intrinsically "
-                  "disordered (AIUPred general score > 0.5)?",
-    "ptm_bind": "Yes/no: is the PTM residue predicted to be a disordered "
-                "binding region (AIUPred binding score > 0.5)?",
+    "confirmed_disrupt": "Yes/no: is this specific mutation experimentally "
+                          "confirmed, in PTMD's literature, to disrupt this "
+                          "PTM site?",
     "mut_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at this "
                        "mutation's residue.",
     "mut_aiupred_bind": "AIUPred binding-region disorder score (0-1) at "
                         "this mutation's residue.",
-    "gene": "Gene symbol for this protein.",
-    "uniprot": "UniProt accession for this protein.",
-    "ptm_position": "The modified residue and its position (e.g. S557) that "
-                    "this mutation is being compared against.",
-    "ptm_type_l": "The type of post-translational modification at the PTM "
-                  "site (e.g. Phosphorylation, Ubiquitination).",
     "ptm_plddt": "AlphaFold's per-residue confidence (pLDDT, 0-100) at the "
-                 "PTM site's position.",
+                 "PTM site's position - not shown in the PTM Sites table, "
+                 "so it's kept here.",
 }
 
 # df_long column names for every _MUT_TV_COLS entry that's a direct pass-through
@@ -391,25 +346,9 @@ _MUT_LONG_SRC_MAP = {
     "mpld": "mutation_plddt",
     "pae": "pair_pae",
     "pts": "patient_count",
-    "total_near_pts": "total_nearby_patient_count",
-    "cosmic": "total_cosmic_missense_patients",
-    "near_mut_count": "nearby_mutation_count",
     "confirmed_disrupt": "confirmed_disrupting_mutation",
-    "diseases": "ptm_diseases",
-    "pred14": "1433_predicted",
-    "pred14_consensus": "1433_predicted_consensus",
-    "conf14": "1433_confirmed",
-    "kinases": "kinase_predictions",
-    "ptm_aiupred_gen": "ptm_aiupred_general",
-    "ptm_aiupred_bind": "ptm_aiupred_binding",
-    "ptm_disord": "ptm_is_disordered",
-    "ptm_bind": "ptm_is_binding",
     "mut_aiupred_gen": "mut_aiupred_general",
     "mut_aiupred_bind": "mut_aiupred_binding",
-    "gene": "gene",
-    "uniprot": "uniprot_id",
-    "ptm_position": "ptm_position",
-    "ptm_type_l": "ptm_type",
     "ptm_plddt": "ptm_plddt",
 }
 
