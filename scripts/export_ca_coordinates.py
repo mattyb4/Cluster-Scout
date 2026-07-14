@@ -1,11 +1,28 @@
 """Export alpha-carbon coordinates for a protein from its AlphaFold CIF.
 
-Produces two TSV files in Output/coordinates/, each with a patients_within_10A
-column giving the total COSMIC patient count summed across all missense
-mutations whose CA coordinate is within 10 Angstroms:
+Every run's output goes into its own Output/coordinates/{UniProt}/ folder, so
+files for different proteins never mix together. Produces two TSV files,
+each with a patients_within_10A column giving the total COSMIC patient count
+summed across all missense mutations whose CA coordinate is within 10
+Angstroms:
 
-  {UniProt}_all_ca.tsv       — CA coordinates for every residue
-  {UniProt}_mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
+  all_ca.tsv       — CA coordinates for every residue
+  mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
+
+For single-fragment proteins, also produces a ChimeraX-ready pair (skipped,
+with a warning, for multi-fragment proteins — see write_chimerax_files):
+
+  mutations.defattr — per-residue heatmap value as a ChimeraX
+                       attribute-assignment file — log1p(patients_within_10A)
+                       by default (log_scale=True), or the raw count if
+                       log-scaling is turned off
+  view.cxc           — a ChimeraX command script that opens the CIF, loads
+                        the attribute file, and colors the cartoon by it as
+                        a heatmap (a sequential "Reds" palette, capped at the
+                        99th/90th percentile for log/linear mode
+                        respectively, to stay legible despite how skewed
+                        mutation density usually is). Open this file
+                        directly in ChimeraX to see the result.
 
 Usage:
     uv run scripts/export_ca_coordinates.py P04637
@@ -52,6 +69,8 @@ class ExportResult:
     mut_ca_df: pd.DataFrame
     all_out: Path
     mut_out: Path
+    defattr_out: Path | None = None
+    chimerax_script_out: Path | None = None
 
 
 def _download_cif(uid: str, log_cb: Callable[[str], None] = print) -> list[Path]:
@@ -248,17 +267,91 @@ def _compute_patients_within_radius(
     return {int(pos): int(total) for pos, total in zip(ca_df["position"], totals)}
 
 
+def write_defattr_file(
+    ca_df: pd.DataFrame, out_path: Path, chain_id: str = "A",
+    attr_name: str = "patients_within_10A",
+) -> Path:
+    """Write a ChimeraX attribute-assignment file (.defattr) with one
+    per-residue value, using the format documented at
+    https://www.cgl.ucsf.edu/chimerax/docs/user/formats/defattr.html
+
+    Each data line needs a LEADING tab before the residue spec (confirmed
+    against ChimeraX's own shipped example files via raw byte inspection —
+    the rendered docs example is easy to misread as spec+tab+value only,
+    but ChimeraX's parser rejects a data line missing that initial tab,
+    reporting it as "not of the form 'name: value'"), and the residue spec
+    itself needs a leading "/" before the chain letter (ChimeraX's atom-spec
+    grammar requires it for a chain specifier — bare "A:1" is rejected as
+    "Bad atom specifier"; it must be "/A:1").
+    """
+    lines = [f"attribute: {attr_name}", "recipient: residues", "#"]
+    for _, row in ca_df.iterrows():
+        lines.append(f"\t/{chain_id}:{int(row['position'])}\t{row[attr_name]}")
+    # newline="\n" forces LF-only line endings (matching ChimeraX's own
+    # shipped .defattr files) instead of write_text()'s default platform
+    # translation, which would write CRLF on Windows.
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return out_path
+
+
+def write_chimerax_script(
+    cif_path: Path, defattr_path: Path, out_path: Path,
+    attr_name: str = "patients_within_10A",
+    value_range: tuple[float, float] | None = None,
+    palette: str = "Reds",
+) -> Path:
+    """Write a ChimeraX command script (.cxc) that opens *cif_path*, loads
+    the attribute data from *defattr_path*, and colors the cartoon by it as
+    a heatmap. Open this file directly in ChimeraX (File > Open, or drag
+    onto the window) to reproduce the view with no manual steps.
+
+    *palette* defaults to "Reds", a built-in ColorBrewer sequential palette
+    (light-to-dark, one hue) — a diverging blue-white-red scale implies a
+    meaningful midpoint/"neutral" value, which mutation density doesn't
+    have; every value is "how much", not "which direction from zero".
+
+    *value_range*, if given, is passed to ChimeraX's `range` option instead
+    of letting it auto-scale to the attribute's true min/max. COSMIC patient
+    counts are heavily right-skewed — one true hotspot residue can be 10-100x
+    any other position — so an unclamped auto-range stretches the whole
+    gradient to fit that single outlier, crushing every other residue down
+    into the lightest color. Values above the given upper bound are simply
+    clamped to the top color rather than further stretching the scale.
+    """
+    range_clause = f" range {value_range[0]:g},{value_range[1]:g}" if value_range else ""
+    lines = [
+        f'open "{cif_path}"',
+        f'open "{defattr_path}"',
+        "hide atoms",
+        "cartoon",
+        f"color byattribute r:{attr_name} #1 palette {palette} target c noValueColor gray{range_clause}",
+        "lighting soft",
+    ]
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return out_path
+
+
 def run_export(
     uniprot: str,
     gene: str | None = None,
     cosmic_file: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
+    log_scale: bool = True,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
 
     Raises FileNotFoundError if the COSMIC file is missing, and ValueError if no
     AlphaFold structure, no CA atoms, or no gene symbol could be resolved.
+
+    *log_scale* controls the ChimeraX heatmap's coloring, not the TSV outputs
+    (those always report the raw patients_within_10A count). Mutation density
+    is heavily right-skewed, so log-scaling (the default) spreads out the
+    color gradient across far more of the protein than a linear scale would;
+    the color-scale cap is also mode-dependent — the 99th percentile of
+    log1p(patients_within_10A) when log-scaled, or the 90th percentile of the
+    raw count on a linear scale, since linear's wider color steps need a
+    tighter cap to keep the bulk of the structure differentiated.
     """
     uid = uniprot.strip().upper()
     if cosmic_file is None:
@@ -339,10 +432,12 @@ def run_export(
     log_cb(f"CA atoms at mutation positions: {len(mut_ca_df)}")
 
     # ── 7. Write outputs ──────────────────────────────────────────────────────
-    output_dir = Path(output_dir)
+    # Everything for this protein goes in its own {uid} subfolder, so a
+    # second export (or a different protein) never mixes files together.
+    output_dir = Path(output_dir) / uid
     output_dir.mkdir(parents=True, exist_ok=True)
-    all_out = output_dir / f"{uid}_all_ca.tsv"
-    mut_out = output_dir / f"{uid}_mutation_ca.tsv"
+    all_out = output_dir / "all_ca.tsv"
+    mut_out = output_dir / "mutation_ca.tsv"
 
     all_ca_df.to_csv(all_out, sep="\t", index=False)
     mut_ca_df.to_csv(mut_out, sep="\t", index=False)
@@ -352,10 +447,49 @@ def run_export(
     log_cb(f"  All CA coordinates : {all_out}  ({len(all_ca_df)} rows)")
     log_cb(f"  Mutation CA coords : {mut_out}  ({len(mut_ca_df)} rows)")
 
+    # ── 8. ChimeraX heatmap files (single-fragment proteins only) ─────────────
+    defattr_out = chimerax_script_out = None
+    if len(cif_files) > 1:
+        log_cb(
+            f"  Skipping ChimeraX files: {uid} spans {len(cif_files)} AlphaFold "
+            f"fragments, and only fragment 1's residues were exported above."
+        )
+    else:
+        defattr_out = output_dir / "mutations.defattr"
+        chimerax_script_out = output_dir / "view.cxc"
+
+        if log_scale:
+            heatmap_attr = "log_patients_within_10A"
+            all_ca_df[heatmap_attr] = np.log1p(all_ca_df["patients_within_10A"])
+            cap_percentile = 0.99
+        else:
+            heatmap_attr = "patients_within_10A"
+            cap_percentile = 0.90
+
+        write_defattr_file(all_ca_df, defattr_out, attr_name=heatmap_attr)
+
+        # Cap the color scale at a percentile rather than the true max:
+        # patients_within_10A is heavily right-skewed (one hotspot residue can
+        # dwarf every other position), so an uncapped range crushes almost the
+        # whole structure into the lightest color. Values above the cap just
+        # render as the most intense color instead of stretching the scale
+        # further. Linear mode uses a tighter cap (90th vs. 99th percentile)
+        # since its wider color steps need a smaller span to stay legible.
+        cap = float(all_ca_df[heatmap_attr].quantile(cap_percentile))
+        value_range = (0.0, cap) if cap > 0 else None
+
+        write_chimerax_script(
+            cif_files[0].resolve(), defattr_out.resolve(), chimerax_script_out,
+            attr_name=heatmap_attr, value_range=value_range,
+        )
+        log_cb(f"  ChimeraX attribute file ({'log-scaled' if log_scale else 'linear'}) : {defattr_out}")
+        log_cb(f"  ChimeraX script (open this in ChimeraX) : {chimerax_script_out}")
+
     return ExportResult(
         uid=uid, gene=resolved_gene,
         all_ca_df=all_ca_df, mut_ca_df=mut_ca_df,
         all_out=all_out, mut_out=mut_out,
+        defattr_out=defattr_out, chimerax_script_out=chimerax_script_out,
     )
 
 
@@ -373,6 +507,11 @@ def main() -> None:
         default=None,
         help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
     )
+    parser.add_argument(
+        "--linear-scale", action="store_true",
+        help="Color the ChimeraX heatmap by raw patient count instead of log1p(count) "
+             "(default: log-scaled, since mutation density is usually heavily skewed)",
+    )
     args = parser.parse_args()
 
     try:
@@ -380,6 +519,7 @@ def main() -> None:
             args.uniprot,
             gene=args.gene,
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
+            log_scale=not args.linear_scale,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")

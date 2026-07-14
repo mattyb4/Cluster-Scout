@@ -237,6 +237,18 @@ _CIF_VARIANCE_HELP: dict[str, str] = {
                      "above is left blank.",
 }
 
+# CA Coordinates mode hover help (ui/pipeline_panels.py).
+_CA_LOG_SCALE_HELP = (
+    "Color the ChimeraX heatmap by log(patient count + 1) instead of the "
+    "raw count. Mutation density near a residue is usually extremely "
+    "skewed - a few hotspot residues can dwarf everywhere else - so an "
+    "unscaled linear heatmap ends up almost entirely one color with just a "
+    "small hotspot standing out. Log-scaling (recommended, and the color-"
+    "scale cap is the 99th percentile) shows much more differentiation "
+    "across the whole protein; linear (cap: 90th percentile) shows raw "
+    "counts, at the cost of most of the structure looking similar."
+)
+
 
 _GRAY = "gray"
 _BLUE = "#3a86ff"

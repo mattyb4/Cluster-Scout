@@ -884,6 +884,7 @@ class PipelineRunnerMixin:
             run_export(
                 uniprot, gene=gene,
                 output_dir=self._output_dir / "coordinates",
+                log_scale=self._ca_log_scale_var.get(),
                 log_cb=lambda line: self._q("log", line),
             )
         except ImportError as exc:

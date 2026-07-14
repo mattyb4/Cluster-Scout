@@ -18,7 +18,7 @@ from ui.common import (
     _GRAY, _RED, _GREEN, _YELLOW,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
     resolve_input_file, extract_uniprot_from_cif, help_icon, add_resize_grip,
-    isolate_textbox_scroll, _MODE_HELP,
+    isolate_textbox_scroll, _MODE_HELP, _CA_LOG_SCALE_HELP,
 )
 
 
@@ -488,17 +488,29 @@ class PipelineTabMixin:
             placeholder_text="optional, skips UniProt API lookup",
         ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
 
+        # ChimeraX heatmap scaling
+        if not hasattr(self, "_ca_log_scale_var"):
+            self._ca_log_scale_var = ctk.BooleanVar(value=True)
+        log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        log_scale_frame.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="w")
+        ctk.CTkCheckBox(
+            log_scale_frame, text="Log-scale ChimeraX heatmap",
+            variable=self._ca_log_scale_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left")
+        help_icon(log_scale_frame, _CA_LOG_SCALE_HELP).pack(side="left", padx=(4, 0))
+
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=3, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=4, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=3, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=4, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 
