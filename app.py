@@ -11,6 +11,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import sys
+import tkinter as tk
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
@@ -25,6 +26,88 @@ from ui.help_tab import HelpTabMixin
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+
+def _patch_customtkinter_textbox_scroll_callback() -> None:
+    try:
+        from customtkinter.windows.widgets import ctk_textbox
+    except ImportError:
+        return
+
+    original = ctk_textbox.CTkTextbox._check_if_scrollbars_needed
+
+    def _safe_check_if_scrollbars_needed(self, event=None, continue_loop: bool = False):
+        if not getattr(self, "_textbox", None) or not self._textbox.winfo_exists():
+            return
+        try:
+            original(self, event, continue_loop=continue_loop)
+        except tk.TclError:
+            return
+
+    ctk_textbox.CTkTextbox._check_if_scrollbars_needed = _safe_check_if_scrollbars_needed
+
+
+def _patch_customtkinter_scaling_tracker() -> None:
+    try:
+        from customtkinter.windows.widgets.scaling import scaling_tracker
+    except ImportError:
+        return
+
+    original = scaling_tracker.ScalingTracker.check_dpi_scaling
+
+    @classmethod
+    def _safe_check_dpi_scaling(cls):
+        new_scaling_detected = False
+
+        # check for every window if scaling value changed
+        for window in list(cls.window_widgets_dict):
+            try:
+                if window.winfo_exists() and not window.state() == "iconic":
+                    current_dpi_scaling_value = cls.get_window_dpi_scaling(window)
+                    old_scaling_value = cls.window_dpi_scaling_dict.get(window)
+                    if old_scaling_value is None:
+                        cls.window_dpi_scaling_dict[window] = current_dpi_scaling_value
+                        continue
+
+                    if current_dpi_scaling_value != old_scaling_value:
+                        cls.window_dpi_scaling_dict[window] = current_dpi_scaling_value
+
+                        if sys.platform.startswith("win"):
+                            window.attributes("-alpha", 0.15)
+
+                        window.block_update_dimensions_event()
+                        cls.update_scaling_callbacks_for_window(window)
+                        window.unblock_update_dimensions_event()
+
+                        if sys.platform.startswith("win"):
+                            window.attributes("-alpha", 1)
+
+                        new_scaling_detected = True
+            except tk.TclError:
+                cls.window_widgets_dict.pop(window, None)
+                cls.window_dpi_scaling_dict.pop(window, None)
+                continue
+
+        # find an existing tkinter object for the next call of .after()
+        for app in list(cls.window_widgets_dict.keys()):
+            try:
+                if new_scaling_detected:
+                    app.after(cls.loop_pause_after_new_scaling, cls.check_dpi_scaling)
+                else:
+                    app.after(cls.update_loop_interval, cls.check_dpi_scaling)
+                return
+            except tk.TclError:
+                continue
+            except Exception:
+                continue
+
+        cls.update_loop_running = False
+
+    scaling_tracker.ScalingTracker.check_dpi_scaling = _safe_check_dpi_scaling
+
+
+_patch_customtkinter_textbox_scroll_callback()
+_patch_customtkinter_scaling_tracker()
 
 
 class App(
