@@ -339,7 +339,17 @@ class PipelineRunnerMixin:
         threading.Thread(target=target, daemon=True).start()
 
     def _stop_pipeline(self):
-        """Suspend the running subprocess immediately and show Resume/Cancel options."""
+        """Suspend the running subprocess immediately and show Resume/Cancel options.
+
+        During the precheck/backup phase before step 1 (local pandas/file-glob
+        work, no subprocess yet) there's nothing to suspend, so `actually_suspended`
+        stays False -- previously that left the Stop button disabled with no
+        Resume/Cancel shown and `_stop_requested` never set, so the click did
+        nothing and the pipeline silently ran to completion with both buttons
+        stuck disabled. Now that case still registers the stop request directly;
+        the per-step loop in `_run_pipeline` checks it before starting each step
+        (including the first), so the run halts there instead of continuing.
+        """
         if not self._running:
             return
         proc = self._current_proc
@@ -371,6 +381,9 @@ class PipelineRunnerMixin:
             )
             self._cancel_btn_ref.pack(side="left", padx=(8, 0))
             self._q("log", "Pipeline paused.")
+        else:
+            self._stop_requested = True
+            self._q("log", "Stopping — pipeline will halt before the next step starts.")
 
     def _resume_pipeline(self):
         """Resume the suspended subprocess."""
