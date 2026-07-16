@@ -29,6 +29,15 @@ ctk.set_default_color_theme("blue")
 
 
 def _patch_customtkinter_textbox_scroll_callback() -> None:
+    """CTkTextbox schedules a recurring self.after() poll to auto-show/hide its
+    scrollbars, guarded by a winfo_exists() check -- but only *before*
+    rescheduling the *next* call, not before touching the widget on the
+    *current* one. If the widget was destroyed since the poll was queued (e.g.
+    a Pipeline-tab mode switch tearing down and rebuilding its steps frame),
+    the current call's own xview()/yview() calls raise TclError first, which
+    aborts the function before it reaches that guard -- so the loop still
+    stops correctly, but the exception escapes uncaught in the meantime.
+    """
     try:
         from customtkinter.windows.widgets import ctk_textbox
     except ImportError:
@@ -37,8 +46,6 @@ def _patch_customtkinter_textbox_scroll_callback() -> None:
     original = ctk_textbox.CTkTextbox._check_if_scrollbars_needed
 
     def _safe_check_if_scrollbars_needed(self, event=None, continue_loop: bool = False):
-        if not getattr(self, "_textbox", None) or not self._textbox.winfo_exists():
-            return
         try:
             original(self, event, continue_loop=continue_loop)
         except tk.TclError:
@@ -48,62 +55,31 @@ def _patch_customtkinter_textbox_scroll_callback() -> None:
 
 
 def _patch_customtkinter_scaling_tracker() -> None:
+    """ScalingTracker polls every registered window every 100ms, forever, to
+    detect OS-level per-monitor DPI changes -- a real feature on Windows, but
+    ScalingTracker.get_window_dpi_scaling() hard-codes a return of 1 on macOS
+    and Linux ("scaling works automatically on macOS" / "not implemented" on
+    Linux), so on those platforms the loop can never detect a change: it's
+    pure overhead for the app's entire lifetime, and its winfo_exists() check
+    on each window isn't enough to stop it throwing TclError once the app
+    starts closing (the interpreter can be torn down between the check and
+    the following calls in the same pass). Since it provably does nothing
+    outside Windows, skip it there entirely instead of just guarding it --
+    that fixes the wasted CPU and removes the crash source in one place.
+    """
+    if sys.platform == "win32":
+        return
+
     try:
         from customtkinter.windows.widgets.scaling import scaling_tracker
     except ImportError:
         return
 
-    original = scaling_tracker.ScalingTracker.check_dpi_scaling
-
     @classmethod
-    def _safe_check_dpi_scaling(cls):
-        new_scaling_detected = False
+    def _noop_check_dpi_scaling(cls):
+        pass
 
-        # check for every window if scaling value changed
-        for window in list(cls.window_widgets_dict):
-            try:
-                if window.winfo_exists() and not window.state() == "iconic":
-                    current_dpi_scaling_value = cls.get_window_dpi_scaling(window)
-                    old_scaling_value = cls.window_dpi_scaling_dict.get(window)
-                    if old_scaling_value is None:
-                        cls.window_dpi_scaling_dict[window] = current_dpi_scaling_value
-                        continue
-
-                    if current_dpi_scaling_value != old_scaling_value:
-                        cls.window_dpi_scaling_dict[window] = current_dpi_scaling_value
-
-                        if sys.platform.startswith("win"):
-                            window.attributes("-alpha", 0.15)
-
-                        window.block_update_dimensions_event()
-                        cls.update_scaling_callbacks_for_window(window)
-                        window.unblock_update_dimensions_event()
-
-                        if sys.platform.startswith("win"):
-                            window.attributes("-alpha", 1)
-
-                        new_scaling_detected = True
-            except tk.TclError:
-                cls.window_widgets_dict.pop(window, None)
-                cls.window_dpi_scaling_dict.pop(window, None)
-                continue
-
-        # find an existing tkinter object for the next call of .after()
-        for app in list(cls.window_widgets_dict.keys()):
-            try:
-                if new_scaling_detected:
-                    app.after(cls.loop_pause_after_new_scaling, cls.check_dpi_scaling)
-                else:
-                    app.after(cls.update_loop_interval, cls.check_dpi_scaling)
-                return
-            except tk.TclError:
-                continue
-            except Exception:
-                continue
-
-        cls.update_loop_running = False
-
-    scaling_tracker.ScalingTracker.check_dpi_scaling = _safe_check_dpi_scaling
+    scaling_tracker.ScalingTracker.check_dpi_scaling = _noop_check_dpi_scaling
 
 
 _patch_customtkinter_textbox_scroll_callback()
