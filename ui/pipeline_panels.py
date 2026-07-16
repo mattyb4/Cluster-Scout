@@ -18,7 +18,7 @@ from ui.common import (
     _GRAY, _RED, _GREEN, _YELLOW,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
     resolve_input_file, extract_uniprot_from_cif, help_icon, add_resize_grip,
-    isolate_textbox_scroll, _MODE_HELP, _CA_LOG_SCALE_HELP,
+    isolate_textbox_scroll, _MODE_HELP,
 )
 
 
@@ -135,8 +135,9 @@ class PipelineTabMixin:
             command=lambda: self._output_dir_var.set(str(OUTPUT_DIR)),
         ).grid(row=0, column=3, padx=(0, 12), pady=8, sticky="e")
 
-        # Pipeline settings
-        settings_frame = ctk.CTkFrame(p)
+        # Pipeline settings (ptm-proximity, mutation-clustering, AND single-protein
+        # -- analyze_single_cif_nearby_mutations.py accepts all four of these too)
+        settings_frame = self._settings_frame = ctk.CTkFrame(p)
         settings_frame.grid(row=4, column=0, padx=24, pady=4, sticky="ew")
 
         ctk.CTkLabel(
@@ -160,7 +161,9 @@ class PipelineTabMixin:
             "Minimum number of distinct COSMIC patient samples a mutation "
             "must appear in to count as a recurrent hotspot. Lower values "
             "include rarer mutations; higher values restrict to mutations "
-            "seen more often.",
+            "seen more often. In Single Protein mode, this can only tighten "
+            "the threshold already applied when the input TSV was built -- "
+            "mutations below that original threshold aren't in the data at all.",
         ).pack(side="left", padx=(0, 4), pady=8)
         self._min_samples_var = ctk.StringVar(value="3")
         ctk.CTkEntry(
@@ -195,7 +198,7 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(0, 12), pady=8)
 
         # PolyPhen filter
-        pp_frame = ctk.CTkFrame(p)
+        pp_frame = self._pp_frame = ctk.CTkFrame(p)
         pp_frame.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
 
         ctk.CTkLabel(
@@ -356,6 +359,20 @@ class PipelineTabMixin:
 
         mode = self._mode.get()
 
+        # Cutoff/Min samples/Min pLDDT/Max PAE are all accepted by
+        # analyze_single_cif_nearby_mutations.py too, so this frame is shown
+        # for single-protein as well. PolyPhen filter only feeds step 4 of
+        # the numbered-step pipeline (ptm-proximity only). Neither applies to
+        # ca-coordinates, which doesn't run any of this filtering at all.
+        if mode in ("ptm-proximity", "mutation-clustering", "single-protein"):
+            self._settings_frame.grid()
+        else:
+            self._settings_frame.grid_remove()
+        if mode == "ptm-proximity":
+            self._pp_frame.grid()
+        else:
+            self._pp_frame.grid_remove()
+
         if mode == "single-protein":
             self._build_single_protein_panel()
             return
@@ -467,9 +484,14 @@ class PipelineTabMixin:
         ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
 
         # UniProt ID
-        ctk.CTkLabel(self._steps_outer, text="UniProt ID:", anchor="w").grid(
-            row=1, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        uniprot_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        uniprot_label_frame.grid(row=1, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(uniprot_label_frame, text="UniProt ID:", anchor="w").pack(side="left")
+        help_icon(
+            uniprot_label_frame,
+            "Leave blank if you provide a Gene symbol below — the UniProt "
+            "accession will be resolved automatically.",
+        ).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_ca_uniprot_var"):
             self._ca_uniprot_var = ctk.StringVar(value="")
         ctk.CTkEntry(
@@ -477,40 +499,34 @@ class PipelineTabMixin:
             placeholder_text="e.g. P04637",
         ).grid(row=1, column=1, padx=6, pady=6, sticky="w")
 
-        # Gene override
-        ctk.CTkLabel(self._steps_outer, text="Gene override:", anchor="w").grid(
-            row=2, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        # Gene
+        gene_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        gene_label_frame.grid(row=2, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(gene_label_frame, text="Gene:", anchor="w").pack(side="left")
+        help_icon(
+            gene_label_frame,
+            "Can be used on its own (the UniProt accession is looked up "
+            "automatically), or alongside UniProt ID above to skip that "
+            "lookup, since the gene symbol is then already known.",
+        ).pack(side="left", padx=(4, 0))
         if not hasattr(self, "_ca_gene_var"):
             self._ca_gene_var = ctk.StringVar(value="")
         ctk.CTkEntry(
             self._steps_outer, textvariable=self._ca_gene_var, width=200,
-            placeholder_text="optional, skips UniProt API lookup",
+            placeholder_text="e.g. TP53",
         ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
-
-        # ChimeraX heatmap scaling
-        if not hasattr(self, "_ca_log_scale_var"):
-            self._ca_log_scale_var = ctk.BooleanVar(value=True)
-        log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        log_scale_frame.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="w")
-        ctk.CTkCheckBox(
-            log_scale_frame, text="Log-scale ChimeraX heatmap",
-            variable=self._ca_log_scale_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left")
-        help_icon(log_scale_frame, _CA_LOG_SCALE_HELP).pack(side="left", padx=(4, 0))
 
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=4, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=3, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=4, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=3, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 

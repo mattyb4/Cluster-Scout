@@ -218,8 +218,8 @@ class PipelineRunnerMixin:
                 return
         elif mode == "ca-coordinates":
             from tkinter import messagebox
-            if not self._ca_uniprot_var.get().strip():
-                messagebox.showwarning("Missing input", "Enter a UniProt accession.")
+            if not self._ca_uniprot_var.get().strip() and not self._ca_gene_var.get().strip():
+                messagebox.showwarning("Missing input", "Enter a UniProt accession or a gene symbol.")
                 return
 
         self._running = True
@@ -697,7 +697,16 @@ class PipelineRunnerMixin:
             self._q("finished")
             return
 
-        cmd = [sys.executable, "-u", str(SCRIPTS_DIR / "analyze_single_cif_nearby_mutations.py"), cif_path]
+        cutoff = self._cutoff_var.get().strip() or "10.0"
+        min_samples = self._min_samples_var.get().strip()
+        min_plddt = self._min_plddt_var.get().strip()
+        max_pae = self._max_pae_var.get().strip()
+
+        cmd = [sys.executable, "-u", str(SCRIPTS_DIR / "analyze_single_cif_nearby_mutations.py"), cif_path,
+               "--cutoff", cutoff,
+               *(["--min-samples", min_samples] if min_samples else []),
+               *(["--min-plddt", min_plddt] if min_plddt else []),
+               *(["--max-pae", max_pae] if max_pae else [])]
         if uniprot:
             cmd.extend(["--uniprot", uniprot])
 
@@ -706,6 +715,7 @@ class PipelineRunnerMixin:
         self._q("status", 0, "▶  Analyzing…", _BLUE)
         self._q("show_progress", 0)
         self._q("log", f"Analyzing CIF: {Path(cif_path).name}")
+        self._q("log", f"Cutoff: {cutoff} Å")
         if uniprot:
             self._q("log", f"UniProt ID: {uniprot}")
         self._q("log", "")
@@ -875,7 +885,7 @@ class PipelineRunnerMixin:
         self._q("show_log")
         self._q("status", 0, "▶  Exporting…", _BLUE)
         self._q("show_progress", 0)
-        self._q("log", f"Exporting CA coordinates for {uniprot}")
+        self._q("log", f"Exporting CA coordinates for {uniprot or gene}")
         self._q("log", "")
 
         t0 = time.time()
@@ -884,7 +894,6 @@ class PipelineRunnerMixin:
             run_export(
                 uniprot, gene=gene,
                 output_dir=self._output_dir / "coordinates",
-                log_scale=self._ca_log_scale_var.get(),
                 log_cb=lambda line: self._q("log", line),
             )
         except ImportError as exc:

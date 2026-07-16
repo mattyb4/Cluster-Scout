@@ -12,16 +12,12 @@ Angstroms:
 For single-fragment proteins, also produces a ChimeraX-ready pair (skipped,
 with a warning, for multi-fragment proteins — see write_chimerax_files):
 
-  mutations.defattr — per-residue heatmap value as a ChimeraX
-                       attribute-assignment file — log1p(patients_within_10A)
-                       by default (log_scale=True), or the raw count if
-                       log-scaling is turned off
+  mutations.defattr — per-residue patients_within_10A value as a ChimeraX
+                       attribute-assignment file
   view.cxc           — a ChimeraX command script that opens the CIF, loads
                         the attribute file, and colors the cartoon by it as
-                        a heatmap (a sequential "Reds" palette, capped at the
-                        99th/90th percentile for log/linear mode
-                        respectively, to stay legible despite how skewed
-                        mutation density usually is). Open this file
+                        a heatmap (a sequential "Reds" palette, auto-scaled
+                        to the attribute's true min/max). Open this file
                         directly in ChimeraX to see the result.
 
 Usage:
@@ -205,6 +201,34 @@ def _lookup_gene(uniprot_id: str, log_cb: Callable[[str], None] = print) -> str 
     return None
 
 
+def _lookup_uniprot_from_gene(gene: str, log_cb: Callable[[str], None] = print) -> str | None:
+    """Return the reviewed human UniProt accession for *gene*, or None if not
+    found. The reverse of _lookup_gene — lets a gene symbol be given on its
+    own, with the UniProt accession resolved automatically.
+    """
+    log_cb(f"Looking up UniProt accession for gene {gene} ...")
+    try:
+        resp = requests.get(
+            "https://rest.uniprot.org/uniprotkb/search",
+            params={
+                "query": f"gene_exact:{gene} AND organism_id:9606 AND reviewed:true",
+                "fields": "accession",
+                "format": "tsv",
+                "size": 1,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        lines = [l for l in resp.text.strip().splitlines() if l]
+        if len(lines) >= 2:
+            accession = lines[1].split("\t")[0].strip()
+            if accession:
+                return accession
+    except Exception as exc:
+        log_cb(f"  UniProt API error: {exc}")
+    return None
+
+
 def _load_cosmic_mutations(
     gene: str, cosmic_file: Path, log_cb: Callable[[str], None] = print,
 ) -> tuple[dict[int, list[str]], dict[int, int]]:
@@ -332,28 +356,39 @@ def write_chimerax_script(
 
 
 def run_export(
-    uniprot: str,
+    uniprot: str | None = None,
     gene: str | None = None,
     cosmic_file: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
-    log_scale: bool = True,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
 
-    Raises FileNotFoundError if the COSMIC file is missing, and ValueError if no
-    AlphaFold structure, no CA atoms, or no gene symbol could be resolved.
+    Either *uniprot* or *gene* must be given; if *uniprot* is omitted, the
+    UniProt accession is resolved from *gene* via a live UniProt API lookup.
 
-    *log_scale* controls the ChimeraX heatmap's coloring, not the TSV outputs
-    (those always report the raw patients_within_10A count). Mutation density
-    is heavily right-skewed, so log-scaling (the default) spreads out the
-    color gradient across far more of the protein than a linear scale would;
-    the color-scale cap is also mode-dependent — the 99th percentile of
-    log1p(patients_within_10A) when log-scaled, or the 90th percentile of the
-    raw count on a linear scale, since linear's wider color steps need a
-    tighter cap to keep the bulk of the structure differentiated.
+    Raises ValueError if neither uniprot nor gene is given, if a gene-only
+    lookup can't be resolved to a UniProt accession, or if no AlphaFold
+    structure, no CA atoms, or no gene symbol could be resolved. Raises
+    FileNotFoundError if the COSMIC file is missing.
     """
-    uid = uniprot.strip().upper()
+    uniprot = (uniprot or "").strip()
+    gene = (gene or "").strip() or None
+    if not uniprot and not gene:
+        raise ValueError("Provide a UniProt accession, a gene symbol, or both.")
+
+    if uniprot:
+        uid = uniprot.upper()
+    else:
+        resolved_uid = _lookup_uniprot_from_gene(gene, log_cb)
+        if resolved_uid is None:
+            raise ValueError(
+                f"Could not find a reviewed human UniProt accession for gene '{gene}'. "
+                "Provide the UniProt accession directly."
+            )
+        uid = resolved_uid.upper()
+        log_cb(f"Resolved {gene} -> {uid}")
+
     if cosmic_file is None:
         cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
     cosmic_file = Path(cosmic_file)
@@ -458,31 +493,12 @@ def run_export(
         defattr_out = output_dir / "mutations.defattr"
         chimerax_script_out = output_dir / "view.cxc"
 
-        if log_scale:
-            heatmap_attr = "log_patients_within_10A"
-            all_ca_df[heatmap_attr] = np.log1p(all_ca_df["patients_within_10A"])
-            cap_percentile = 0.99
-        else:
-            heatmap_attr = "patients_within_10A"
-            cap_percentile = 0.90
-
-        write_defattr_file(all_ca_df, defattr_out, attr_name=heatmap_attr)
-
-        # Cap the color scale at a percentile rather than the true max:
-        # patients_within_10A is heavily right-skewed (one hotspot residue can
-        # dwarf every other position), so an uncapped range crushes almost the
-        # whole structure into the lightest color. Values above the cap just
-        # render as the most intense color instead of stretching the scale
-        # further. Linear mode uses a tighter cap (90th vs. 99th percentile)
-        # since its wider color steps need a smaller span to stay legible.
-        cap = float(all_ca_df[heatmap_attr].quantile(cap_percentile))
-        value_range = (0.0, cap) if cap > 0 else None
-
+        write_defattr_file(all_ca_df, defattr_out, attr_name="patients_within_10A")
         write_chimerax_script(
             cif_files[0].resolve(), defattr_out.resolve(), chimerax_script_out,
-            attr_name=heatmap_attr, value_range=value_range,
+            attr_name="patients_within_10A",
         )
-        log_cb(f"  ChimeraX attribute file ({'log-scaled' if log_scale else 'linear'}) : {defattr_out}")
+        log_cb(f"  ChimeraX attribute file : {defattr_out}")
         log_cb(f"  ChimeraX script (open this in ChimeraX) : {chimerax_script_out}")
 
     return ExportResult(
@@ -500,17 +516,21 @@ def main() -> None:
             "Export alpha-carbon coordinates for all residues and COSMIC missense-mutation sites."
         )
     )
-    parser.add_argument("uniprot", help="UniProt accession (e.g. P04637 for TP53)")
-    parser.add_argument("--gene", help="Gene symbol — skips the UniProt API gene lookup")
+    parser.add_argument(
+        "uniprot", nargs="?", default=None,
+        help="UniProt accession (e.g. P04637 for TP53) — optional if --gene is given; "
+             "the accession will be resolved from the gene symbol automatically",
+    )
+    parser.add_argument(
+        "--gene",
+        help="Gene symbol — resolves the UniProt accession automatically if the "
+             "positional uniprot argument is omitted, or just skips the UniProt API "
+             "gene-symbol lookup if both are given",
+    )
     parser.add_argument(
         "--cosmic",
         default=None,
         help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
-    )
-    parser.add_argument(
-        "--linear-scale", action="store_true",
-        help="Color the ChimeraX heatmap by raw patient count instead of log1p(count) "
-             "(default: log-scaled, since mutation density is usually heavily skewed)",
     )
     args = parser.parse_args()
 
@@ -519,7 +539,6 @@ def main() -> None:
             args.uniprot,
             gene=args.gene,
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
-            log_scale=not args.linear_scale,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")

@@ -33,6 +33,8 @@ Finds recurrent cancer mutations that cluster together in 3D space, with no PTM 
 
 Analyze a single protein by selecting its CIF structure file. The UniProt ID is auto-detected from the file, or you can enter one directly if it isn't. Results can be appended to an existing output database.
 
+Accepts the same **Cutoff**, **Min pLDDT**, and **Max PAE** settings as the main pipeline. **Min samples** is also available, but can only tighten the hotspot threshold already applied when the input TSV was built — mutations below that original threshold aren't in the data to filter in the first place.
+
 ### CA Coordinates
 
 Export alpha-carbon coordinates for every residue of one protein — by UniProt ID or gene symbol — along with its COSMIC missense mutation positions, for use in external visualization tools.

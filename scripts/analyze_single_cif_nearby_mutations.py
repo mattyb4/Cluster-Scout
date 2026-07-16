@@ -10,7 +10,7 @@ import csv
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import AA3TO1  # noqa: E402
+from pipeline_utils import AA3TO1, load_pae_matrix  # noqa: E402
 
 parser = MMCIFParser(QUIET=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -47,7 +47,7 @@ def compute_distance(coord1, coord2):
     return np.linalg.norm(coord1 - coord2)
 
 #find mutations within cutoff distance of PTM site
-def find_nearby_mutations(chain, ptm_pos, mutation_map, cutoff=10.0): #adjust cutoff as needed
+def find_nearby_mutations(chain, ptm_pos, mutation_map, cutoff=10.0, pae_matrix=None, max_pae=None): #adjust cutoff as needed
     results = []
 
     ptm_coord = get_ca_coord(chain, ptm_pos)
@@ -65,11 +65,19 @@ def find_nearby_mutations(chain, ptm_pos, mutation_map, cutoff=10.0): #adjust cu
         distance = compute_distance(ptm_coord, mut_coord)
 
         if distance <= cutoff:
+            pae = None
+            if pae_matrix is not None:
+                i, j = ptm_pos - 1, mut_pos - 1
+                if 0 <= i < pae_matrix.shape[0] and 0 <= j < pae_matrix.shape[1]:
+                    pae = (pae_matrix[i, j] + pae_matrix[j, i]) / 2
+            if max_pae is not None and pae is not None and pae > max_pae:
+                continue
             labels = sorted(mut_labels)
             results.append({
                 "mutation_pos": mut_pos,
                 "mutation_label": labels[0] if labels else f"{mut_pos}",
-                "distance": distance
+                "distance": distance,
+                "pae": pae,
             })
 
     return results
@@ -210,6 +218,64 @@ def build_pos_to_aa(chain) -> dict[int, str]:
     return pos_to_aa
 
 
+def build_pos_to_plddt(chain) -> dict[int, float]:
+    """Build a {residue_number: pLDDT} dict from a Bio.PDB chain's CA atoms.
+
+    AlphaFold stores per-residue confidence in the B-factor column.
+    """
+    pos_to_plddt = {}
+    for residue in chain:
+        res_id = residue.get_id()
+        if res_id[0] != " ":
+            continue
+        if "CA" in residue:
+            pos_to_plddt[res_id[1]] = residue["CA"].get_bfactor()
+    return pos_to_plddt
+
+
+MUT_COUNT_RE = re.compile(r"\((\d+)\)")  # e.g., (5) in "R482H (5)"
+
+
+def parse_mutation_patient_counts(uniprot, tsv_path) -> dict[tuple[str, int], int]:
+    """Map each (mutation_label, position) to its COSMIC affected-case (patient)
+    count, as recorded in mutations_on_protein, e.g. "R482H (5)" -> 5.
+
+    Only the new schema encodes counts; legacy-schema mutations (near_mutation /
+    far_mutations_prevalence_filtered columns) aren't present in the result.
+    """
+    counts: dict[tuple[str, int], int] = {}
+    with tsv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if get_uniprot_value(row) != uniprot or not row.get("mutations_on_protein"):
+                continue
+            for token in str(row["mutations_on_protein"]).split(";"):
+                token = token.strip()
+                mut_match = MUT_RE.search(token)
+                count_match = MUT_COUNT_RE.search(token)
+                if mut_match and count_match:
+                    label = f"{mut_match.group(1)}{mut_match.group(2)}{mut_match.group(3)}"
+                    counts[(label, int(mut_match.group(2)))] = int(count_match.group(1))
+    return counts
+
+
+def filter_mutations_by_min_samples(mutation_map: dict, patient_counts: dict, min_samples: int) -> dict:
+    """Drop mutation labels with a known patient count below min_samples.
+
+    Labels with no known count (legacy-schema data) are kept, since there's no
+    way to tell whether they'd pass. This can only tighten the hotspot
+    threshold already applied when the input TSV was built -- mutations below
+    that original threshold were already excluded from the data entirely.
+    """
+    filtered = {}
+    for pos, labels in mutation_map.items():
+        kept = {label for label in labels
+                if patient_counts.get((label, pos), min_samples) >= min_samples}
+        if kept:
+            filtered[pos] = kept
+    return filtered
+
+
 def tag_isoform_mutations(mutation_map: dict, pos_to_aa: dict, safe_length) -> dict:
     """Return a new mutation_map with (isoform?) tags on mismatched mutations."""
     tagged = {}
@@ -269,7 +335,10 @@ def format_mutations(hits):
         return ""
     parts = []
     for hit in sorted(hits, key=lambda h: (h["mutation_pos"], h["mutation_label"])):
-        parts.append(f"{hit['mutation_label']}-{hit['distance']:.2f}A")
+        entry = f"{hit['mutation_label']}-{hit['distance']:.2f}A"
+        if hit.get("pae") is not None:
+            entry += f"(PAE:{hit['pae']:.1f})"
+        parts.append(entry)
     return ", ".join(parts)
 
 
@@ -363,6 +432,29 @@ def parse_args():
         help="Distance cutoff in Angstroms (default: 10.0)."
     )
     ap.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        help=(
+            "Exclude mutations seen in fewer than this many distinct COSMIC "
+            "samples. Only tightens the threshold already applied when the "
+            "input TSV was built -- cannot recover mutations already "
+            "excluded from that file (default: disabled)."
+        ),
+    )
+    ap.add_argument(
+        "--min-plddt",
+        type=float,
+        default=None,
+        help="Exclude positions with pLDDT below this threshold (default: disabled)."
+    )
+    ap.add_argument(
+        "--max-pae",
+        type=float,
+        default=None,
+        help="Exclude mutation pairs with PAE above this threshold (default: disabled)."
+    )
+    ap.add_argument(
         "--append-to-db",
         action="store_true",
         help="Append nearby-mutation rows to ptm_mutation_proximity_db.tsv (deduplicated)."
@@ -405,16 +497,39 @@ def main():
     pos_to_aa = build_pos_to_aa(chain)
     safe_length = parse_isoform_safe_length(target_uniprot, tsv_path)
 
+    pos_to_plddt = build_pos_to_plddt(chain) if args.min_plddt else {}
+    pae_matrix = load_pae_matrix(model_file.parent) if args.max_pae is not None else None
+    patient_counts = parse_mutation_patient_counts(target_uniprot, tsv_path) if args.min_samples else {}
+
+    if args.min_plddt:
+        print(f"pLDDT filter: excluding positions below {args.min_plddt}")
+    if args.max_pae is not None:
+        print(f"PAE filter: excluding pairs above {args.max_pae}")
+    if args.min_samples:
+        print(f"Min samples filter: excluding mutations seen in fewer than {args.min_samples} samples")
+
     ptm_entries = parse_ptm_entries(target_uniprot, tsv_path)
     if not ptm_entries:
         raise ValueError(f"No PTM positions found in TSV for UniProt {target_uniprot}.")
+
+    if args.min_plddt:
+        before = len(ptm_entries)
+        ptm_entries = [(s, p, t) for s, p, t in ptm_entries if pos_to_plddt.get(p, 0) >= args.min_plddt]
+        if len(ptm_entries) != before:
+            print(f"  Excluded {before - len(ptm_entries)} PTM site(s) below pLDDT {args.min_plddt}")
 
     rows_for_db = []
 
     for ptm_label, ptm_position, ptm_type in ptm_entries:
         mutation_positions = parse_mutation_positions(ptm_position, tsv_path, uniprot=target_uniprot)
+        if args.min_samples:
+            mutation_positions = filter_mutations_by_min_samples(mutation_positions, patient_counts, args.min_samples)
+        if args.min_plddt:
+            mutation_positions = {pos: labels for pos, labels in mutation_positions.items()
+                                   if pos_to_plddt.get(pos, 0) >= args.min_plddt}
         mutation_positions = tag_isoform_mutations(mutation_positions, pos_to_aa, safe_length)
-        nearby = find_nearby_mutations(chain, ptm_position, mutation_positions, cutoff=args.cutoff)
+        nearby = find_nearby_mutations(chain, ptm_position, mutation_positions, cutoff=args.cutoff,
+                                        pae_matrix=pae_matrix, max_pae=args.max_pae)
 
         print(f"\nPTM {ptm_label} ({target_uniprot}):")
         if nearby:
