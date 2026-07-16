@@ -82,8 +82,34 @@ def _patch_customtkinter_scaling_tracker() -> None:
     scaling_tracker.ScalingTracker.check_dpi_scaling = _noop_check_dpi_scaling
 
 
+def _patch_customtkinter_appearance_mode_tracker() -> None:
+    """AppearanceModeTracker polls every 30ms, forever -- three times more
+    often than the ScalingTracker loop above -- to detect a live OS-level
+    light/dark mode change via the darkdetect package. This app hardcodes
+    ctk.set_appearance_mode("dark") once at import and never calls "system"
+    or offers any way to change it at runtime, so the live-detection this
+    loop exists for never applies here: every widget already gets its
+    correct color at creation time from the mode set once up front. Skip
+    the loop entirely on every platform (not just macOS) since it's dead
+    weight for this app regardless of OS -- and at 30ms it's the more
+    likely of the two loops to be felt as UI lag, since it fires while
+    genuinely idle far more often than the 100ms scaling loop did.
+    """
+    try:
+        from customtkinter.windows.widgets.appearance_mode import appearance_mode_tracker
+    except ImportError:
+        return
+
+    @classmethod
+    def _noop_update(cls):
+        pass
+
+    appearance_mode_tracker.AppearanceModeTracker.update = _noop_update
+
+
 _patch_customtkinter_textbox_scroll_callback()
 _patch_customtkinter_scaling_tracker()
+_patch_customtkinter_appearance_mode_tracker()
 
 
 class App(
