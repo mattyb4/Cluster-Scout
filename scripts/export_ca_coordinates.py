@@ -4,9 +4,7 @@ Every run's output goes into its own Output/coordinates/{UniProt}/ folder, so
 files for different proteins never mix together. Produces two TSV files,
 each with a patients_within_10A column giving the total COSMIC patient count
 summed across all missense mutations whose CA coordinate is within 10
-Angstroms:
-
-  all_ca.tsv       — CA coordinates for every residue
+inates for every residue
   mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
 
 For single-fragment proteins, also produces a ChimeraX-ready pair (skipped,

@@ -203,6 +203,35 @@ class ResultsTabMixin:
         if all_iids:
             tv.delete(*all_iids)
 
+    _TV_INSERT_CHUNK_SIZE = 200
+
+    def _insert_tv_chunked(self, tv, rows: list, on_done) -> None:
+        """Insert (iid, values, tag) rows into *tv* in batches via self.after()
+        instead of one synchronous loop.
+
+        Each tv.insert() is its own blocking Tcl call; on macOS's Aqua Tk
+        backend a multi-thousand-row results table can pin the main thread
+        for the better part of a second in that loop (confirmed via stack
+        sampling), during which clicks are silently dropped rather than
+        just delayed. Yielding back to the event loop between batches keeps
+        each block small enough that queued input still gets processed.
+        """
+        token = object()
+        self._tv_insert_tokens[tv] = token
+
+        def _step(start: int) -> None:
+            if self._tv_insert_tokens.get(tv) is not token or not tv.winfo_exists():
+                return
+            end = start + self._TV_INSERT_CHUNK_SIZE
+            for iid, values, tag in rows[start:end]:
+                tv.insert("", "end", iid=iid, values=values, tags=(tag,))
+            if end < len(rows):
+                self.after(1, _step, end)
+            else:
+                on_done(tv)
+
+        _step(0)
+
     def _tv_overlay(self, tv):
         """Lazily create (and cache) a centered message label floating over *tv*,
         used to show 'Loading data…' / error / empty-state text in place of rows.
@@ -413,6 +442,7 @@ class ResultsTabMixin:
         self._results_loaded_key = None
         self._ptm_tv_all_rows: list = []
         self._mut_tv_all_rows: list = []
+        self._tv_insert_tokens: dict = {}
         self._tv_placeholder_labels: dict = {}
         self._ptm_filters: list = []
         self._mut_filters: list = []
@@ -634,6 +664,7 @@ class ResultsTabMixin:
     def _populate_ptm_tv(self, df) -> None:
         tv = self._ptm_tv
         self._clear_treeview_fully(tv, self._ptm_tv_all_rows)
+        rows = []
         for i, (_, row) in enumerate(df.iterrows(), 1):
             try:
                 near_pts = int(float(row.get("nearby_muts_total_patient_count", "") or "0"))
@@ -684,9 +715,13 @@ class ResultsTabMixin:
                 "lin_dist_raw": row.get("morethan5_linear_distance", ""),
             }
             values = [i] + [values_map.get(c, "") for c in _PTM_TV_SRC_IDS]
-            tv.insert("", "end", iid=str(i), values=values, tags=("odd" if i % 2 else "even",))
-        self._ptm_tv_all_rows = self._capture_tv_rows(tv)
-        self._filter_ptm_tv()
+            rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._ptm_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_ptm_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)
 
     def _on_ptm_select(self, *_) -> None:
         sel = self._ptm_tv.selection()
@@ -757,11 +792,16 @@ class ResultsTabMixin:
     def _populate_mut_tv_long(self, df) -> None:
         tv = self._mut_tv
         self._clear_treeview_fully(tv, self._mut_tv_all_rows)
+        rows = []
         for i, (_, r) in enumerate(df.iterrows(), 1):
             values = [i] + [r.get(_MUT_LONG_SRC_MAP[c], "") for c in _MUT_TV_SRC_IDS]
-            tv.insert("", "end", iid=str(i), values=values, tags=("odd" if i % 2 else "even",))
-        self._mut_tv_all_rows = self._capture_tv_rows(tv)
-        self._filter_mut_tv()
+            rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._mut_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_mut_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)
 
     def _populate_mut_tv_wide(self, row) -> None:
         """Populate the Mutation Details tv from a wide-format PTM row.
@@ -787,6 +827,7 @@ class ResultsTabMixin:
                 confirmed_muts.add(cm.group(1))
 
         i = 0
+        rows = []
         for col_key in ("mutations_within_5_positions", "mutations_more_than_5_positions"):
             for entry in (row.get(col_key, "") or "").split(", "):
                 entry = entry.strip()
@@ -817,6 +858,10 @@ class ResultsTabMixin:
                     "mut_aiupred_bind": "",
                 }
                 values = [i] + [per_row.get(c, "") for c in _MUT_TV_SRC_IDS]
-                tv.insert("", "end", iid=str(i), values=values, tags=("odd" if i % 2 else "even",))
-        self._mut_tv_all_rows = self._capture_tv_rows(tv)
-        self._filter_mut_tv()
+                rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._mut_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_mut_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)

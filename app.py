@@ -8,21 +8,54 @@ for the shared constants/helpers those mixins import).
 """
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
-import tkinter as tk
+from pathlib import Path
 
-import customtkinter as ctk
-from PIL import Image, ImageTk
 
-from ui.common import PROJECT_ROOT, MIN_UI_SCALE, MAX_UI_SCALE, UI_SCALE_STEP, _BLUE
-from ui.pipeline_panels import PipelineTabMixin
-from ui.pipeline_runner import PipelineRunnerMixin
-from ui.results_tab import ResultsTabMixin
-from ui.visualization_tab import VisualizationTabMixin
-from ui.analysis_tools_tab import AnalysisToolsTabMixin
-from ui.help_tab import HelpTabMixin
+def _fix_tcl_tk_library_paths() -> None:
+    """uv-managed (python-build-standalone) macOS Pythons can fail to locate
+    their own bundled Tcl/Tk init.tcl when run from inside a venv --
+    TclError: "Can't find a usable init.tcl" -- because the interpreter's
+    relocation logic doesn't account for a venv's symlinked layout (only
+    the base interpreter, not a venv built from it, resolves correctly on
+    its own). sys.base_prefix still points at the real base install even
+    though the interpreter itself can't find init.tcl relative to it, so
+    pointing TCL_LIBRARY/TK_LIBRARY there directly sidesteps the bug. Must
+    run before `import tkinter` (below), since that's what loads the
+    _tkinter C extension and triggers the lookup. A no-op if TCL_LIBRARY is
+    already set (respects an explicit override) or if the base install
+    doesn't have this lib/tclX.Y layout (e.g. a python.org install where
+    this bug doesn't occur -- confirmed both layouts exist there too, so
+    setting it is harmless, just redundant).
+    """
+    if sys.platform != "darwin" or os.environ.get("TCL_LIBRARY"):
+        return
+    lib_dir = Path(sys.base_prefix) / "lib"
+    tcl_dirs = sorted(lib_dir.glob("tcl8.*"))
+    tk_dirs = sorted(lib_dir.glob("tk8.*"))
+    if tcl_dirs and (tcl_dirs[-1] / "init.tcl").exists():
+        os.environ["TCL_LIBRARY"] = str(tcl_dirs[-1])
+    if tk_dirs:
+        os.environ["TK_LIBRARY"] = str(tk_dirs[-1])
+
+
+_fix_tcl_tk_library_paths()
+
+import tkinter as tk  # noqa: E402
+
+import customtkinter as ctk  # noqa: E402
+from PIL import Image, ImageTk  # noqa: E402
+
+from ui.common import PROJECT_ROOT, MIN_UI_SCALE, MAX_UI_SCALE, UI_SCALE_STEP, _BLUE  # noqa: E402
+from ui.pipeline_panels import PipelineTabMixin  # noqa: E402
+from ui.pipeline_runner import PipelineRunnerMixin  # noqa: E402
+from ui.results_tab import ResultsTabMixin  # noqa: E402
+from ui.visualization_tab import VisualizationTabMixin  # noqa: E402
+from ui.analysis_tools_tab import AnalysisToolsTabMixin  # noqa: E402
+from ui.help_tab import HelpTabMixin  # noqa: E402
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -107,9 +140,56 @@ def _patch_customtkinter_appearance_mode_tracker() -> None:
     appearance_mode_tracker.AppearanceModeTracker.update = _noop_update
 
 
+def _patch_customtkinter_tabview_switch() -> None:
+    """CTkTabview switches tabs by grid_forget()-ing the outgoing tab's frame
+    and grid()-ing the incoming one back in -- on Tk's macOS (Aqua) backend
+    each widget is backed by a real Cocoa NSView, so unmapping/mapping a
+    tab's whole subtree is a genuine per-widget Cocoa operation, not a cheap
+    flag flip. Stack-sampling this app's reported click-lag showed a
+    50-211ms main-thread stall inside exactly this grid_forget() call on
+    every single tab switch, regardless of which tab -- long enough to eat
+    several queued clicks per switch.
+
+    Once a tab has been shown at least once, keeping it permanently gridded
+    (in the same cell as every other tab) and switching only which one is on
+    top via tkraise() avoids that unmap/map cost entirely -- grid() on an
+    already-managed widget with unchanged options is a cheap no-op geometry
+    call, and tkraise() only reorders stacking, which doesn't touch map
+    state at all. No code in this app relies on hidden tabs actually being
+    unmapped (no winfo_ismapped/winfo_viewable/<Map>/<Unmap> use anywhere),
+    and this app only ever adds tabs at startup (never deletes/renames/moves
+    one), so the narrower always-gridded behavior is safe here even though
+    it isn't a general-purpose fix for every CTkTabview usage.
+    """
+    try:
+        from customtkinter.windows.widgets import ctk_tabview
+    except ImportError:
+        return
+
+    def _fast_segmented_button_callback(self, selected_name):
+        self._current_name = selected_name
+        self._set_grid_current_tab()
+        self._tab_dict[self._current_name].tkraise()
+        if self._command is not None:
+            self._command()
+
+    def _fast_set(self, name: str):
+        if name in self._tab_dict:
+            self._current_name = name
+            self._segmented_button.set(name)
+            self._set_grid_current_tab()
+            self._tab_dict[name].tkraise()
+        else:
+            raise ValueError(f"CTkTabview has no tab named '{name}'")
+
+    ctk_tabview.CTkTabview._segmented_button_callback = _fast_segmented_button_callback
+    ctk_tabview.CTkTabview.set = _fast_set
+
+
 _patch_customtkinter_textbox_scroll_callback()
 _patch_customtkinter_scaling_tracker()
 _patch_customtkinter_appearance_mode_tracker()
+_patch_customtkinter_tabview_switch()
 
 
 class App(
