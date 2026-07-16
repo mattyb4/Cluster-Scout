@@ -38,7 +38,7 @@ class App(
 ):
     def __init__(self):
         super().__init__()
-        self.title("Cluster-Scout")
+        self.title("Cluster-Scout (Beta)")
         self.geometry("1100x820")
         self.minsize(900, 560)
         ico = PROJECT_ROOT / "cluster_scout.ico"
