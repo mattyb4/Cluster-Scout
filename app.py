@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import queue
 import subprocess
+import sys
 
 import customtkinter as ctk
+from PIL import Image, ImageTk
 
 from ui.common import PROJECT_ROOT, MIN_UI_SCALE, MAX_UI_SCALE, UI_SCALE_STEP, _BLUE
 from ui.pipeline_panels import PipelineTabMixin
@@ -41,7 +43,14 @@ class App(
         self.minsize(900, 560)
         ico = PROJECT_ROOT / "cluster_scout.ico"
         if ico.exists():
-            self.iconbitmap(str(ico))
+            if sys.platform == "win32":
+                self.iconbitmap(str(ico))
+            else:
+                # .ico isn't a valid bitmap format for iconbitmap() outside
+                # Windows (raises TclError on macOS/Linux); iconphoto() works
+                # everywhere, and Pillow can read .ico regardless of platform.
+                self._icon_image = ImageTk.PhotoImage(Image.open(ico))
+                self.iconphoto(True, self._icon_image)
 
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._radius_sweep_result = None

@@ -170,6 +170,10 @@ def isolate_textbox_scroll(textbox: ctk.CTkTextbox) -> None:
             real_text.yview_scroll(-1, "units")
         elif getattr(event, "num", None) == 5:
             real_text.yview_scroll(1, "units")
+        elif sys.platform == "darwin":
+            # macOS reports small per-tick deltas directly (no /120 scaling,
+            # unlike Windows, where a notch is always a multiple of 120).
+            real_text.yview_scroll(int(-1 * event.delta), "units")
         else:
             real_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
