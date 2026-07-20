@@ -11,7 +11,12 @@ import re
 
 import customtkinter as ctk
 
-from ui.common import _MUT_ENTRY_RE, _PP_LABEL, _PP_COLORS, _PTM_MARKER_COLOR, _NEEDLE_DEFAULT_COLOR, _RED, _YELLOW, _GREEN
+from ui.common import (
+    _MUT_ENTRY_RE, _PP_LABEL, _PP_COLORS, _PTM_MARKER_COLOR, _NEEDLE_DEFAULT_COLOR,
+    _RED, _YELLOW, _GREEN, _CIF_DIR, _DOMAIN_TYPE_COLORS, _DOMAIN_TYPE_LANES,
+    _DOMAIN_TYPE_FALLBACK_COLOR, _DOMAIN_TYPE_FALLBACK_LANE, _load_interpro_entries,
+    get_protein_length,
+)
 
 
 class VisualizationTabMixin:
@@ -22,14 +27,31 @@ class VisualizationTabMixin:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(2, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
 
         self._viz_ptm_rows: dict[str, int] = {}
         self._viz_all_labels: list[str] = []
+        self._viz_protein_rows: dict[str, list[int]] = {}
+        self._viz_all_protein_labels: list[str] = []
 
-        # ── Controls row 1: PTM selection ──
-        controls = ctk.CTkFrame(tab)
-        controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+        # ── Controls row 0: view mode ──
+        mode_row = ctk.CTkFrame(tab)
+        mode_row.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+
+        ctk.CTkLabel(mode_row, text="View:", font=ctk.CTkFont(weight="bold")).pack(
+            side="left", padx=(12, 6), pady=10,
+        )
+        self._viz_view_mode_var = ctk.StringVar(value="Single PTM")
+        ctk.CTkSegmentedButton(
+            mode_row, values=["Single PTM", "Whole protein"],
+            variable=self._viz_view_mode_var,
+            command=self._on_viz_view_mode_change,
+        ).pack(side="left", padx=(0, 12), pady=10)
+
+        # ── Controls row 1a: PTM selection (Single PTM mode) ──
+        self._viz_ptm_controls = ctk.CTkFrame(tab)
+        self._viz_ptm_controls.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        controls = self._viz_ptm_controls
 
         ctk.CTkLabel(
             controls, text="PTM site:", font=ctk.CTkFont(weight="bold"),
@@ -43,18 +65,48 @@ class VisualizationTabMixin:
         search_entry.pack(side="left", padx=(0, 6), pady=10)
         self._viz_search_var.trace_add("write", self._on_viz_search)
 
-        self._viz_combo = ctk.CTkComboBox(controls, width=220, values=[])
+        self._viz_combo = ctk.CTkComboBox(
+            controls, width=220, values=[], command=lambda _v: self._generate_current_view(),
+        )
         self._viz_combo.pack(side="left", padx=(0, 12), pady=10)
 
         ctk.CTkLabel(controls, text="±aa window:").pack(side="left", padx=(8, 4), pady=10)
         self._viz_window_var = ctk.StringVar(value="15")
+        self._viz_window_var.trace_add("write", self._on_viz_window_changed)
         ctk.CTkEntry(
             controls, textvariable=self._viz_window_var, width=50,
         ).pack(side="left", padx=(0, 12), pady=10)
 
-        # ── Controls row 2: display mode + actions ──
+        # ── Controls row 1b: protein selection (Whole protein mode) ──
+        self._viz_protein_controls = ctk.CTkFrame(tab)
+        self._viz_protein_controls.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        self._viz_protein_controls.grid_remove()
+        pcontrols = self._viz_protein_controls
+
+        ctk.CTkLabel(
+            pcontrols, text="Protein:", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(12, 6), pady=10)
+
+        self._viz_protein_search_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            pcontrols, textvariable=self._viz_protein_search_var, width=160,
+            placeholder_text="Search gene or UniProt…",
+        ).pack(side="left", padx=(0, 6), pady=10)
+        self._viz_protein_search_var.trace_add("write", self._on_viz_protein_search)
+
+        self._viz_protein_combo = ctk.CTkComboBox(
+            pcontrols, width=220, values=[], command=lambda _v: self._generate_current_view(),
+        )
+        self._viz_protein_combo.pack(side="left", padx=(0, 12), pady=10)
+
+        ctk.CTkLabel(pcontrols, text="±aa window:").pack(side="left", padx=(8, 4), pady=10)
+        ctk.CTkEntry(
+            pcontrols, textvariable=self._viz_window_var, width=50,
+        ).pack(side="left", padx=(0, 12), pady=10)
+
+        # ── Controls row 2: display mode + actions (shared) ──
         controls2 = ctk.CTkFrame(tab)
-        controls2.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        controls2.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
 
         ctk.CTkLabel(controls2, text="Show:", font=ctk.CTkFont(weight="bold")).pack(
             side="left", padx=(12, 6), pady=10,
@@ -63,13 +115,8 @@ class VisualizationTabMixin:
         ctk.CTkSegmentedButton(
             controls2, values=["All mutations", "Unique per position"],
             variable=self._viz_mode_var,
-            command=lambda _v: self._generate_lollipop_plot(),
+            command=lambda _v: self._generate_current_view(),
         ).pack(side="left", padx=(0, 12), pady=10)
-
-        ctk.CTkButton(
-            controls2, text="Generate", width=100,
-            command=self._generate_lollipop_plot,
-        ).pack(side="left", padx=(0, 8), pady=10)
 
         ctk.CTkButton(
             controls2, text="Save PNG", width=100,
@@ -83,22 +130,88 @@ class VisualizationTabMixin:
         )
         self._viz_status.pack(side="left", padx=(4, 12), pady=10)
 
-        # ── Plot canvas ──
-        canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
-        canvas_frame.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
-        canvas_frame.grid_columnconfigure(0, weight=1)
-        canvas_frame.grid_rowconfigure(0, weight=1)
+        # ── Plot area: single-PTM canvas (row 3, Single PTM mode) ──
+        self._viz_canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
+        self._viz_canvas_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self._viz_canvas_frame.grid_columnconfigure(0, weight=1)
+        self._viz_canvas_frame.grid_rowconfigure(0, weight=1)
+        # Without this, the canvas widget's own requested size (set by our
+        # resize handler below) can inflate this frame's size, which then
+        # fires another <Configure> with an even bigger size -- a runaway
+        # feedback loop confirmed by an actual render (the canvas grew far
+        # past the window edge). This pins the frame's size to whatever the
+        # grid layout above it allocates, so sizing only ever flows one way:
+        # frame -> canvas, never canvas -> frame.
+        self._viz_canvas_frame.grid_propagate(False)
 
         self._viz_fig = Figure(figsize=(10, 6), dpi=100, facecolor="#2b2b2b")
-        self._viz_canvas = FigureCanvasTkAgg(self._viz_fig, master=canvas_frame)
+        self._viz_canvas = FigureCanvasTkAgg(self._viz_fig, master=self._viz_canvas_frame)
         self._viz_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._bind_viz_canvas_resize(self._viz_canvas_frame, self._viz_canvas, self._viz_fig)
 
-    # ── Visualization: PTM selection ────────────────────────────────────────
+        # ── Plot area: domain map + scrollable lollipop stack (row 3, Whole protein mode) ──
+        self._build_viz_whole_protein_area(tab)
+
+    def _on_viz_view_mode_change(self, _value: str = "") -> None:
+        whole = self._viz_view_mode_var.get() == "Whole protein"
+        if whole:
+            self._viz_ptm_controls.grid_remove()
+            self._viz_protein_controls.grid()
+            self._viz_canvas_frame.grid_remove()
+            self._viz_whole_protein_frame.grid()
+            self._carry_ptm_selection_to_protein()
+        else:
+            self._viz_protein_controls.grid_remove()
+            self._viz_ptm_controls.grid()
+            self._viz_whole_protein_frame.grid_remove()
+            self._viz_canvas_frame.grid()
+
+    def _carry_ptm_selection_to_protein(self) -> None:
+        """Switching to Whole protein mode defaults to the protein of the PTM
+        that was just being viewed in Single PTM mode, and renders it
+        immediately, rather than leaving the protein selector at whatever it
+        last happened to show.
+        """
+        if self._results_df_wide is None:
+            return
+        idx = self._viz_ptm_rows.get(self._viz_combo.get())
+        if idx is None:
+            return
+        row = self._results_df_wide.loc[idx]
+        plabel = f"{row.get('gene', '?')} ({row.get('UniProt', '?')})"
+        if plabel not in self._viz_protein_rows:
+            return
+        self._viz_protein_search_var.set("")
+        self._viz_protein_combo.set(plabel)
+        self._generate_whole_protein_view()
+
+    def _generate_current_view(self) -> None:
+        if self._viz_view_mode_var.get() == "Whole protein":
+            self._generate_whole_protein_view()
+        else:
+            self._generate_lollipop_plot()
+
+    def _on_viz_window_changed(self, *_args) -> None:
+        """Regenerate automatically once the ±aa window value settles.
+
+        Debounced (unlike the combobox selections, which fire once per
+        deliberate choice) since this is a free-text field -- typing "15"
+        fires this on every keystroke, and redrawing on each one would be
+        real wasted work, especially in whole-protein mode where a redraw
+        can take several seconds for a PTM-rich protein.
+        """
+        if getattr(self, "_viz_window_after_id", None) is not None:
+            self.after_cancel(self._viz_window_after_id)
+        self._viz_window_after_id = self.after(600, self._generate_current_view)
+
+    # ── Visualization: PTM / protein selection ──────────────────────────────
 
     def _refresh_viz_selector(self, df) -> None:
-        """(Re)populate the PTM-site combobox from the currently loaded results."""
+        """(Re)populate the PTM-site and protein selectors from loaded results."""
         self._viz_ptm_rows = {}
         labels: list[str] = []
+        self._viz_protein_rows = {}
+        protein_labels: list[str] = []
         for idx, row in df.iterrows():
             gene = row.get("gene", "?")
             site = row.get("ptm_site", "?")
@@ -106,6 +219,13 @@ class VisualizationTabMixin:
             label = f"{gene}  {site}  ({uid})"
             labels.append(label)
             self._viz_ptm_rows[label] = idx
+
+            plabel = f"{gene} ({uid})"
+            if plabel not in self._viz_protein_rows:
+                protein_labels.append(plabel)
+                self._viz_protein_rows[plabel] = []
+            self._viz_protein_rows[plabel].append(idx)
+
         self._viz_all_labels = labels
         current = self._viz_combo.get()
         self._viz_combo.configure(values=labels)
@@ -113,6 +233,14 @@ class VisualizationTabMixin:
             self._viz_combo.set(labels[0])
         elif not labels:
             self._viz_combo.set("")
+
+        self._viz_all_protein_labels = protein_labels
+        pcurrent = self._viz_protein_combo.get()
+        self._viz_protein_combo.configure(values=protein_labels)
+        if protein_labels and pcurrent not in protein_labels:
+            self._viz_protein_combo.set(protein_labels[0])
+        elif not protein_labels:
+            self._viz_protein_combo.set("")
 
     def _on_viz_search(self, *_args) -> None:
         query = self._viz_search_var.get().strip().lower()
@@ -123,6 +251,197 @@ class VisualizationTabMixin:
         self._viz_combo.configure(values=filtered)
         if filtered and self._viz_combo.get() not in filtered:
             self._viz_combo.set(filtered[0])
+
+    def _on_viz_protein_search(self, *_args) -> None:
+        query = self._viz_protein_search_var.get().strip().lower()
+        filtered = (
+            [label for label in self._viz_all_protein_labels if query in label.lower()]
+            if query else self._viz_all_protein_labels
+        )
+        self._viz_protein_combo.configure(values=filtered)
+        if filtered and self._viz_protein_combo.get() not in filtered:
+            self._viz_protein_combo.set(filtered[0])
+
+    # ── Visualization: whole-protein plot area ──────────────────────────────
+
+    def _build_viz_whole_protein_area(self, tab) -> None:
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+        self._viz_whole_protein_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        self._viz_whole_protein_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        self._viz_whole_protein_frame.grid_remove()
+        self._viz_whole_protein_frame.grid_columnconfigure(0, weight=1)
+        self._viz_whole_protein_frame.grid_rowconfigure(1, weight=1)
+
+        # ── Stack title + legend: plain Tk chrome, not drawn into the
+        # matplotlib figure. fig.suptitle()/fig.legend() position via
+        # figure-relative (0-1) coordinates, which is meaningless for a
+        # figure that can be 100+ inches tall (a title near y=0.98 lands
+        # deep inside row 2 or 3, not "near the top" the way it would on a
+        # normal-sized figure) -- confirmed by an actual render before
+        # switching to this approach. A persistent label reads correctly
+        # regardless of stack height, and stays visible while scrolling.
+        # The domain map itself is no longer a separate pinned panel here —
+        # each PTM row draws its own strip (see _draw_lollipop_group), so
+        # single-PTM and whole-protein views share one code path for it.
+        stack_header = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="transparent")
+        stack_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+
+        self._viz_stack_title_label = ctk.CTkLabel(
+            stack_header, text="", font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self._viz_stack_title_label.pack(side="left", padx=(4, 16))
+
+        legend_frame = ctk.CTkFrame(stack_header, fg_color="transparent")
+        legend_frame.pack(side="left")
+        for text, color in [
+            ("★ PTM site", _PTM_MARKER_COLOR),
+            ("Benign", _PP_COLORS["benign"]),
+            ("Possibly damaging", _PP_COLORS["possibly_damaging"]),
+            ("Probably damaging", _PP_COLORS["probably_damaging"]),
+            ("Unknown", _NEEDLE_DEFAULT_COLOR),
+        ]:
+            swatch = ctk.CTkFrame(legend_frame, fg_color=color, width=14, height=14, corner_radius=3)
+            swatch.pack(side="left", padx=(10, 3))
+            swatch.pack_propagate(False)
+            ctk.CTkLabel(legend_frame, text=text, font=ctk.CTkFont(size=11)).pack(side="left")
+
+        # ── Scrollable lollipop stack ──
+        stack_outer = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="#2b2b2b")
+        stack_outer.grid(row=1, column=0, sticky="nsew")
+        stack_outer.grid_columnconfigure(0, weight=1)
+        stack_outer.grid_rowconfigure(0, weight=1)
+        stack_outer.grid_propagate(False)  # same reasoning as _viz_canvas_frame above
+        self._bind_viz_stack_resize(stack_outer)
+
+        scroll = ctk.CTkScrollableFrame(stack_outer, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+
+        # Same CTkScrollableFrame width-clipping workaround used by
+        # analysis_tools_tab.py's plot area: it forces content width to
+        # exactly match the viewport, clipping anything wider (our stack is
+        # a fixed-width figure that needs to render at its natural size, not
+        # be squeezed to fit).
+        scroll._parent_canvas.unbind("<Configure>")
+
+        def _fit_width_at_least_viewport(event):
+            natural_w = scroll.winfo_reqwidth()
+            scroll._parent_canvas.itemconfigure(
+                scroll._create_window_id, width=max(natural_w, event.width),
+            )
+
+        scroll._parent_canvas.bind("<Configure>", _fit_width_at_least_viewport)
+
+        stack_h_scrollbar = ctk.CTkScrollbar(
+            scroll._parent_frame, orientation="horizontal", command=scroll._parent_canvas.xview,
+        )
+        stack_h_scrollbar.grid(row=2, column=0, sticky="ew")
+        scroll._parent_canvas.configure(xscrollcommand=stack_h_scrollbar.set)
+
+        self._viz_stack_scroll = scroll
+        self._viz_stack_fig = Figure(figsize=(10, 2), dpi=100, facecolor="#2b2b2b")
+        self._viz_stack_canvas = FigureCanvasTkAgg(self._viz_stack_fig, master=scroll)
+        self._viz_stack_canvas.get_tk_widget().grid(row=0, column=0, sticky="nw")
+
+        self._viz_stack_build_token = None
+
+    def _current_viz_canvas_size_in(self) -> tuple[float, float]:
+        """Current single-PTM canvas frame size, in inches, so the figure
+        fills the available window space at generate time rather than
+        staying a fixed size regardless of window size. Used for the initial
+        size on each generate call; _bind_viz_canvas_resize (below) handles
+        keeping it in sync afterward as the window is actively resized.
+
+        update_idletasks() first: switching modes reveals/hides frames and
+        generates in the same call stack, with no yield back to Tk's event
+        loop in between, so an unforced winfo_width() can read a stale
+        pre-reveal size.
+        """
+        self.update_idletasks()
+        dpi = self._viz_fig.get_dpi()
+        w = self._viz_canvas_frame.winfo_width()
+        h = self._viz_canvas_frame.winfo_height()
+        if w <= 1 or h <= 1:
+            return (10.0, 6.0)
+        return (max(w / dpi, 6.0), max(h / dpi, 4.0))
+
+    def _bind_viz_canvas_resize(self, frame, canvas, fig) -> None:
+        """Keep *fig* sized to fill *frame* live, as the window is resized.
+
+        Binds on *frame* (not the canvas widget inside it) -- frame has
+        grid_propagate(False), so its size can only ever change because its
+        own parent's grid layout changed (a real window resize), never
+        because a child inside it requested a new size. Binding on the
+        canvas widget itself was tried first and caused a runaway feedback
+        loop (confirmed by an actual render: the plot grew past the window
+        edge) -- resizing the canvas widget fires its own <Configure> too,
+        indistinguishable from a genuine external resize, so the handler
+        kept re-triggering itself. Binding on the propagate-disabled frame
+        instead means the canvas resizing in response never itself produces
+        another frame-level <Configure>, breaking that path entirely.
+
+        Debounced via self.after() so a live window-drag (many rapid
+        <Configure> events) doesn't trigger a full Agg redraw on every pixel
+        of movement, and skips the redraw entirely if the computed size
+        hasn't meaningfully changed (extra safety margin, not load-bearing
+        given the above, but cheap insurance).
+        """
+        state = {"after_id": None}
+
+        def _apply_resize(width_px: int, height_px: int) -> None:
+            state["after_id"] = None
+            if width_px < 100 or height_px < 100:
+                return
+            dpi = fig.get_dpi()
+            new_w_in, new_h_in = width_px / dpi, height_px / dpi
+            if (abs(new_w_in - fig.get_figwidth()) < 0.05
+                    and abs(new_h_in - fig.get_figheight()) < 0.05):
+                return
+            fig.set_size_inches(new_w_in, new_h_in)
+            if fig.axes:
+                canvas.draw()
+
+        def _on_configure(event) -> None:
+            if state["after_id"] is not None:
+                self.after_cancel(state["after_id"])
+            state["after_id"] = self.after(150, lambda: _apply_resize(event.width, event.height))
+
+        frame.bind("<Configure>", _on_configure)
+
+    def _bind_viz_stack_resize(self, frame) -> None:
+        """Regenerate the whole-protein stack when the window is resized, so
+        it fills the available width the same way the single-PTM view does.
+
+        Debounced much longer than the single-PTM canvas's resize (500ms vs.
+        150ms) and triggers a full regenerate rather than an in-place
+        fig.set_size_inches() -- unlike the single-PTM figure, the whole-
+        protein figure's layout (every row's gridspec, needle positions,
+        domain-label row assignments) is computed from its width at build
+        time, not just rasterized at a new size, so a real rebuild is
+        unavoidable. The long debounce keeps that from firing repeatedly
+        mid-drag; the chunked build (_draw_whole_protein_view) keeps any one
+        rebuild from freezing the UI regardless.
+        """
+        state = {"after_id": None, "last_width": None}
+
+        def _apply(width_px: int) -> None:
+            state["after_id"] = None
+            if width_px < 200:
+                return
+            if state["last_width"] is not None and abs(width_px - state["last_width"]) < 20:
+                return
+            state["last_width"] = width_px
+            if self._viz_view_mode_var.get() == "Whole protein" and self._viz_stack_title_label.cget("text"):
+                self._generate_whole_protein_view()
+
+        def _on_configure(event) -> None:
+            if state["after_id"] is not None:
+                self.after_cancel(state["after_id"])
+            state["after_id"] = self.after(500, lambda: _apply(event.width))
+
+        frame.bind("<Configure>", _on_configure)
 
     # ── Visualization: data prep ─────────────────────────────────────────────
 
@@ -230,14 +549,243 @@ class VisualizationTabMixin:
                     fontsize=8, color="#dcdcdc", rotation=45,
                 )
 
-    def _draw_lollipop(self, gene: str, ptm_site: str, ptm_pos: int, mut_df, local_window: float) -> None:
-        from matplotlib.lines import Line2D
-        from matplotlib.patches import Patch
+    _DOMAIN_LABEL_FONTSIZE = 7
+    _DOMAIN_LANE_HEIGHT_IN = 0.16  # physical height of one lane row (boxes)
+    _DOMAIN_BACKBONE_MARGIN_IN = 0.12  # space below the lowest lane, for the backbone/PTM marker
+    _DOMAIN_LABEL_TOP_PADDING_IN = 0.14  # gap between the top lane and the first label row
+    _DOMAIN_LABEL_ROW_INCHES = 0.26  # physical row pitch -- see _layout_domain_labels
+    _DOMAIN_STRIP_MARGIN_FRACTION = 0.89  # matches _draw_lollipop_group's left=0.08/right=0.97
 
-        fig = self._viz_fig
-        fig.clf()
-        fig.patch.set_facecolor("#2b2b2b")
+    def _measure_text_widths_px(self, texts: list[str], fontsize: float) -> list[float]:
+        """Real rendered pixel widths for *texts* at *fontsize*, via a small
+        scratch figure — not tied to any real Axes, so this can run before
+        the actual per-row figure/gridspec exists (needed to size a row
+        before building it). Replaces an earlier character-count-based
+        width guess, which was silently wrong by close to 2x in either
+        direction for some real domain names, confirmed by measuring both
+        against this.
+        """
+        from matplotlib.figure import Figure as _Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
 
+        scratch_fig = _Figure(dpi=100)
+        canvas = FigureCanvasAgg(scratch_fig)
+        ax = scratch_fig.add_subplot(111)
+        renderer = canvas.get_renderer()
+        widths = []
+        for text in texts:
+            t = ax.text(0, 0, text, fontsize=fontsize, alpha=0)
+            widths.append(t.get_window_extent(renderer=renderer).width)
+            t.remove()
+        return widths
+
+    def _layout_domain_labels(self, entries: list[dict], length: float,
+                               width_in: float) -> tuple[list[tuple[dict, int]], int]:
+        """Assign each entry's label to the lowest stacking row (0 = closest
+        to the boxes) such that, within a row, no two labels' real rendered
+        text extents come within a minimum pixel gap of each other, AND no
+        two labels' arrow anchors (their box's center — see
+        _draw_domain_strip, every arrow is a straight vertical line down
+        from there) come closer than a separate minimum pixel gap either,
+        so adjacent arrows stay visually distinguishable even when their
+        text is short enough to not itself be the constraint. Collisions
+        are always resolved by moving to a new row, never by shifting a
+        label sideways off its box's center.
+
+        Widths come from _measure_text_widths_px (real glyph metrics, not a
+        guess), converted to this specific render's data units via
+        *width_in* — this matters concretely: the same residue range (0..
+        length) maps to a different real pixel width depending on the
+        current window/viewport size, which single-PTM and whole-protein
+        mode do not share even for the same protein, so a fixed data-unit
+        estimate was quietly wrong in one or the other (confirmed by
+        measuring both).
+
+        Returns (assignments, n_rows_used).
+        """
+        if not entries:
+            return [], 0
+
+        axis_width_px = max(width_in * self._DOMAIN_STRIP_MARGIN_FRACTION * 100, 1.0)  # dpi=100
+        data_units_per_px = length / axis_width_px
+        gap = 10 * data_units_per_px
+        min_arrow_gap = 24 * data_units_per_px
+
+        sorted_entries = sorted(entries, key=lambda e: e["start"])
+        px_widths = self._measure_text_widths_px(
+            [e["name"] for e in sorted_entries], self._DOMAIN_LABEL_FONTSIZE,
+        )
+
+        row_occupied: list[list[tuple[float, float, float]]] = []
+        assignments = []
+        for e, px_w in zip(sorted_entries, px_widths):
+            label_w = px_w * data_units_per_px
+            center_x = e["start"] + (e["end"] - e["start"]) / 2
+            label_start, label_end = center_x - label_w / 2, center_x + label_w / 2
+
+            row = 0
+            while True:
+                if row == len(row_occupied):
+                    row_occupied.append([])
+                conflict = any(
+                    (label_start - gap < o_end and label_end + gap > o_start)
+                    or abs(center_x - o_center) < min_arrow_gap
+                    for o_start, o_end, o_center in row_occupied[row]
+                )
+                if not conflict:
+                    row_occupied[row].append((label_start, label_end, center_x))
+                    assignments.append((e, row))
+                    break
+                row += 1
+
+        return assignments, len(row_occupied)
+
+    def _domain_strip_height_in(self, n_label_rows: int) -> float:
+        """Physical height the domain strip needs to comfortably fit its
+        backbone, boxes, and however many label rows are required, in
+        inches. Everything here is a physical constant (inches), not a
+        data-coordinate one -- _draw_domain_strip sets its axis's y-limits
+        to span exactly this many inches (1 data-unit-of-y == 1 real inch),
+        so a label row is always the same physical size on screen no matter
+        how much total height a row has to work with.
+
+        This replaced an earlier version that expressed row spacing in
+        arbitrary data-coordinate units, sized independently of the axis's
+        real physical height -- that meant the same data-coordinate gap
+        compressed into far fewer actual pixels wherever the axis happened
+        to be shorter, which is exactly what was happening in whole-protein
+        mode specifically (its rows have much less absolute height than
+        single-PTM mode's for the same domain layout): confirmed by
+        computing the real inches-per-data-unit ratio in both and finding
+        they differed by nearly 2x for what was meant to be identical
+        spacing.
+        """
+        n_lanes = max(_DOMAIN_TYPE_LANES.values(), default=0) + 1
+        return (self._DOMAIN_BACKBONE_MARGIN_IN + n_lanes * self._DOMAIN_LANE_HEIGHT_IN
+                + self._DOMAIN_LABEL_TOP_PADDING_IN + max(n_label_rows, 1) * self._DOMAIN_LABEL_ROW_INCHES)
+
+    def _draw_domain_strip(self, ax, entries: list[dict], length: float, ptm_pos: int,
+                            domain_layout: tuple[list[tuple[dict, int]], int]) -> None:
+        """Draw a compact linear domain-map strip onto *ax*: a backbone bar,
+        InterPro domain/family/site boxes stacked in lanes by specificity
+        (so a specific domain nested inside a broader family/superfamily
+        call stays distinguishable), each labeled with its own name via a
+        horizontal label connected by a straight vertical arrow to its box
+        (not just a color — color alone can't disambiguate two same-type
+        entries) — labels needing to avoid colliding with a neighbor stack
+        into additional rows above the boxes rather than overlapping — and
+        a single marker for *ptm_pos*.
+
+        The y-axis is set up so 1 data-unit exactly equals 1 physical inch
+        (see _domain_strip_height_in) -- the caller is responsible for
+        actually giving this axis that many inches of real height via its
+        gridspec allocation; if it doesn't, spacing will be wrong, but nothing
+        here computes a size independently of that shared assumption.
+
+        *domain_layout* is pre-computed by the caller (_layout_domain_labels)
+        once per protein, not per PTM row — every row of a given protein
+        shares the identical set of domain entries, so recomputing (which
+        includes real text measurement) for each one would be both
+        needlessly repeated work and a source of row-count drift between
+        rows if it were ever computed slightly differently per call.
+        """
+        from matplotlib.patches import Rectangle
+
+        self._style_lollipop_axis(ax)
+
+        assignments, n_rows = domain_layout
+        strip_height_in = self._domain_strip_height_in(n_rows)
+        n_lanes = max(_DOMAIN_TYPE_LANES.values(), default=0) + 1
+        backbone_y = 0.0
+        lanes_top_y = backbone_y + self._DOMAIN_BACKBONE_MARGIN_IN + n_lanes * self._DOMAIN_LANE_HEIGHT_IN
+
+        ax.hlines(backbone_y, 0, length, color=_NEEDLE_DEFAULT_COLOR, linewidth=2.5, zorder=1)
+
+        def _box_position(e: dict) -> tuple[float, float, float]:
+            lane = _DOMAIN_TYPE_LANES.get(e["type"], _DOMAIN_TYPE_FALLBACK_LANE)
+            y0 = backbone_y + self._DOMAIN_BACKBONE_MARGIN_IN + lane * self._DOMAIN_LANE_HEIGHT_IN
+            return y0, y0 + self._DOMAIN_LANE_HEIGHT_IN * 0.8, e["start"] + (e["end"] - e["start"]) / 2
+
+        for e in entries:
+            y0, _box_top, _center = _box_position(e)
+            color = _DOMAIN_TYPE_COLORS.get(e["type"], _DOMAIN_TYPE_FALLBACK_COLOR)
+            ax.add_patch(Rectangle(
+                (e["start"], y0), e["end"] - e["start"], self._DOMAIN_LANE_HEIGHT_IN * 0.8,
+                facecolor=color, edgecolor="black", linewidth=0.4, alpha=0.85, zorder=2,
+            ))
+
+        for e, row in assignments:
+            _y0, box_top_y, box_center_x = _box_position(e)
+            label_y = lanes_top_y + self._DOMAIN_LABEL_TOP_PADDING_IN + row * self._DOMAIN_LABEL_ROW_INCHES
+            # xytext's x always matches xy's x (the box's own center) so the
+            # arrow is a straight vertical line -- collisions are resolved
+            # entirely by _layout_domain_labels picking a different row,
+            # never by nudging a label sideways off its box.
+            ax.annotate(
+                e["name"], xy=(box_center_x, box_top_y), xytext=(box_center_x, label_y),
+                fontsize=self._DOMAIN_LABEL_FONTSIZE, color="#dcdcdc", ha="center", va="bottom",
+                arrowprops=dict(arrowstyle="->", color="#888888", lw=0.7, shrinkA=0, shrinkB=2),
+                clip_on=False, zorder=3,
+            )
+
+        ax.plot(
+            ptm_pos, backbone_y, marker="v", markersize=8,
+            color=_PTM_MARKER_COLOR, markeredgecolor="white", markeredgewidth=0.6, zorder=4,
+        )
+
+        ax.set_xlim(-length * 0.02, length * 1.02)
+        ax.set_ylim(-self._DOMAIN_BACKBONE_MARGIN_IN, strip_height_in - self._DOMAIN_BACKBONE_MARGIN_IN)
+        ax.set_yticks([])
+        ax.tick_params(labelsize=7)
+        # No "Residue position" x-label here -- the lollipop panel directly
+        # below already has one, on the same residue-number x-axis scale
+        # family; a second copy immediately above it just collided with the
+        # row title text in a real render.
+        for spine in ("top", "left", "right"):
+            ax.spines[spine].set_visible(False)
+
+        if not entries:
+            ax.annotate(
+                "No InterPro domain data available for this protein", (0.5, 0.5),
+                xycoords="axes fraction", ha="center", va="center",
+                color="#888888", fontsize=7,
+            )
+
+    def _draw_lollipop_group(self, fig, subplotspec, gene: str, ptm_site: str, ptm_pos: int,
+                              mut_df, local_window: float, domain_entries: list[dict],
+                              length: float, domain_layout: tuple[list[tuple[dict, int]], int],
+                              available_height_in: float):
+        """Draw one PTM site's domain strip + local/far lollipop panels into *fig*.
+
+        If *subplotspec* is None, lays out directly on the whole figure (the
+        single-PTM view's own margins). If given a parent SubplotSpec cell,
+        nests via subgridspec instead — GridSpecFromSubplotSpec doesn't
+        accept left/right/top/bottom (those are figure-level margins, only
+        valid on the top-level gridspec; the parent cell already determines
+        where in the figure this group sits), confirmed directly rather than
+        assumed, since it's an easy thing to get subtly wrong.
+
+        *domain_entries*/*length*/*domain_layout* are pre-computed by the
+        caller once per protein, not per PTM row — every row of a given
+        protein shares the identical domain layout (get_protein_length()
+        parses a CIF file, and _layout_domain_labels does real text
+        measurement -- both real costs that shouldn't repeat for every row
+        of a PTM-rich protein, and would also risk the row count silently
+        drifting between rows if computed separately per call).
+
+        *available_height_in* is this group's outer gridspec cell's actual
+        physical height in inches -- for single-PTM mode, the whole figure's
+        height minus its own top/bottom margins; for whole-protein mode,
+        that row's height (row_height_in in _draw_whole_protein_view). Used
+        to split domain-strip vs. lollipop-panel height so the domain
+        strip's real inches-per-label-row pitch (_domain_strip_height_in) is
+        honored regardless of how much total room a row has, rather than a
+        fixed proportion that compresses however much space is available.
+
+        Returns ax_local so the caller decides on legend/title/suptitle —
+        those differ between single-PTM (one legend, one suptitle) and
+        whole-protein (one shared legend, one per-row title) callers.
+        """
         local_df = mut_df[(mut_df["mutation_position"] - ptm_pos).abs() <= local_window] \
             .sort_values("mutation_position")
         far_df = mut_df[(mut_df["mutation_position"] - ptm_pos).abs() > local_window] \
@@ -248,16 +796,30 @@ class VisualizationTabMixin:
         ptm_height = max_count * 1.15
         y_top = ptm_height * 1.45
 
-        if has_far:
-            gs = fig.add_gridspec(
-                1, 3, width_ratios=[0.68, 0.05, 0.27], wspace=0.05,
-                left=0.08, right=0.97, top=0.86, bottom=0.28,
+        n_label_rows = domain_layout[1]
+        domain_h = min(self._domain_strip_height_in(n_label_rows), available_height_in * 0.7)
+        lollipop_h = max(available_height_in - domain_h, 0.5)
+
+        if subplotspec is None:
+            outer_gs = fig.add_gridspec(
+                2, 1, height_ratios=[domain_h, lollipop_h], hspace=0.6,
+                left=0.08, right=0.97, top=0.86, bottom=0.14,
             )
+        else:
+            outer_gs = subplotspec.subgridspec(2, 1, height_ratios=[domain_h, lollipop_h], hspace=0.6)
+
+        domain_ax = fig.add_subplot(outer_gs[0])
+        self._draw_domain_strip(domain_ax, domain_entries, length, ptm_pos, domain_layout)
+
+        lollipop_cell = outer_gs[1]
+        gs = (lollipop_cell.subgridspec(1, 3, width_ratios=[0.68, 0.05, 0.27], wspace=0.05)
+              if has_far else lollipop_cell.subgridspec(1, 1))
+
+        if has_far:
             ax_local = fig.add_subplot(gs[0])
             ax_gap = fig.add_subplot(gs[1])
             ax_far = fig.add_subplot(gs[2])
         else:
-            gs = fig.add_gridspec(1, 1, left=0.08, right=0.97, top=0.86, bottom=0.28)
             ax_local = fig.add_subplot(gs[0])
             ax_gap = None
             ax_far = None
@@ -311,7 +873,14 @@ class VisualizationTabMixin:
             ax_far.set_xticklabels(far_df["mutation"], rotation=45, ha="right", fontsize=8)
             ax_far.set_title(f"> {local_window:g} aa away", fontsize=9, color="gray")
 
-        legend_handles = [
+        return ax_local
+
+    @staticmethod
+    def _lollipop_legend_handles():
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+
+        return [
             Line2D([0], [0], marker="*", color="none", markerfacecolor=_PTM_MARKER_COLOR,
                    markeredgecolor="white", markersize=14, label="PTM site"),
             Patch(facecolor=_PP_COLORS["benign"], label="Benign"),
@@ -319,8 +888,28 @@ class VisualizationTabMixin:
             Patch(facecolor=_PP_COLORS["probably_damaging"], label="Probably damaging"),
             Patch(facecolor=_NEEDLE_DEFAULT_COLOR, label="Unknown / not scored"),
         ]
+
+    def _draw_lollipop(self, gene: str, ptm_site: str, ptm_pos: int, mut_df, local_window: float,
+                        uid: str) -> None:
+        fig = self._viz_fig
+        fig.clf()
+        fig.patch.set_facecolor("#2b2b2b")
+        fig.set_size_inches(*self._current_viz_canvas_size_in())
+
+        domain_entries = _load_interpro_entries(uid)
+        protein_length = get_protein_length(_CIF_DIR / uid)
+        max_end = max((e["end"] for e in domain_entries), default=0)
+        length = max(protein_length or 0, max_end, ptm_pos, 1)
+        domain_layout = self._layout_domain_labels(domain_entries, length, fig.get_figwidth())
+        available_height_in = fig.get_figheight() * (0.86 - 0.14)
+
+        ax_local = self._draw_lollipop_group(
+            fig, None, gene, ptm_site, ptm_pos, mut_df, local_window,
+            domain_entries, length, domain_layout, available_height_in,
+        )
+
         ax_local.legend(
-            handles=legend_handles, loc="upper left", fontsize=8,
+            handles=self._lollipop_legend_handles(), loc="upper left", fontsize=8,
             facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
         )
 
@@ -374,7 +963,7 @@ class VisualizationTabMixin:
         except ValueError:
             local_window = 15.0
 
-        self._draw_lollipop(gene, ptm_site, ptm_pos, mut_df, local_window)
+        self._draw_lollipop(gene, ptm_site, ptm_pos, mut_df, local_window, uid)
 
         kind = "unique position(s)" if unique_only else "nearby mutation(s)"
         status = f"{len(mut_df)} {kind} for {gene} {ptm_site}"
@@ -419,14 +1008,194 @@ class VisualizationTabMixin:
             })
         return pd.DataFrame(rows)
 
-    def _save_viz_plot(self) -> None:
-        if not self._viz_fig.axes:
-            self._viz_status.configure(text="Generate a plot before saving.", text_color=_RED)
+    # ── Visualization: whole-protein view ────────────────────────────────────
+
+    def _generate_whole_protein_view(self) -> None:
+        if self._results_df_wide is None:
+            self._viz_status.configure(
+                text="No results loaded — run the pipeline or open the Results tab first.",
+                text_color=_RED,
+            )
             return
-        label = self._viz_combo.get()
+
+        label = self._viz_protein_combo.get()
+        indices = self._viz_protein_rows.get(label)
+        if not indices:
+            self._viz_status.configure(text="Select a protein to plot.", text_color=_RED)
+            return
+
+        rows = self._results_df_wide.loc[indices]
+        first = rows.iloc[0]
+        gene = first.get("gene", "?")
+        uid = first.get("UniProt", "?")
+
+        try:
+            local_window = float(self._viz_window_var.get().strip() or "15")
+        except ValueError:
+            local_window = 15.0
+        unique_only = self._viz_mode_var.get() == "Unique per position"
+
+        ptm_entries = []
+        for _, row in rows.iterrows():
+            ptm_site = row.get("ptm_site", "?")
+            ptm_m = re.search(r"\d+", str(ptm_site))
+            if not ptm_m:
+                continue
+            ptm_pos = int(ptm_m.group())
+            mut_df, _note = self._get_viz_mutation_df(uid, ptm_site, row)
+            if mut_df.empty:
+                continue
+            if unique_only:
+                mut_df = self._collapse_to_unique_positions(mut_df)
+            ptm_entries.append((ptm_site, ptm_pos, mut_df))
+
+        if not ptm_entries:
+            self._viz_stack_fig.clf()
+            self._viz_stack_canvas.draw()
+            self._viz_status.configure(
+                text=f"No nearby mutations found for any PTM site on {gene} ({uid}).",
+                text_color=_YELLOW,
+            )
+            return
+
+        self._viz_status.configure(
+            text=f"Rendering {len(ptm_entries)} PTM site(s) for {gene} ({uid})…", text_color="gray60",
+        )
+        domain_entries = _load_interpro_entries(uid)
+        protein_length = get_protein_length(_CIF_DIR / uid)
+        self._draw_whole_protein_view(uid, gene, ptm_entries, local_window, domain_entries, protein_length)
+
+    def _current_viz_stack_width_in(self) -> float:
+        """Current available viewport width for the whole-protein stack, in
+        inches, so the figure fills the window ("extend to the edge") rather
+        than staying a fixed size regardless of how wide the window actually
+        is. Recomputed at Generate time rather than continuously live-
+        tracked like the single-PTM canvas -- a resize mid-render would need
+        to interrupt an in-progress chunked build, which isn't worth the
+        complexity here. Falls back to a sensible default if the widget
+        hasn't been realized/sized by Tk yet (winfo_width() returns 1).
+
+        update_idletasks() first matters concretely: the mode-switch
+        auto-carry path (_carry_ptm_selection_to_protein) calls .grid() to
+        reveal this frame and generates the plot in the same call stack, with
+        no yield back to Tk's event loop in between -- without forcing
+        pending geometry updates through here, winfo_width() reads the
+        pre-reveal (stale/unmapped) size instead of the real one, confirmed
+        by an actual render that came out at the fallback width.
+        """
+        self.update_idletasks()
+        viewport_w = self._viz_stack_scroll._parent_canvas.winfo_width()
+        if viewport_w <= 1:
+            return 10.0
+        return max(viewport_w / self._viz_stack_fig.get_dpi(), 6.0)
+
+    _WHOLE_PROTEIN_LOLLIPOP_HEIGHT_IN = 2.2  # target lollipop-panel height per row
+
+    def _draw_whole_protein_view(self, uid: str, gene: str, ptm_entries: list, local_window: float,
+                                  domain_entries: list[dict], protein_length: int | None) -> None:
+        """Draw one lollipop-plot row per PTM site into self._viz_stack_fig.
+
+        Rows are built in small batches via self.after() rather than one
+        synchronous loop — matplotlib subplot construction plus a final
+        canvas.draw() rasterization is real main-thread CPU work that scales
+        with PTM count, and this app has already hit (and fixed, for
+        Treeview rows) a real macOS freeze from exactly this kind of
+        synchronous UI-callback work. A token guards against a stale build
+        finishing after the user has already switched proteins.
+
+        Measured against real data (TP53/P04637, 64 PTM sites, some with
+        dozens of nearby mutations each): row-building totals ~3s split
+        across ~13 small batches, each individually short. The final
+        canvas.draw() rasterization is a separate, single ~4-5s block that
+        this chunking does NOT cover -- matplotlib's Agg raster isn't
+        naturally interruptible, so a very PTM-rich protein still has one
+        real (if shorter, and clearly communicated via the "Rendering…"
+        status set by the caller) pause at the end. Not fully solved, since
+        doing so would mean replacing matplotlib's rendering pipeline
+        rather than working with it.
+
+        The domain layout (which label goes on which row) is computed once
+        here, for the whole protein, not per PTM row -- every row shares the
+        identical set of domain entries, so it's both wasted repeated work
+        and a correctness risk to redo it per row (see _draw_lollipop_group).
+        row_height_in is then sized so the domain strip actually gets the
+        real physical inches _domain_strip_height_in says it needs, rather
+        than a fixed guess independent of how many label rows are required.
+        """
+        fig = self._viz_stack_fig
+        fig.clf()
+        fig.patch.set_facecolor("#2b2b2b")
+
+        n = len(ptm_entries)
+        width_in = self._current_viz_stack_width_in()
+
+        max_ptm_pos = max((pos for _, pos, _ in ptm_entries), default=0)
+        max_end = max((e["end"] for e in domain_entries), default=0)
+        length = max(protein_length or 0, max_end, max_ptm_pos, 1)
+        domain_layout = self._layout_domain_labels(domain_entries, length, width_in)
+        row_height_in = self._domain_strip_height_in(domain_layout[1]) + self._WHOLE_PROTEIN_LOLLIPOP_HEIGHT_IN
+
+        total_height_in = 0.6 + n * row_height_in
+        dpi = fig.get_dpi()
+        fig.set_size_inches(width_in, total_height_in)
+
+        margin_in = 0.3
+        outer_gs = fig.add_gridspec(
+            n, 1, hspace=0.9,
+            left=0.08, right=0.97,
+            top=1 - margin_in / total_height_in,
+            bottom=margin_in / total_height_in,
+        )
+
+        token = object()
+        self._viz_stack_build_token = token
+        batch_size = 3
+
+        def _build_batch(start: int) -> None:
+            if self._viz_stack_build_token is not token:
+                return  # superseded by a newer render (protein/mode changed mid-build)
+            end = min(start + batch_size, n)
+            for i in range(start, end):
+                ptm_site, ptm_pos, mut_df = ptm_entries[i]
+                ax_local = self._draw_lollipop_group(
+                    fig, outer_gs[i, 0], gene, ptm_site, ptm_pos, mut_df, local_window,
+                    domain_entries, length, domain_layout, row_height_in,
+                )
+                ax_local.set_title(str(ptm_site), fontsize=10, color="#dcdcdc")
+            if end < n:
+                self.after(1, _build_batch, end)
+            else:
+                self._finish_whole_protein_stack(gene, uid, n, dpi, width_in, total_height_in)
+
+        _build_batch(0)
+
+    def _finish_whole_protein_stack(self, gene: str, uid: str, n: int, dpi: float,
+                                     width_in: float, total_height_in: float) -> None:
+        self._viz_stack_title_label.configure(text=f"{gene} — {uid} — {n} PTM site(s)")
+
+        # matplotlib doesn't resize the Tk widget when the Figure's own size
+        # changes — set it explicitly before drawing so the scrollable
+        # frame's content (and therefore its scroll range) actually grows.
+        self._viz_stack_canvas.get_tk_widget().configure(
+            width=int(width_in * dpi), height=int(total_height_in * dpi),
+        )
+        self._viz_stack_canvas.draw()
+
+        self._viz_status.configure(
+            text=f"{n} PTM site(s) for {gene} ({uid})", text_color="gray60",
+        )
+
+    def _save_viz_plot(self) -> None:
+        whole = self._viz_view_mode_var.get() == "Whole protein"
+        fig = self._viz_stack_fig if whole else self._viz_fig
+        label = self._viz_protein_combo.get() if whole else self._viz_combo.get()
+
+        if not fig.axes:
+            self._viz_status.configure(text="Select something to plot before saving.", text_color=_RED)
+            return
         safe = re.sub(r"[^\w-]+", "_", label).strip("_") or "lollipop"
         out_dir = self._output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"lollipop_{safe}.png"
-        self._viz_fig.savefig(out_path, dpi=200, facecolor=self._viz_fig.get_facecolor(), bbox_inches="tight")
+        fig.savefig(out_path, dpi=200, facecolor=fig.get_facecolor(), bbox_inches="tight")
         self._viz_status.configure(text=f"Saved to {out_path}", text_color=_GREEN)

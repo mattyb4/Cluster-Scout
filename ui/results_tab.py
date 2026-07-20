@@ -713,6 +713,7 @@ class ResultsTabMixin:
                 "bind": row.get("ptm_is_binding", ""),
                 "maxlin": max_linear_dist,
                 "lin_dist_raw": row.get("morethan5_linear_distance", ""),
+                "ptm_domain": row.get("ptm_domain", ""),
             }
             values = [i] + [values_map.get(c, "") for c in _PTM_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
@@ -856,6 +857,7 @@ class ResultsTabMixin:
                     "ptm_plddt": "",
                     "mut_aiupred_gen": "",
                     "mut_aiupred_bind": "",
+                    "mut_domain": "",
                 }
                 values = [i] + [per_row.get(c, "") for c in _MUT_TV_SRC_IDS]
                 rows.append((str(i), values, "odd" if i % 2 else "even"))

@@ -59,12 +59,13 @@ Computes 3D distances between PTM sites and mutation hotspots using the AlphaFol
 
 ### Step 4: Annotate Results
 
-Adds four types of annotations to each PTM site:
+Adds five types of annotations to each PTM site:
 
 - **14-3-3 binding predictions** — Queries the 14-3-3-Pred API and cross-references experimentally confirmed interactors (Ser/Thr sites only)
 - **PolyPhen-2 scores** — Queries myvariant.info for pathogenicity predictions on each mutation
 - **Kinase predictions** — Uses the Kinase Library to predict the top 5 upstream kinases for each phosphorylation site (Ser/Thr/Tyr sites only)
 - **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue
+- **InterPro functional domains** — Queries the InterPro REST API for curated domain/family/site entries on each protein, then reports which entry (if any) contains the PTM site's or mutation's specific residue position
 
 ---
 
@@ -142,5 +143,6 @@ The pipeline caches data to speed up subsequent runs:
 | PolyPhen-2 scores | `data/cache/polyphen.tsv` | Per-mutation pathogenicity |
 | Kinase predictions | `data/cache/kinase_predictions.tsv` | Per-sequence-window kinase scores |
 | AIUPred disorder | `data/cache/aiupred_disorder.tsv` | Per-residue disorder/binding scores |
+| InterPro domains | `data/cache/interpro_domains.tsv` | Per-protein functional domain/family/site entries |
 
 All caches are automatically populated on first run and reused on subsequent runs. Use **Manage Cache** on the Pipeline tab to clear individual caches (or all of them) and force fresh lookups.

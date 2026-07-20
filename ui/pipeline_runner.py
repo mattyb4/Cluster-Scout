@@ -442,6 +442,7 @@ class PipelineRunnerMixin:
     _TIME_PER_PP_FETCH = 0.05           # 10 concurrent workers
     _TIME_PER_KINASE_PREDICT = 0.5
     _TIME_PER_AIUPRED_FETCH = 2.0       # per-protein REST call, sequential
+    _TIME_PER_INTERPRO_FETCH = 0.3      # 5 concurrent workers
     _TIME_PER_PROTEIN_STEP3 = 0.35
     _TIME_STEP1_BASE = 40               # base time for filtering/merging
     _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
@@ -558,14 +559,26 @@ class PipelineRunnerMixin:
                     pass
             uncached_aiupred = max(0, n_proteins - cached_aiupred)
 
+            # InterPro — one row per protein
+            cached_interpro = 0
+            interpro_cache = cache_dir / "interpro_domains.tsv"
+            if interpro_cache.exists():
+                try:
+                    cached_interpro = len(pd.read_csv(interpro_cache, sep="\t", dtype=str))
+                except Exception:
+                    pass
+            uncached_interpro = max(0, n_proteins - cached_interpro)
+
             self._q("log", f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
                     f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
-                    f"{cached_aiupred}/{n_proteins} AIUPred cached")
+                    f"{cached_aiupred}/{n_proteins} AIUPred cached, "
+                    f"{cached_interpro}/{n_proteins} InterPro cached")
 
             step4_est = (uncached_1433 * self._TIME_PER_1433_FETCH
                          + max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
                          + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT
                          + uncached_aiupred * self._TIME_PER_AIUPRED_FETCH
+                         + uncached_interpro * self._TIME_PER_INTERPRO_FETCH
                          + self._TIME_STEP4_BASE)
 
         total_est = step1_est + step2_est + step3_est + step4_est

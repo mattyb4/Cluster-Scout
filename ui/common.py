@@ -5,6 +5,7 @@ scripts: one shared-utilities module, imported by every ui/*.py file.
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sys
@@ -24,6 +25,7 @@ from pipeline_utils import (  # noqa: E402
     COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES, fmt_time as _fmt_time,
     validate_cosmic_file, validate_ptmd_file, validate_1433_file,
+    get_protein_length,
 )
 
 # The 14-3-3 confirmed-interactors file isn't listed here: unlike COSMIC/PTMD,
@@ -263,6 +265,7 @@ _CACHE_ITEMS = [
     ("Step 4", "PolyPhen-2 scores",      _CACHE_DIR / "polyphen.tsv",                False),
     ("Step 4", "Kinase predictions",     _CACHE_DIR / "kinase_predictions.tsv",      False),
     ("Step 4", "AIUPred disorder",       _CACHE_DIR / "aiupred_disorder.tsv",        False),
+    ("Step 4", "InterPro domains",       _CACHE_DIR / "interpro_domains.tsv",        False),
 ]
 
 
@@ -299,6 +302,57 @@ _PP_COLORS = {
 _PTM_MARKER_COLOR = _BLUE
 _NEEDLE_DEFAULT_COLOR = "#888888"
 
+# Domain-map diagram (Visualization tab, whole-protein view): color and lane
+# per InterPro entry type. Lane groups by specificity (0 = broadest,
+# rendered lowest) so a specific domain nested inside a broader
+# family/superfamily call — a routine occurrence, not an edge case — stays
+# visually distinguishable rather than overdrawing the same strip. Types not
+# listed fall back to _DOMAIN_TYPE_FALLBACK_COLOR / lane 1.
+_DOMAIN_TYPE_COLORS: dict[str, str] = {
+    "homologous_superfamily": _GRAY,
+    "family": _GREEN,
+    "domain": _BLUE,
+    "repeat": "#e67e22",
+    "conserved_site": _YELLOW,
+    "active_site": _RED,
+    "binding_site": "#9b59b6",
+    "ptm": _PTM_MARKER_COLOR,
+}
+_DOMAIN_TYPE_LANES: dict[str, int] = {
+    "homologous_superfamily": 0,
+    "family": 0,
+    "domain": 1,
+    "repeat": 1,
+    "conserved_site": 2,
+    "active_site": 2,
+    "binding_site": 2,
+    "ptm": 2,
+}
+_DOMAIN_TYPE_FALLBACK_COLOR = "#5a5a5a"
+_DOMAIN_TYPE_FALLBACK_LANE = 1
+
+
+def _load_interpro_entries(uid: str) -> list[dict]:
+    """Read cached InterPro domain/family/site entries for one protein.
+
+    Returns [] if the cache doesn't exist or has no row for this UniProt ID
+    (e.g. results predate the InterPro annotation phase, or that API call
+    failed for this protein) — callers should treat that as "no domain data
+    available", not an error.
+    """
+    cache_file = _CACHE_DIR / "interpro_domains.tsv"
+    if not cache_file.exists():
+        return []
+    with cache_file.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if row.get("uniprot_id") == uid:
+                try:
+                    return json.loads(row.get("entries_json", "[]"))
+                except Exception:
+                    return []
+    return []
+
 # Full column registries for the Results-tab treeviews: (label, col_id, width,
 # numeric, default_visible). default_visible=True columns are shown out of the
 # box; the rest are available via the Columns picker (ResultsTabMixin
@@ -333,6 +387,7 @@ _PTM_TV_COLS = [
     ("Max lin. dist.",       "maxlin",            90, True,  True),
     ("PTM pLDDT",            "ptm_plddt",         90, True,  False),
     ("Linear distances",     "lin_dist_raw",     150, False, False),
+    ("PTM domain",           "ptm_domain",       180, False, False),
 ]
 
 _MUT_TV_COLS = [
@@ -350,7 +405,7 @@ _MUT_TV_COLS = [
     ("Confirmed disrupting", "confirmed_disrupt",150, False, False),
     ("Mut AIUPred gen.",     "mut_aiupred_gen",   120, True,  False),
     ("Mut AIUPred bind.",    "mut_aiupred_bind",  120, True,  False),
-    
+    ("Mutation domain",      "mut_domain",       180, False, False),
 ]
 
 # Column-picker hover help, keyed by col_id. Two separate dicts (not one
@@ -420,6 +475,11 @@ _PTM_COL_HELP: dict[str, str] = {
               "3D-close mutation actually is.",
     "lin_dist_raw": "Linear (sequence) distance from this PTM site to each "
                     "individual > 5 pos mutation.",
+    "ptm_domain": "InterPro functional domain(s) (name, type, and residue "
+                  "range) containing this PTM site's position, if any. A "
+                  "residue can fall inside more than one entry, e.g. a "
+                  "specific domain nested inside a broader superfamily call "
+                  "- all are shown, semicolon-separated.",
 }
 
 _MUT_COL_HELP: dict[str, str] = {
@@ -457,6 +517,11 @@ _MUT_COL_HELP: dict[str, str] = {
     "ptm_plddt": "AlphaFold's per-residue confidence (pLDDT, 0-100) at the "
                  "PTM site's position - not shown in the PTM Sites table, "
                  "so it's kept here.",
+    "mut_domain": "InterPro functional domain(s) (name, type, and residue "
+                  "range) containing this mutation's position, if any. A "
+                  "residue can fall inside more than one entry, e.g. a "
+                  "specific domain nested inside a broader superfamily call "
+                  "- all are shown, semicolon-separated.",
 }
 
 # df_long column names for every _MUT_TV_COLS entry that's a direct pass-through
@@ -476,6 +541,7 @@ _MUT_LONG_SRC_MAP = {
     "mut_aiupred_gen": "mut_aiupred_general",
     "mut_aiupred_bind": "mut_aiupred_binding",
     "ptm_plddt": "ptm_plddt",
+    "mut_domain": "mutation_domain",
 }
 
 

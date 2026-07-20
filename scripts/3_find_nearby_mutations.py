@@ -498,6 +498,7 @@ def main():
             "1433_predicted", "1433_predicted_consensus", "1433_confirmed", "kinase_predictions",
             "ptm_aiupred_general", "ptm_aiupred_binding", "ptm_is_disordered", "ptm_is_binding",
             "mut_aiupred_general", "mut_aiupred_binding", "mut_is_disordered", "mut_is_binding",
+            "ptm_domain", "mutation_domain",
         ]
 
         long_handle = LONG_OUTPUT_PATH.open("w", encoding="utf-16", newline="")
@@ -701,6 +702,8 @@ def main():
                                     "",  # mut_aiupred_binding (filled by step 4)
                                     "",  # mut_is_disordered (filled by step 4)
                                     "",  # mut_is_binding (filled by step 4)
+                                    "",  # ptm_domain (filled by step 4)
+                                    "",  # mutation_domain (filled by step 4)
                                 ])
 
             print(f"Wrote nearby mutation data to {OUTPUT_PATH}")

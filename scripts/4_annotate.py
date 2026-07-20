@@ -37,7 +37,7 @@ PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 
-_NUM_PHASES = 4
+_NUM_PHASES = 5
 
 
 def _emit_progress(phase: int, phase_pct: float, desc: str) -> None:
@@ -767,6 +767,115 @@ def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Phase 5: InterPro functional domains
+# ═════════════════════════════════════════════════════════════════════════════
+
+_INTERPRO_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "interpro_domains.tsv"
+_INTERPRO_API_URL = "https://www.ebi.ac.uk/interpro/api/entry/interpro/protein/uniprot/{uid}/"
+_INTERPRO_MAX_WORKERS = 5
+
+
+def _interpro_load_cache() -> dict[str, list[dict]]:
+    """Load cached InterPro entries. Returns {uniprot_id: [{"name","type","start","end"}, ...]}."""
+    if not _INTERPRO_CACHE_FILE.exists():
+        return {}
+    try:
+        df = pd.read_csv(_INTERPRO_CACHE_FILE, sep="\t", dtype=str, keep_default_na=False)
+    except Exception:
+        return {}
+    cache: dict[str, list[dict]] = {}
+    for _, row in df.iterrows():
+        uid = str(row.get("uniprot_id", ""))
+        if not uid:
+            continue
+        try:
+            cache[uid] = json.loads(row.get("entries_json", "[]"))
+        except Exception:
+            cache[uid] = []
+    return cache
+
+
+def _interpro_save_cache(cache: dict[str, list[dict]]) -> None:
+    _INTERPRO_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"uniprot_id": uid, "entries_json": json.dumps(entries)}
+        for uid, entries in cache.items()
+    ]
+    pd.DataFrame(rows, columns=["uniprot_id", "entries_json"]).to_csv(
+        _INTERPRO_CACHE_FILE, sep="\t", index=False
+    )
+
+
+def fetch_interpro_domains(uniprot_id: str) -> list[dict]:
+    """Fetch curated InterPro entries (domains/families/sites/etc.) for one protein.
+
+    Queries /entry/interpro/ (curated InterPro-integrated entries only, not
+    every individual member-database signature under /entry/all/ — the
+    latter returns many overlapping near-duplicates, e.g. Pfam, CDD, and
+    PROSITE each separately flagging essentially the same domain).
+
+    Returns a list of {"name", "type", "start", "end"} dicts, one per
+    (entry, fragment) pair — an entry can have multiple discontinuous
+    fragments, each treated as its own range for containment checks.
+    """
+    entries: list[dict] = []
+    url = _INTERPRO_API_URL.format(uid=uniprot_id)
+    try:
+        while url:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            for result in data.get("results", []):
+                md = result.get("metadata", {})
+                name = md.get("name", "")
+                etype = md.get("type", "")
+                for protein in result.get("proteins", []):
+                    for loc in protein.get("entry_protein_locations", []):
+                        for frag in loc.get("fragments", []):
+                            start, end = frag.get("start"), frag.get("end")
+                            if start is not None and end is not None:
+                                entries.append({"name": name, "type": etype, "start": start, "end": end})
+            url = data.get("next")
+    except Exception:
+        return entries
+    return entries
+
+
+def run_interpro_phase(df: pd.DataFrame) -> dict[str, list[dict]]:
+    """Phase 5: fetch InterPro functional-domain entries for each protein."""
+    print("\n── Phase 5: InterPro functional domains ──")
+    cache = _interpro_load_cache()
+    uniprots = [u for u in df["UniProt"].unique() if u]
+    need = [u for u in uniprots if u not in cache]
+
+    if not need:
+        print(f"  all {len(uniprots)} proteins cached")
+    else:
+        print(f"  Fetching {len(need)} proteins")
+        with ThreadPoolExecutor(max_workers=_INTERPRO_MAX_WORKERS) as pool:
+            futures = {pool.submit(fetch_interpro_domains, uid): uid for uid in need}
+            for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="  InterPro"), 1):
+                uid = futures[future]
+                cache[uid] = future.result()
+                _emit_progress(4, i / max(len(need), 1) * 100, f"InterPro {uid}: {i}/{len(need)}")
+        _interpro_save_cache(cache)
+
+    return {uid: cache.get(uid, []) for uid in uniprots}
+
+
+def find_domain_at_position(entries: list[dict], position: int | None) -> str:
+    """Return a "name (type, start-end)" string for every InterPro entry
+    containing *position*, semicolon-joined (a residue can legitimately fall
+    inside more than one entry, e.g. a specific domain nested inside a
+    broader homologous-superfamily call), or "" if none / position is None.
+    """
+    if position is None:
+        return ""
+    hits = [e for e in entries if e["start"] <= position <= e["end"]]
+    return "; ".join(f"{e['name']} ({e['type']}, {e['start']}-{e['end']})" for e in hits)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Long-format annotation
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -779,6 +888,7 @@ def annotate_long_format(
     seq_maps: dict,
     kin_cache: dict,
     disorder_maps: dict | None = None,
+    domain_maps: dict | None = None,
 ) -> None:
     """Fill annotation columns in the long-format PTM/mutation table in-place."""
     pred_1433, consensus_1433, confirmed_1433 = [], [], []
@@ -787,6 +897,7 @@ def annotate_long_format(
     _ATYPES = ("general", "binding")
     ptm_disorder: dict[str, list] = {t: [] for t in _ATYPES}
     mut_disorder: dict[str, list] = {t: [] for t in _ATYPES}
+    ptm_domains, mut_domains = [], []
 
     for _, row in df.iterrows():
         uid = str(row.get("uniprot_id", "") or "")
@@ -838,6 +949,15 @@ def annotate_long_format(
                 ptm_disorder[t].append("")
                 mut_disorder[t].append("")
 
+        # InterPro functional domains — same ptm_pos/mut_pos computed above
+        if domain_maps is not None:
+            entries = domain_maps.get(uid, [])
+            ptm_domains.append(find_domain_at_position(entries, ptm_pos))
+            mut_domains.append(find_domain_at_position(entries, mut_pos))
+        else:
+            ptm_domains.append("")
+            mut_domains.append("")
+
     df["polyphen_score"] = pp_scores
     df["polyphen_class"] = pp_classes
     df["1433_predicted"] = pred_1433
@@ -859,6 +979,8 @@ def annotate_long_format(
     df["mut_is_binding"] = [
         "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["binding"]
     ]
+    df["ptm_domain"] = ptm_domains
+    df["mutation_domain"] = mut_domains
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -923,6 +1045,18 @@ def main() -> None:
         lambda v: "yes" if v and float(v) > 0.5 else "no"
     )
 
+    t0 = time.time()
+    domain_maps = run_interpro_phase(df)
+    print(f"  Phase 5 (InterPro) completed in {fmt_time(time.time() - t0)}")
+    col_vals = []
+    for _, row in df.iterrows():
+        uid = str(row.get("UniProt", "") or "")
+        ptm_site = str(row.get("ptm_site", "") or "")
+        m = SITE_RE.match(ptm_site.strip()) if ptm_site else None
+        pos = int(m.group(2)) if m else None
+        col_vals.append(find_domain_at_position(domain_maps.get(uid, []), pos))
+    df["ptm_domain"] = col_vals
+
     if args.pp_exclude:
         df = apply_polyphen_filter(df, args.pp_exclude)
 
@@ -937,7 +1071,7 @@ def main() -> None:
         print(f"{len(df_long)} rows")
         annotate_long_format(
             df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache,
-            disorder_maps,
+            disorder_maps, domain_maps,
         )
         if args.pp_exclude:
             before = len(df_long)

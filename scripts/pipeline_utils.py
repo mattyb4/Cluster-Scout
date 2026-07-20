@@ -204,6 +204,31 @@ def get_plddt_map(chain) -> dict[int, float]:
     return {int(ca.res_id[i]): float(ca.b_factor[i]) for i in range(len(ca))}
 
 
+def get_protein_length(uniprot_dir: Path) -> int | None:
+    """Return the highest modeled residue position across all AlphaFold
+    fragments for this protein, or None if no CIFs are found.
+
+    AlphaFold fragment numbering is continuous in canonical UniProt
+    coordinates (a second fragment continues from where the first left off,
+    rather than resetting to 1 — see export_ca_coordinates.py, which relies
+    on the same fact), so this is a reliable proxy for canonical protein
+    length without a separate UniProt lookup.
+    """
+    cif_files = find_canonical_cifs(uniprot_dir)
+    if not cif_files:
+        return None
+    max_pos = 0
+    for cif_file in cif_files:
+        chain = load_first_chain(cif_file)
+        if chain is None:
+            continue
+        ca_mask = chain.atom_name == "CA"
+        ca = chain[ca_mask]
+        if len(ca):
+            max_pos = max(max_pos, int(ca.res_id.max()))
+    return max_pos or None
+
+
 def load_pae_matrix(uniprot_dir: Path):
     """Load the PAE matrix JSON for the canonical model, or return None."""
     uid = uniprot_dir.name
@@ -322,8 +347,8 @@ PTM_PROXIMITY_STEPS = [
      "Downloading AlphaFold CIF models and PAE files"),
     ("Find nearby mutations and compute distances",
      "Finding nearby mutations and computing distances"),
-    ("Annotate results (14-3-3, PolyPhen-2, kinase, AIUPred predictions)",
-     "Annotating results (14-3-3, PolyPhen-2, kinase, AIUPred predictions)"),
+    ("Annotate results (14-3-3, PolyPhen-2, kinase, AIUPred, InterPro predictions)",
+     "Annotating results (14-3-3, PolyPhen-2, kinase, AIUPred, InterPro predictions)"),
 ]
 
 MUTATION_CLUSTERING_STEPS = [
