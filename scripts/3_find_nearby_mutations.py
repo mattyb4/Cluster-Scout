@@ -371,6 +371,7 @@ def main():
     LONG_OUTPUT_PATH = output_dir / "ptm_mutation_proximity_long.tsv"
     SKIPPED_PATH = output_dir / "logs" / "ptm_skipped.tsv"
     CLUSTER_OUTPUT_PATH = output_dir / "mutation_cluster_db.tsv"
+    CLUSTER_LONG_PATH = output_dir / "mutation_cluster_long.tsv"
     CLUSTER_SKIPPED_PATH = output_dir / "logs" / "mutation_cluster_skipped.tsv"
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SKIPPED_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -395,93 +396,130 @@ def main():
 
         all_cluster_uniprots = {row["uniprot_id"] for row in get_ptm_rows() if row.get("uniprot_id")}
 
-        with CLUSTER_OUTPUT_PATH.open("w", encoding="utf-16", newline="") as handle, \
-             CLUSTER_SKIPPED_PATH.open("w", encoding="utf-16", newline="") as skip_handle:
+        long_handle = CLUSTER_LONG_PATH.open("w", encoding="utf-16", newline="")
+        long_writer = csv.writer(long_handle, delimiter="\t")
+        long_writer.writerow([
+            "UniProt", "gene", "anchor_mutation", "anchor_position",
+            "mutation", "mutation_position", "sequence_distance",
+            "distance_angstrom", "pair_pae", "patient_count", "mutation_plddt",
+        ])
 
-            writer = csv.writer(handle, delimiter="\t")
-            skip_writer = csv.writer(skip_handle, delimiter="\t")
+        try:
+            with CLUSTER_OUTPUT_PATH.open("w", encoding="utf-16", newline="") as handle, \
+                 CLUSTER_SKIPPED_PATH.open("w", encoding="utf-16", newline="") as skip_handle:
 
-            writer.writerow([
-                "UniProt",
-                "gene",
-                "anchor_mutation",
-                "nearby_mutations",
-                "nearby_mutation_count",
-                "unique_nearby_position_count",
-            ])
-            skip_writer.writerow(["UniProt", "gene", "skip_reason", "detail"])
+                writer = csv.writer(handle, delimiter="\t")
+                skip_writer = csv.writer(skip_handle, delimiter="\t")
 
-            # Log proteins in input with no downloaded directory
-            for uniprot in sorted(all_cluster_uniprots - dirs_present):
-                if args.uniprot and uniprot != args.uniprot:
-                    continue
-                gene = parse_gene_name(uniprot)
-                skip_writer.writerow([uniprot, gene, "no_afdb_directory",
-                                       "protein not found in AlphaFold DB (no download directory)"])
+                writer.writerow([
+                    "UniProt",
+                    "gene",
+                    "anchor_mutation",
+                    "anchor_position",
+                    "anchor_plddt",
+                    "nearby_mutations",
+                    "nearby_mutation_count",
+                    "unique_nearby_position_count",
+                    "total_nearby_patient_count",
+                ])
+                skip_writer.writerow(["UniProt", "gene", "skip_reason", "detail"])
 
-            uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir()) if d.is_dir()]
-            for uniprot_dir in tqdm(uniprot_dirs, desc="Scanning structures"):
-                uniprot = uniprot_dir.name
-                if args.uniprot and uniprot != args.uniprot:
-                    continue
-                gene = parse_gene_name(uniprot)
-                mutation_entries = parse_mutation_positions(uniprot=uniprot)
-                if len(mutation_entries) < 2:
-                    continue
+                # Log proteins in input with no downloaded directory
+                for uniprot in sorted(all_cluster_uniprots - dirs_present):
+                    if args.uniprot and uniprot != args.uniprot:
+                        continue
+                    gene = parse_gene_name(uniprot)
+                    skip_writer.writerow([uniprot, gene, "no_afdb_directory",
+                                           "protein not found in AlphaFold DB (no download directory)"])
 
-                model_file = find_model_file(uniprot_dir)
-                if model_file is None:
-                    skip_writer.writerow([uniprot, gene, "no_canonical_cif",
-                                           "AFDB has only isoform models, no canonical sequence model"])
-                    tqdm.write(f"  {uniprot}: no canonical CIF file found")
-                    continue
+                uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir()) if d.is_dir()]
+                for uniprot_dir in tqdm(uniprot_dirs, desc="Scanning structures"):
+                    uniprot = uniprot_dir.name
+                    if args.uniprot and uniprot != args.uniprot:
+                        continue
+                    gene = parse_gene_name(uniprot)
+                    mutation_entries = parse_mutation_positions(uniprot=uniprot)
+                    if len(mutation_entries) < 2:
+                        continue
 
-                chain = load_first_chain(model_file)
-                if chain is None:
-                    continue
+                    model_file = find_model_file(uniprot_dir)
+                    if model_file is None:
+                        skip_writer.writerow([uniprot, gene, "no_canonical_cif",
+                                               "AFDB has only isoform models, no canonical sequence model"])
+                        tqdm.write(f"  {uniprot}: no canonical CIF file found")
+                        continue
 
-                pos_to_aa: dict[int, str] = {}
-                for atom in chain:
-                    if atom.res_id not in pos_to_aa:
-                        pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
+                    chain = load_first_chain(model_file)
+                    if chain is None:
+                        continue
 
-                plddt_map = get_plddt_map(chain) if MIN_PLDDT > 0 else {}
+                    pos_to_aa: dict[int, str] = {}
+                    for atom in chain:
+                        if atom.res_id not in pos_to_aa:
+                            pos_to_aa[atom.res_id] = AA3TO1.get(atom.res_name, "?")
 
-                safe_length = parse_isoform_safe_length(uniprot)
-                mutation_entries = [
-                    (mut + "(isoform?)", pos) if (
-                        pos not in pos_to_aa
-                        or pos_to_aa[pos] != mut[0]
-                        or (safe_length is not None and pos > safe_length)
-                    )
-                    else (mut, pos)
-                    for mut, pos in mutation_entries
-                ]
-                if MIN_PLDDT > 0:
-                    before = len(mutation_entries)
-                    mutation_entries = [(m, p) for m, p in mutation_entries
-                                        if plddt_map.get(p, 0) >= MIN_PLDDT]
-                    if before != len(mutation_entries):
-                        tqdm.write(f"  {uniprot}: filtered {before - len(mutation_entries)} "
-                                   f"mutations below pLDDT {MIN_PLDDT}")
+                    plddt_map = get_plddt_map(chain)
 
-                if len(mutation_entries) < 2:
-                    continue
+                    safe_length = parse_isoform_safe_length(uniprot)
+                    mutation_entries = [
+                        (mut + "(isoform?)", pos) if (
+                            pos not in pos_to_aa
+                            or pos_to_aa[pos] != mut[0]
+                            or (safe_length is not None and pos > safe_length)
+                        )
+                        else (mut, pos)
+                        for mut, pos in mutation_entries
+                    ]
+                    if MIN_PLDDT > 0:
+                        before = len(mutation_entries)
+                        mutation_entries = [(m, p) for m, p in mutation_entries
+                                            if plddt_map.get(p, 0) >= MIN_PLDDT]
+                        if before != len(mutation_entries):
+                            tqdm.write(f"  {uniprot}: filtered {before - len(mutation_entries)} "
+                                       f"mutations below pLDDT {MIN_PLDDT}")
 
-                pae_matrix = load_pae_matrix(uniprot_dir)
-                clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF, max_pae=MAX_PAE)
+                    if len(mutation_entries) < 2:
+                        continue
 
-                for (anchor_mut, anchor_pos), nearby in sorted(clusters.items(), key=lambda x: (x[0][1], x[0][0])):
-                    writer.writerow([
-                        uniprot,
-                        gene,
-                        anchor_mut,
-                        format_mutations(nearby),
-                        len(nearby),
-                        unique_mutation_position_count(nearby),
-                    ])
+                    patient_counts = parse_mutation_patient_counts(uniprot)
+                    pae_matrix = load_pae_matrix(uniprot_dir)
+                    clusters = find_mutation_clusters(chain, mutation_entries, pae_matrix=pae_matrix, cutoff=DISTANCE_CUTOFF, max_pae=MAX_PAE)
+
+                    for (anchor_mut, anchor_pos), nearby in sorted(clusters.items(), key=lambda x: (x[0][1], x[0][0])):
+                        anchor_plddt_val = plddt_map.get(anchor_pos)
+                        writer.writerow([
+                            uniprot,
+                            gene,
+                            anchor_mut,
+                            anchor_pos,
+                            f"{anchor_plddt_val:.1f}" if anchor_plddt_val is not None else "",
+                            format_mutations(nearby),
+                            len(nearby),
+                            unique_mutation_position_count(nearby),
+                            total_patient_count(nearby, patient_counts),
+                        ])
+
+                        for hit in sorted(nearby, key=lambda h: (h["mutation_pos"], h["mutation"])):
+                            mut_clean = hit["mutation"].replace("(isoform?)", "")
+                            mut_plddt_val = plddt_map.get(hit["mutation_pos"])
+                            long_writer.writerow([
+                                uniprot,
+                                gene,
+                                anchor_mut,
+                                anchor_pos,
+                                hit["mutation"],
+                                hit["mutation_pos"],
+                                abs(hit["mutation_pos"] - anchor_pos),
+                                f"{hit['distance']:.2f}",
+                                f"{hit['pae']:.1f}" if hit["pae"] is not None else "",
+                                patient_counts.get((mut_clean, hit["mutation_pos"]), 0),
+                                f"{mut_plddt_val:.1f}" if mut_plddt_val is not None else "",
+                            ])
+        finally:
+            long_handle.close()
 
         print(f"Wrote mutation cluster data to {CLUSTER_OUTPUT_PATH}")
+        print(f"Wrote long-format cluster pairs to {CLUSTER_LONG_PATH}")
         print(f"Wrote skipped proteins to {CLUSTER_SKIPPED_PATH}")
 
     # ── PTM-proximity mode (default) ──────────────────────────────────────────────

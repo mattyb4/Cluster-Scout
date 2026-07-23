@@ -47,10 +47,17 @@ class PipelineRunnerMixin:
 
         est = getattr(self, "_precheck_estimate", None)
         hist = self._historical_times
-        if est is not None:
-            text += f"  |  Est. total: ~{_fmt_time(est)}"
-        elif hist and len(hist) == self._total_steps:
+        # Real timing from a previous run of this exact (mode, run_type) is
+        # strictly better signal than the heuristic precheck -- it reflects
+        # this machine's actual network/CPU conditions rather than generic
+        # per-item constants. Previously the heuristic always won here (it's
+        # set right after pipeline_start, so `est is not None` was true for
+        # nearly the whole run), which meant _save_runtimes' historical data
+        # was recorded but never actually used for a later estimate.
+        if hist and len(hist) == self._total_steps:
             text += f"  |  Est. total: ~{_fmt_time(sum(hist))}"
+        elif est is not None:
+            text += f"  |  Est. total: ~{_fmt_time(est)}"
         elif self._step_times:
             avg = sum(self._step_times) / len(self._step_times)
             text += f"  |  Est. total: ~{_fmt_time(avg * self._total_steps)}"
@@ -95,6 +102,7 @@ class PipelineRunnerMixin:
         "ptm_mutation_proximity_db.tsv",
         "ptm_mutation_proximity_long.tsv",
         "mutation_cluster_db.tsv",
+        "mutation_cluster_long.tsv",
     ]
 
     @property
@@ -435,14 +443,26 @@ class PipelineRunnerMixin:
             bar.set(0)
             bar.grid_remove()
 
-    # Per-item time estimates (seconds) for runtime calculation
-    _TIME_PER_CIF_DOWNLOAD = 2.5
-    _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch
-    _TIME_PER_1433_FETCH = 0.2          # 5 concurrent workers
-    _TIME_PER_PP_FETCH = 0.05           # 10 concurrent workers
-    _TIME_PER_KINASE_PREDICT = 0.5
-    _TIME_PER_AIUPRED_FETCH = 2.0       # per-protein REST call, sequential
-    _TIME_PER_INTERPRO_FETCH = 0.3      # 5 concurrent workers
+    # Per-item time estimates (seconds) for runtime calculation. Where a step
+    # is backed by a ThreadPoolExecutor in the actual script, the raw
+    # (unamortized) per-request time is divided by that same worker count
+    # here -- these constants used to assume sequential execution for CIF
+    # downloads/AIUPred/kinase despite the scripts already running them
+    # concurrently, which was the dominant source of a ~2.7x runtime
+    # overestimate confirmed against real historical run data.
+    _CIF_DOWNLOAD_WORKERS = 6           # scripts/2_download_structures.py: _DOWNLOAD_MAX_WORKERS
+    _TIME_PER_CIF_DOWNLOAD = 2.5 / _CIF_DOWNLOAD_WORKERS
+    _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
+    _TIME_PER_ISOFORM_BATCH = 5.5       # ~10 genes per batch, sequential (1_filter.py's
+                                         # compute_isoform_safe_lengths -- calibrated
+                                         # against real cold-run step1 timing)
+    _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
+    _TIME_PER_PP_FETCH = 0.05           # already amortized, 30 concurrent workers
+    _KINASE_WORKERS = 6                 # scripts/4_annotate.py: _KIN_MAX_WORKERS
+    _TIME_PER_KINASE_PREDICT = 1.0 / _KINASE_WORKERS
+    _AIUPRED_WORKERS = 5                # scripts/4_annotate.py: _AIUPRED_MAX_WORKERS
+    _TIME_PER_AIUPRED_FETCH = 4.5 / _AIUPRED_WORKERS
+    _TIME_PER_INTERPRO_FETCH = 0.3      # already amortized, 5 concurrent workers
     _TIME_PER_PROTEIN_STEP3 = 0.35
     _TIME_STEP1_BASE = 40               # base time for filtering/merging
     _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
@@ -504,8 +524,28 @@ class PipelineRunnerMixin:
             except Exception:
                 pass
         uncached_batches = max(0, (n_proteins - cached_genes)) // 100 + 1 if n_proteins > cached_genes else 0
-        step1_est = self._TIME_STEP1_BASE + uncached_batches * self._TIME_PER_UNIPROT_BATCH
-        self._q("log", f"Step 1: {cached_genes} UniProt gene mappings cached")
+
+        # 1_filter.py's compute_isoform_safe_lengths() also runs here -- a
+        # separate, sequential, batch-of-10 UniProt lookup (plus follow-up
+        # per-gene sequence fetches for any isoform mismatches it finds) that
+        # isn't part of the gene-mapping cache above. Previously left out of
+        # this estimate entirely, which was the dominant reason step 1's
+        # estimate (~50s) undershot its real cold-run time (~465s, confirmed
+        # against Output/logs/pipeline_runtimes.json).
+        isoform_cache = cache_dir / "isoform_safe_lengths.tsv"
+        cached_isoform = 0
+        if isoform_cache.exists():
+            try:
+                cached_isoform = len(pd.read_csv(isoform_cache, sep="\t", dtype=str))
+            except Exception:
+                pass
+        uncached_isoform_genes = max(0, n_proteins - cached_isoform)
+        uncached_isoform_batches = uncached_isoform_genes // 10 + 1 if uncached_isoform_genes else 0
+
+        step1_est = (self._TIME_STEP1_BASE + uncached_batches * self._TIME_PER_UNIPROT_BATCH
+                     + uncached_isoform_batches * self._TIME_PER_ISOFORM_BATCH)
+        self._q("log", f"Step 1: {cached_genes} UniProt gene mappings cached, "
+                f"{cached_isoform} isoform-length checks cached")
 
         # Step 2: CIF downloads
         cifs_present = 0

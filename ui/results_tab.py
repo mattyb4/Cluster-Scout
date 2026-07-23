@@ -14,12 +14,28 @@ import customtkinter as ctk
 from ui.common import (
     _MUT_ENTRY_RE, _PP_LABEL, _PTM_TV_COLS, _MUT_TV_COLS, _MUT_LONG_SRC_MAP,
     _PTM_COL_HELP, _MUT_COL_HELP,
+    _ANCHOR_TV_COLS, _NEARBY_TV_COLS, _CLUSTER_LONG_SRC_MAP,
+    _ANCHOR_COL_HELP, _NEARBY_COL_HELP,
     _RED, _GREEN, _YELLOW, _BLUE,
     _load_column_prefs, _save_column_prefs, help_icon,
 )
 
 _PTM_TV_SRC_IDS = [c[1] for c in _PTM_TV_COLS if c[1] != "#col"]
 _MUT_TV_SRC_IDS = [c[1] for c in _MUT_TV_COLS if c[1] != "#col"]
+_ANCHOR_TV_SRC_IDS = [c[1] for c in _ANCHOR_TV_COLS if c[1] != "#col"]
+_NEARBY_TV_SRC_IDS = [c[1] for c in _NEARBY_TV_COLS if c[1] != "#col"]
+
+# which -> (full column registry, hover-help dict, Columns-picker title,
+# Filter-picker title). Drives _open_column_picker/_open_filter_picker's
+# dispatch across all 4 tables; the treeview/visible-cols/filters/filter-
+# button instance attrs themselves are looked up as f"_{which}_..." below,
+# since "ptm"/"mut"/"anchor"/"nearby" all follow that naming convention.
+_TV_REGISTRY = {
+    "ptm":    (_PTM_TV_COLS,    _PTM_COL_HELP,    "PTM Sites Columns",        "Filter PTM Sites"),
+    "mut":    (_MUT_TV_COLS,    _MUT_COL_HELP,    "Mutation Details Columns", "Filter Mutation Details"),
+    "anchor": (_ANCHOR_TV_COLS, _ANCHOR_COL_HELP, "Anchor Mutations Columns", "Filter Anchor Mutations"),
+    "nearby": (_NEARBY_TV_COLS, _NEARBY_COL_HELP, "Nearby Mutations Columns", "Filter Nearby Mutations"),
+}
 
 
 class ResultsTabMixin:
@@ -120,20 +136,15 @@ class ResultsTabMixin:
             tv.column(c, stretch=False)
 
     def _set_visible_columns(self, which: str, col_ids: list) -> None:
-        tv = self._ptm_tv if which == "ptm" else self._mut_tv
+        tv = getattr(self, f"_{which}_tv")
         tv.configure(displaycolumns=col_ids)
         self._disable_tv_stretch(tv)
-        if which == "ptm":
-            self._ptm_visible_cols = col_ids
-        else:
-            self._mut_visible_cols = col_ids
+        setattr(self, f"_{which}_visible_cols", col_ids)
         _save_column_prefs(which, col_ids)
 
     def _open_column_picker(self, which: str) -> None:
-        registry = _PTM_TV_COLS if which == "ptm" else _MUT_TV_COLS
-        col_help = _PTM_COL_HELP if which == "ptm" else _MUT_COL_HELP
-        current = set(self._ptm_visible_cols if which == "ptm" else self._mut_visible_cols)
-        title = "PTM Sites Columns" if which == "ptm" else "Mutation Details Columns"
+        registry, col_help, title, _filter_title = _TV_REGISTRY[which]
+        current = set(getattr(self, f"_{which}_visible_cols"))
 
         win = ctk.CTkToplevel(self)
         win.title(title)
@@ -333,14 +344,19 @@ class ResultsTabMixin:
         return self._TEXT_FILTER_OPS
 
     def _update_filter_button_label(self, which: str) -> None:
-        btn = self._ptm_filter_button if which == "ptm" else self._mut_filter_button
-        n = len(self._ptm_filters if which == "ptm" else self._mut_filters)
+        btn = getattr(self, f"_{which}_filter_button")
+        n = len(getattr(self, f"_{which}_filters"))
         btn.configure(text=f"▽  Filter ({n})" if n else "▽  Filter")
 
+    _FILTER_TV_METHODS = {
+        "ptm": "_filter_ptm_tv", "mut": "_filter_mut_tv",
+        "anchor": "_filter_anchor_tv", "nearby": "_filter_nearby_tv",
+    }
+
     def _open_filter_picker(self, which: str) -> None:
-        registry = [c for c in (_PTM_TV_COLS if which == "ptm" else _MUT_TV_COLS) if c[1] != "#col"]
-        current_filters = self._ptm_filters if which == "ptm" else self._mut_filters
-        title = "Filter PTM Sites" if which == "ptm" else "Filter Mutation Details"
+        full_registry, _col_help, _col_title, title = _TV_REGISTRY[which]
+        registry = [c for c in full_registry if c[1] != "#col"]
+        current_filters = getattr(self, f"_{which}_filters")
         labels_by_id = {c[1]: c[0] for c in registry}
         id_by_label = {c[0]: c[1] for c in registry}
         col_labels = [c[0] for c in registry]
@@ -405,10 +421,13 @@ class ResultsTabMixin:
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(4, 10))
 
+        def _run_filter():
+            getattr(self, self._FILTER_TV_METHODS[which])()
+
         def _clear_all():
             current_filters.clear()
             self._update_filter_button_label(which)
-            (self._filter_ptm_tv if which == "ptm" else self._filter_mut_tv)()
+            _run_filter()
             win.destroy()
 
         def _apply():
@@ -422,17 +441,19 @@ class ResultsTabMixin:
                     "op": r["op_var"].get(),
                     "value": value,
                 })
-            if which == "ptm":
-                self._ptm_filters = new_filters
-            else:
-                self._mut_filters = new_filters
+            setattr(self, f"_{which}_filters", new_filters)
             self._update_filter_button_label(which)
-            (self._filter_ptm_tv if which == "ptm" else self._filter_mut_tv)()
+            _run_filter()
             win.destroy()
 
         ctk.CTkButton(btn_row, text="Clear all", width=90, command=_clear_all).pack(side="left")
         ctk.CTkButton(btn_row, text="Cancel", width=80, command=win.destroy).pack(side="right")
         ctk.CTkButton(btn_row, text="Apply", width=80, command=_apply).pack(side="right", padx=(0, 6))
+
+    def _init_visible_cols(self, which: str, registry: list) -> list:
+        known = {c[1] for c in registry}
+        saved = _load_column_prefs(which)
+        return [c for c in saved if c in known] if saved else [c[1] for c in registry if c[4]]
 
     def _build_results_tab(self, tab) -> None:
         import tkinter as tk
@@ -440,26 +461,25 @@ class ResultsTabMixin:
         self._results_df_wide = None
         self._results_df_long = None
         self._results_loaded_key = None
+        self._cluster_df_wide = None
+        self._cluster_df_long = None
+        self._cluster_loaded_key = None
         self._ptm_tv_all_rows: list = []
         self._mut_tv_all_rows: list = []
+        self._anchor_tv_all_rows: list = []
+        self._nearby_tv_all_rows: list = []
         self._tv_insert_tokens: dict = {}
         self._tv_placeholder_labels: dict = {}
         self._ptm_filters: list = []
         self._mut_filters: list = []
+        self._anchor_filters: list = []
+        self._nearby_filters: list = []
         self._setup_treeview_style()
 
-        _ptm_known = {c[1] for c in _PTM_TV_COLS}
-        _mut_known = {c[1] for c in _MUT_TV_COLS}
-        _ptm_saved = _load_column_prefs("ptm")
-        _mut_saved = _load_column_prefs("mut")
-        self._ptm_visible_cols = (
-            [c for c in _ptm_saved if c in _ptm_known] if _ptm_saved
-            else [c[1] for c in _PTM_TV_COLS if c[4]]
-        )
-        self._mut_visible_cols = (
-            [c for c in _mut_saved if c in _mut_known] if _mut_saved
-            else [c[1] for c in _MUT_TV_COLS if c[4]]
-        )
+        self._ptm_visible_cols = self._init_visible_cols("ptm", _PTM_TV_COLS)
+        self._mut_visible_cols = self._init_visible_cols("mut", _MUT_TV_COLS)
+        self._anchor_visible_cols = self._init_visible_cols("anchor", _ANCHOR_TV_COLS)
+        self._nearby_visible_cols = self._init_visible_cols("nearby", _NEARBY_TV_COLS)
 
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
@@ -467,24 +487,43 @@ class ResultsTabMixin:
         outer = ctk.CTkFrame(tab, fg_color="transparent")
         outer.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=3)
-        outer.grid_rowconfigure(3, weight=2)
+        outer.grid_rowconfigure(1, weight=1)
 
-        # ── Top panel header ──
-        top_header = ctk.CTkFrame(outer, fg_color="transparent")
-        top_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
-        ctk.CTkLabel(top_header, text="PTM Sites",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
-        self._results_status = ctk.CTkLabel(top_header, text="",
-                                             text_color="gray60",
-                                             font=ctk.CTkFont(size=11))
-        self._results_status.pack(side=tk.LEFT, padx=(12, 0))
+        # ── Mode toggle + shared Refresh/status (PTM Proximity vs Mutation
+        # Clusters data source — mirrors the Visualization tab's "Single
+        # PTM"/"Whole protein" CTkSegmentedButton grid()/grid_remove() swap
+        # between two frames built once, never rebuilt) ──
+        mode_row = ctk.CTkFrame(outer, fg_color="transparent")
+        mode_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        self._results_mode_var = ctk.StringVar(value="PTM Proximity")
+        ctk.CTkSegmentedButton(
+            mode_row, values=["PTM Proximity", "Mutation Clusters"],
+            variable=self._results_mode_var,
+            command=self._on_results_mode_change,
+        ).pack(side=tk.LEFT)
         self._refresh_button = ctk.CTkButton(
-            top_header, text="↺  Refresh", width=90, height=28,
+            mode_row, text="↺  Refresh", width=90, height=28,
             font=ctk.CTkFont(size=12),
             command=lambda: self._load_results(force=True),
         )
         self._refresh_button.pack(side=tk.RIGHT)
+        self._results_status = ctk.CTkLabel(mode_row, text="",
+                                             text_color="gray60",
+                                             font=ctk.CTkFont(size=11))
+        self._results_status.pack(side=tk.LEFT, padx=(12, 0))
+
+        # ── PTM Proximity mode: PTM Sites / Mutation Details ──
+        self._ptm_mode_frame = ctk.CTkFrame(outer, fg_color="transparent")
+        self._ptm_mode_frame.grid(row=1, column=0, sticky="nsew")
+        self._ptm_mode_frame.grid_columnconfigure(0, weight=1)
+        self._ptm_mode_frame.grid_rowconfigure(1, weight=3)
+        self._ptm_mode_frame.grid_rowconfigure(3, weight=2)
+        ptm_root = self._ptm_mode_frame
+
+        top_header = ctk.CTkFrame(ptm_root, fg_color="transparent")
+        top_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        ctk.CTkLabel(top_header, text="PTM Sites",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
         ctk.CTkButton(top_header, text="⚙  Columns", width=95, height=28,
                        font=ctk.CTkFont(size=12),
                        command=lambda: self._open_column_picker("ptm")).pack(side=tk.RIGHT, padx=(0, 6))
@@ -505,8 +544,7 @@ class ResultsTabMixin:
         self._ptm_search_entry.pack(side=tk.RIGHT, padx=(0, 12))
         self._results_ptm_search_var.trace_add("write", self._filter_ptm_tv)
 
-        # ── PTM site treeview ──
-        top_frame = ctk.CTkFrame(outer)
+        top_frame = ctk.CTkFrame(ptm_root)
         top_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
         top_frame.grid_rowconfigure(0, weight=1)
         top_frame.grid_columnconfigure(0, weight=1)
@@ -514,8 +552,7 @@ class ResultsTabMixin:
         self._ptm_tv.bind("<<TreeviewSelect>>", self._on_ptm_select)
         self._bind_treeview_zoom_override(self._ptm_tv)
 
-        # ── Detail panel header ──
-        bot_header = ctk.CTkFrame(outer, fg_color="transparent")
+        bot_header = ctk.CTkFrame(ptm_root, fg_color="transparent")
         bot_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
         ctk.CTkLabel(bot_header, text="Mutation Details",
                      font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
@@ -536,16 +573,125 @@ class ResultsTabMixin:
         self._mut_search_entry.pack(side=tk.RIGHT, padx=(0, 6))
         self._results_mut_search_var.trace_add("write", self._filter_mut_tv)
 
-        # ── Mutation detail treeview ──
-        bot_frame = ctk.CTkFrame(outer)
+        bot_frame = ctk.CTkFrame(ptm_root)
         bot_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         bot_frame.grid_rowconfigure(0, weight=1)
         bot_frame.grid_columnconfigure(0, weight=1)
         self._mut_tv = self._make_treeview(bot_frame, _MUT_TV_COLS, self._mut_visible_cols)
         self._bind_treeview_zoom_override(self._mut_tv)
 
-        # Ctrl+F focuses the PTM search box whenever the Results tab is active
+        # ── Mutation Clusters mode: Anchor Mutations / Nearby Mutations ──
+        self._cluster_mode_frame = ctk.CTkFrame(outer, fg_color="transparent")
+        self._cluster_mode_frame.grid(row=1, column=0, sticky="nsew")
+        self._cluster_mode_frame.grid_remove()
+        self._cluster_mode_frame.grid_columnconfigure(0, weight=1)
+        self._cluster_mode_frame.grid_rowconfigure(1, weight=3)
+        self._cluster_mode_frame.grid_rowconfigure(3, weight=2)
+        cluster_root = self._cluster_mode_frame
+
+        anchor_header = ctk.CTkFrame(cluster_root, fg_color="transparent")
+        anchor_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        ctk.CTkLabel(anchor_header, text="Anchor Mutations",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
+        ctk.CTkButton(anchor_header, text="⚙  Columns", width=95, height=28,
+                       font=ctk.CTkFont(size=12),
+                       command=lambda: self._open_column_picker("anchor")).pack(side=tk.RIGHT, padx=(0, 6))
+        self._anchor_filter_button = ctk.CTkButton(
+            anchor_header, text="▽  Filter", width=90, height=28,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._open_filter_picker("anchor"),
+        )
+        self._anchor_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
+        ctk.CTkButton(anchor_header, text="📈  Visualize", width=100, height=28,
+                       font=ctk.CTkFont(size=12),
+                       command=self._visualize_selected_cluster).pack(side=tk.RIGHT, padx=(0, 6))
+        self._results_anchor_search_var = ctk.StringVar(value="")
+        self._anchor_search_entry = ctk.CTkEntry(
+            anchor_header, textvariable=self._results_anchor_search_var,
+            width=220, placeholder_text="🔍 Search anchor mutations…",
+        )
+        self._anchor_search_entry.pack(side=tk.RIGHT, padx=(0, 12))
+        self._results_anchor_search_var.trace_add("write", self._filter_anchor_tv)
+
+        anchor_frame = ctk.CTkFrame(cluster_root)
+        anchor_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        anchor_frame.grid_rowconfigure(0, weight=1)
+        anchor_frame.grid_columnconfigure(0, weight=1)
+        self._anchor_tv = self._make_treeview(anchor_frame, _ANCHOR_TV_COLS, self._anchor_visible_cols)
+        self._anchor_tv.bind("<<TreeviewSelect>>", self._on_anchor_select)
+        self._bind_treeview_zoom_override(self._anchor_tv)
+
+        nearby_header = ctk.CTkFrame(cluster_root, fg_color="transparent")
+        nearby_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
+        ctk.CTkLabel(nearby_header, text="Nearby Mutations",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
+        ctk.CTkButton(nearby_header, text="⚙  Columns", width=95, height=28,
+                       font=ctk.CTkFont(size=12),
+                       command=lambda: self._open_column_picker("nearby")).pack(side=tk.RIGHT, padx=(0, 6))
+        self._nearby_filter_button = ctk.CTkButton(
+            nearby_header, text="▽  Filter", width=90, height=28,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._open_filter_picker("nearby"),
+        )
+        self._nearby_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
+        self._results_nearby_search_var = ctk.StringVar(value="")
+        self._nearby_search_entry = ctk.CTkEntry(
+            nearby_header, textvariable=self._results_nearby_search_var,
+            width=220, placeholder_text="🔍 Search nearby mutations…",
+        )
+        self._nearby_search_entry.pack(side=tk.RIGHT, padx=(0, 6))
+        self._results_nearby_search_var.trace_add("write", self._filter_nearby_tv)
+
+        nearby_frame = ctk.CTkFrame(cluster_root)
+        nearby_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        nearby_frame.grid_rowconfigure(0, weight=1)
+        nearby_frame.grid_columnconfigure(0, weight=1)
+        self._nearby_tv = self._make_treeview(nearby_frame, _NEARBY_TV_COLS, self._nearby_visible_cols)
+        self._bind_treeview_zoom_override(self._nearby_tv)
+
+        # Ctrl+F focuses the active mode's search box whenever the Results tab is active
         self.bind_all("<Control-f>", self._focus_results_search)
+
+    def _on_results_mode_change(self, _value: str = "") -> None:
+        cluster = self._results_mode_var.get() == "Mutation Clusters"
+        if cluster:
+            self._ptm_mode_frame.grid_remove()
+            self._cluster_mode_frame.grid()
+        else:
+            self._cluster_mode_frame.grid_remove()
+            self._ptm_mode_frame.grid()
+        self._refresh_results_status()
+        self._load_results()
+
+    def _refresh_results_status(self) -> None:
+        """Recompute the shared status label for whichever mode is currently
+        selected, without doing a fresh file read -- used after a mode
+        toggle (where both datasets may already be loaded, just not shown).
+        """
+        if self._results_mode_var.get() == "PTM Proximity":
+            if self._results_df_wide is None:
+                return
+            n_sites = len(self._results_df_wide)
+            n_proteins = (self._results_df_wide["UniProt"].nunique()
+                          if "UniProt" in self._results_df_wide.columns else "?")
+            long_note = (" · long format available" if self._results_df_long is not None
+                         else " · enable long format for per-mutation detail")
+            self._results_status.configure(
+                text=f"{n_sites} PTM sites · {n_proteins} proteins{long_note}",
+                text_color="gray60",
+            )
+        else:
+            if self._cluster_df_wide is None:
+                return
+            n_anchors = len(self._cluster_df_wide)
+            n_proteins = (self._cluster_df_wide["UniProt"].nunique()
+                          if "UniProt" in self._cluster_df_wide.columns else "?")
+            long_note = (" · long format available" if self._cluster_df_long is not None
+                         else " · enable long format for per-mutation detail")
+            self._results_status.configure(
+                text=f"{n_anchors} anchor mutations · {n_proteins} proteins{long_note}",
+                text_color="gray60",
+            )
 
     def _filter_ptm_tv(self, *_args) -> None:
         self._filter_treeview(self._ptm_tv, self._ptm_tv_all_rows,
@@ -555,16 +701,42 @@ class ResultsTabMixin:
         self._filter_treeview(self._mut_tv, self._mut_tv_all_rows,
                                self._results_mut_search_var.get(), self._mut_filters)
 
+    def _filter_anchor_tv(self, *_args) -> None:
+        self._filter_treeview(self._anchor_tv, self._anchor_tv_all_rows,
+                               self._results_anchor_search_var.get(), self._anchor_filters)
+
+    def _filter_nearby_tv(self, *_args) -> None:
+        self._filter_treeview(self._nearby_tv, self._nearby_tv_all_rows,
+                               self._results_nearby_search_var.get(), self._nearby_filters)
+
     def _focus_results_search(self, event=None):
-        """Ctrl+F: focus the PTM search box, but only while the Results tab is showing."""
+        """Ctrl+F: focus the active mode's search box, but only while the Results tab is showing."""
         if self._tabview.get() == "Results":
-            self._ptm_search_entry.focus_set()
+            entry = (self._ptm_search_entry if self._results_mode_var.get() == "PTM Proximity"
+                     else self._anchor_search_entry)
+            entry.focus_set()
             return "break"
+
+    @staticmethod
+    def _mtime_key(path):
+        try:
+            return (path, path.stat().st_mtime)
+        except OSError:
+            return (path, None)
 
     def _load_results(self, force: bool = False) -> None:
         """Show a 'Loading data…' placeholder immediately, then do the actual
-        file read/populate — unless *force* is False and the output file
-        hasn't changed since the last load, in which case this is a no-op.
+        file read/populate — unless *force* is False and neither output file
+        has changed since its last load, in which case this is a no-op.
+
+        Loads BOTH data sources (PTM Proximity and Mutation Clusters)
+        independently on every call, regardless of which mode is currently
+        selected in the tab -- so switching the mode toggle never needs a
+        separate "have I loaded this before?" check, and the Visualization
+        tab's own data-source toggle always has both selectors populated
+        without needing to visit this tab in both modes first. Each source
+        has its own mtime-cache key, so revisiting with neither file changed
+        is still a no-op read-wise.
 
         Every switch to the Results tab calls this, so without the mtime
         check, revisiting a tab you'd already loaded would still re-read and
@@ -585,25 +757,33 @@ class ResultsTabMixin:
         visible before we block on the pandas read here.
         """
         wide_path = self._output_dir / "ptm_mutation_proximity_db.tsv"
-        if not force and self._results_df_wide is not None:
-            try:
-                key = (wide_path, wide_path.stat().st_mtime)
-            except OSError:
-                key = (wide_path, None)
-            if key == self._results_loaded_key:
-                return
+        cluster_wide_path = self._output_dir / "mutation_cluster_db.tsv"
+        ptm_needs_load = force or self._mtime_key(wide_path) != self._results_loaded_key
+        cluster_needs_load = force or self._mtime_key(cluster_wide_path) != self._cluster_loaded_key
+        if not ptm_needs_load and not cluster_needs_load:
+            return
 
-        for tv, attr in ((self._ptm_tv, "_ptm_tv_all_rows"), (self._mut_tv, "_mut_tv_all_rows")):
-            self._clear_treeview_fully(tv, getattr(self, attr))
-            setattr(self, attr, [])
-            self._show_tv_message(tv, "Loading data…")
+        if ptm_needs_load:
+            for tv, attr in ((self._ptm_tv, "_ptm_tv_all_rows"), (self._mut_tv, "_mut_tv_all_rows")):
+                self._clear_treeview_fully(tv, getattr(self, attr))
+                setattr(self, attr, [])
+                self._show_tv_message(tv, "Loading data…")
+        if cluster_needs_load:
+            for tv, attr in ((self._anchor_tv, "_anchor_tv_all_rows"), (self._nearby_tv, "_nearby_tv_all_rows")):
+                self._clear_treeview_fully(tv, getattr(self, attr))
+                setattr(self, attr, [])
+                self._show_tv_message(tv, "Loading data…")
         self._results_status.configure(text="Loading data…", text_color="gray60")
         self._refresh_button.configure(state="disabled")
         self.update()
         try:
-            self._load_results_now()
+            if ptm_needs_load:
+                self._load_results_now()
+            if cluster_needs_load:
+                self._load_cluster_results_now()
         finally:
             self._refresh_button.configure(state="normal")
+            self._refresh_results_status()
 
     def _load_results_now(self) -> None:
         import pandas as pd
@@ -660,6 +840,52 @@ class ResultsTabMixin:
             self._results_status.configure(text=msg, text_color=_RED)
             self._show_tv_message(self._ptm_tv, msg, _RED)
             self._show_tv_message(self._mut_tv, msg, _RED)
+
+    def _load_cluster_results_now(self) -> None:
+        import pandas as pd
+
+        wide_path = self._output_dir / "mutation_cluster_db.tsv"
+        long_path = self._output_dir / "mutation_cluster_long.tsv"
+
+        if not wide_path.exists():
+            msg = f"No Mutation Clustering output found in {self._output_dir.name}/"
+            self._show_tv_message(self._anchor_tv, msg, _RED)
+            self._show_tv_message(self._nearby_tv, msg, _RED)
+            self._cluster_df_wide = None
+            self._cluster_df_long = None
+            self._cluster_loaded_key = None
+            self._refresh_cluster_viz_selector(pd.DataFrame(columns=["gene", "anchor_mutation", "UniProt"]))
+            return
+
+        try:
+            df_wide = pd.read_csv(wide_path, sep="\t", encoding="utf-16",
+                                   dtype=str, keep_default_na=False)
+
+            df_long = None
+            if long_path.exists():
+                try:
+                    df_long = pd.read_csv(long_path, sep="\t", encoding="utf-16",
+                                           dtype=str, keep_default_na=False)
+                except Exception:
+                    pass
+
+            self._cluster_df_wide = df_wide
+            self._cluster_df_long = df_long
+            self._cluster_loaded_key = (wide_path, wide_path.stat().st_mtime)
+
+            self._hide_tv_message(self._anchor_tv)
+            self._hide_tv_message(self._nearby_tv)
+            self._populate_anchor_tv(df_wide)
+            self._clear_treeview_fully(self._nearby_tv, self._nearby_tv_all_rows)
+            self._nearby_tv_all_rows = []
+            self._refresh_cluster_viz_selector(df_wide)
+        except Exception as exc:
+            self._cluster_df_wide = None
+            self._cluster_df_long = None
+            self._cluster_loaded_key = None
+            msg = f"Error loading Mutation Clustering results: {exc}"
+            self._show_tv_message(self._anchor_tv, msg, _RED)
+            self._show_tv_message(self._nearby_tv, msg, _RED)
 
     def _populate_ptm_tv(self, df) -> None:
         tv = self._ptm_tv
@@ -740,6 +966,45 @@ class ResultsTabMixin:
         else:
             self._populate_mut_tv_wide(row)
 
+    def _populate_anchor_tv(self, df) -> None:
+        tv = self._anchor_tv
+        self._clear_treeview_fully(tv, self._anchor_tv_all_rows)
+        rows = []
+        for i, (_, row) in enumerate(df.iterrows(), 1):
+            values_map = {
+                "uniprot": row.get("UniProt", ""),
+                "gene": row.get("gene", ""),
+                "anchor": row.get("anchor_mutation", ""),
+                "anchor_plddt": row.get("anchor_plddt", ""),
+                "near_count": row.get("nearby_mutation_count", ""),
+                "uniq_pos": row.get("unique_nearby_position_count", ""),
+                "near_pts": row.get("total_nearby_patient_count", ""),
+            }
+            values = [i] + [values_map.get(c, "") for c in _ANCHOR_TV_SRC_IDS]
+            rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._anchor_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_anchor_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)
+
+    def _on_anchor_select(self, *_) -> None:
+        sel = self._anchor_tv.selection()
+        if not sel or self._cluster_df_wide is None:
+            return
+        row = self._cluster_df_wide.iloc[int(sel[0]) - 1]
+        if self._cluster_df_long is not None:
+            uid = row.get("UniProt", "")
+            anchor = row.get("anchor_mutation", "")
+            mask = (
+                (self._cluster_df_long.get("UniProt", "") == uid) &
+                (self._cluster_df_long.get("anchor_mutation", "") == anchor)
+            )
+            self._populate_nearby_tv_long(self._cluster_df_long[mask])
+        else:
+            self._populate_nearby_tv_wide(row)
+
     _RESULTS_STATUS_FLASH_MS = 3000
 
     def _flash_results_status(self, text: str, color: str) -> None:
@@ -783,6 +1048,27 @@ class ResultsTabMixin:
         self._tabview.set("Visualization")
         self._viz_search_var.set("")
         if label in self._viz_ptm_rows:
+            self._viz_combo.set(label)
+            self._generate_lollipop_plot()
+        else:
+            self._viz_status.configure(
+                text=f"Could not find '{label}' in the Visualization selector.", text_color=_RED,
+            )
+
+    def _visualize_selected_cluster(self) -> None:
+        """Jump to the Visualization tab and render the lollipop plot for the selected anchor row."""
+        sel = self._anchor_tv.selection()
+        if not sel or self._cluster_df_wide is None:
+            self._flash_results_status("Select an anchor mutation in the table first.", _YELLOW)
+            return
+        row = self._cluster_df_wide.iloc[int(sel[0]) - 1]
+        label = f"{row.get('gene', '?')}  {row.get('anchor_mutation', '?')}  ({row.get('UniProt', '?')})"
+
+        self._tabview.set("Visualization")
+        self._viz_data_source_var.set("Mutation Clusters")
+        self._on_viz_data_source_change()
+        self._viz_search_var.set("")
+        if label in self._viz_cluster_rows:
             self._viz_combo.set(label)
             self._generate_lollipop_plot()
         else:
@@ -865,5 +1151,69 @@ class ResultsTabMixin:
         def _finish(tv) -> None:
             self._mut_tv_all_rows = self._capture_tv_rows(tv)
             self._filter_mut_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)
+
+    def _populate_nearby_tv_long(self, df) -> None:
+        tv = self._nearby_tv
+        self._clear_treeview_fully(tv, self._nearby_tv_all_rows)
+        rows = []
+        for i, (_, r) in enumerate(df.iterrows(), 1):
+            values = [i] + [r.get(_CLUSTER_LONG_SRC_MAP[c], "") for c in _NEARBY_TV_SRC_IDS]
+            rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._nearby_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_nearby_tv()
+
+        self._insert_tv_chunked(tv, rows, _finish)
+
+    def _populate_nearby_tv_wide(self, row) -> None:
+        """Populate the Nearby Mutations tv from a wide-format anchor row.
+
+        Per-mutation patient counts and pLDDT aren't available at this
+        granularity in the wide format (nor is a precomputed sequence
+        distance for old outputs predating the anchor_position column), so
+        those are left blank / computed from a regex-extracted anchor
+        position.
+        """
+        import re as _re
+        tv = self._nearby_tv
+        self._clear_treeview_fully(tv, self._nearby_tv_all_rows)
+
+        anchor_pos_raw = row.get("anchor_position", "")
+        if anchor_pos_raw:
+            anchor_pos = int(anchor_pos_raw)
+        else:
+            anchor_m = _re.search(r"(\d+)", str(row.get("anchor_mutation", "")))
+            anchor_pos = int(anchor_m.group(1)) if anchor_m else None
+
+        i = 0
+        rows = []
+        for entry in (row.get("nearby_mutations", "") or "").split(", "):
+            entry = entry.strip()
+            if not entry:
+                continue
+            m = _MUT_ENTRY_RE.match(entry)
+            if not m:
+                continue
+            i += 1
+            mut_m   = _re.search(r"\d+", m.group(1))
+            mut_pos = int(mut_m.group()) if mut_m else None
+            seq_d   = abs(mut_pos - anchor_pos) if (mut_pos is not None and anchor_pos is not None) else ""
+            per_row = {
+                "mut": m.group(1),
+                "seqd": seq_d,
+                "dist": m.group(4),
+                "pae": m.group(5) or "",
+                "mpld": "",
+                "pts": "",
+            }
+            values = [i] + [per_row.get(c, "") for c in _NEARBY_TV_SRC_IDS]
+            rows.append((str(i), values, "odd" if i % 2 else "even"))
+
+        def _finish(tv) -> None:
+            self._nearby_tv_all_rows = self._capture_tv_rows(tv)
+            self._filter_nearby_tv()
 
         self._insert_tv_chunked(tv, rows, _finish)

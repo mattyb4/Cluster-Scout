@@ -544,6 +544,73 @@ _MUT_LONG_SRC_MAP = {
     "mut_domain": "mutation_domain",
 }
 
+# Mutation-Clustering mode's equivalent of _PTM_TV_COLS/_MUT_TV_COLS. Kept
+# deliberately short: this mode never runs step 4 (annotate), so there's no
+# PolyPhen/kinase/14-3-3/AIUPred/domain data to show, unlike PTM Proximity.
+_ANCHOR_TV_COLS = [
+    ("#",                "#col",        32,  True,  True),
+    ("UniProt",          "uniprot",     70,  False, True),
+    ("Gene",             "gene",        58,  False, True),
+    ("Anchor mutation",  "anchor",     100,  False, True),
+    ("Anchor pLDDT",     "anchor_plddt", 90, True,  True),
+    ("Nearby count",     "near_count",  95,  True,  True),
+    ("Unique positions", "uniq_pos",   100,  True,  True),
+    ("Nearby patients",  "near_pts",   100,  True,  True),
+]
+
+_NEARBY_TV_COLS = [
+    ("#",         "#col", 32, True,  True),
+    ("Mutation",  "mut",  80, False, True),
+    ("Seq dist",  "seqd", 62, True,  True),
+    ("Dist (Å)",  "dist", 62, True,  True),
+    ("PAE",       "pae",  48, True,  True),
+    ("Mut pLDDT", "mpld", 75, True,  True),
+    ("Patients",  "pts",  62, True,  True),
+]
+
+_ANCHOR_COL_HELP: dict[str, str] = {
+    "uniprot": "UniProt accession for this protein.",
+    "gene": "Gene symbol for this protein.",
+    "anchor": "The mutation this cluster is centered on. Clustering is "
+              "symmetric - every mutation with at least one 3D neighbor gets "
+              "its own anchor row, so a pair (A, B) appears twice: once "
+              "anchored on A, once anchored on B.",
+    "anchor_plddt": "AlphaFold's per-residue confidence (pLDDT, 0-100) at "
+                    "the anchor mutation's position.",
+    "near_count": "Number of other recurrent mutations within the distance "
+                  "cutoff of this anchor mutation.",
+    "uniq_pos": "Number of distinct mutated positions among the nearby "
+                "mutations (vs. Nearby count, which counts every mutation, "
+                "including multiple substitutions at the same position).",
+    "near_pts": "Total COSMIC patient count summed across every nearby "
+                "mutation for this anchor.",
+}
+
+_NEARBY_COL_HELP: dict[str, str] = {
+    "mut": "The specific nearby mutation (e.g. R175H) shown in this row.",
+    "seqd": "Linear (sequence) distance, in residues, between this mutation "
+            "and the anchor mutation.",
+    "dist": "3D spatial distance, in Ångströms, between this mutation and "
+            "the anchor mutation in the AlphaFold structure.",
+    "pae": "Predicted Aligned Error (Å) between the anchor and this "
+           "mutation - AlphaFold's confidence in their relative 3D position.",
+    "mpld": "AlphaFold's per-residue confidence (pLDDT, 0-100) at this "
+            "mutation's position.",
+    "pts": "Number of distinct COSMIC patient samples carrying this "
+           "specific mutation.",
+}
+
+# mutation_cluster_long.tsv column names for every _NEARBY_TV_COLS entry
+# that's a direct pass-through (i.e. everything except "#col").
+_CLUSTER_LONG_SRC_MAP = {
+    "mut": "mutation",
+    "seqd": "sequence_distance",
+    "dist": "distance_angstrom",
+    "pae": "pair_pae",
+    "mpld": "mutation_plddt",
+    "pts": "patient_count",
+}
+
 
 RUNTIMES_FILE = OUTPUT_DIR / "logs" / "pipeline_runtimes.json"
 _CIF_DIR = PROJECT_ROOT / "cif_models"

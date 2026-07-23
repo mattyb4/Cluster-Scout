@@ -33,13 +33,27 @@ class VisualizationTabMixin:
         self._viz_all_labels: list[str] = []
         self._viz_protein_rows: dict[str, list[int]] = {}
         self._viz_all_protein_labels: list[str] = []
+        self._viz_cluster_rows: dict[str, int] = {}
+        self._viz_all_cluster_labels: list[str] = []
+        self._viz_cluster_protein_rows: dict[str, list[int]] = {}
+        self._viz_all_cluster_protein_labels: list[str] = []
 
-        # ── Controls row 0: view mode ──
+        # ── Controls row 0: data source + view mode ──
         mode_row = ctk.CTkFrame(tab)
         mode_row.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
 
-        ctk.CTkLabel(mode_row, text="View:", font=ctk.CTkFont(weight="bold")).pack(
+        ctk.CTkLabel(mode_row, text="Data:", font=ctk.CTkFont(weight="bold")).pack(
             side="left", padx=(12, 6), pady=10,
+        )
+        self._viz_data_source_var = ctk.StringVar(value="PTM Proximity")
+        ctk.CTkSegmentedButton(
+            mode_row, values=["PTM Proximity", "Mutation Clusters"],
+            variable=self._viz_data_source_var,
+            command=self._on_viz_data_source_change,
+        ).pack(side="left", padx=(0, 18), pady=10)
+
+        ctk.CTkLabel(mode_row, text="View:", font=ctk.CTkFont(weight="bold")).pack(
+            side="left", padx=(0, 6), pady=10,
         )
         self._viz_view_mode_var = ctk.StringVar(value="Single PTM")
         ctk.CTkSegmentedButton(
@@ -48,14 +62,15 @@ class VisualizationTabMixin:
             command=self._on_viz_view_mode_change,
         ).pack(side="left", padx=(0, 12), pady=10)
 
-        # ── Controls row 1a: PTM selection (Single PTM mode) ──
+        # ── Controls row 1a: PTM/anchor selection (Single PTM mode) ──
         self._viz_ptm_controls = ctk.CTkFrame(tab)
         self._viz_ptm_controls.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
         controls = self._viz_ptm_controls
 
-        ctk.CTkLabel(
+        self._viz_anchor_label = ctk.CTkLabel(
             controls, text="PTM site:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(12, 6), pady=10)
+        )
+        self._viz_anchor_label.pack(side="left", padx=(12, 6), pady=10)
 
         self._viz_search_var = ctk.StringVar(value="")
         search_entry = ctk.CTkEntry(
@@ -166,20 +181,69 @@ class VisualizationTabMixin:
             self._viz_whole_protein_frame.grid_remove()
             self._viz_canvas_frame.grid()
 
+    # ── Visualization: PTM Proximity / Mutation Clusters data source ────────
+
+    def _viz_is_cluster(self) -> bool:
+        return self._viz_data_source_var.get() == "Mutation Clusters"
+
+    def _viz_active_wide_df(self):
+        return self._cluster_df_wide if self._viz_is_cluster() else self._results_df_wide
+
+    def _viz_active_rows(self) -> dict:
+        return self._viz_cluster_rows if self._viz_is_cluster() else self._viz_ptm_rows
+
+    def _viz_active_labels(self) -> list:
+        return self._viz_all_cluster_labels if self._viz_is_cluster() else self._viz_all_labels
+
+    def _viz_active_protein_rows(self) -> dict:
+        return self._viz_cluster_protein_rows if self._viz_is_cluster() else self._viz_protein_rows
+
+    def _viz_active_protein_labels(self) -> list:
+        return (self._viz_all_cluster_protein_labels if self._viz_is_cluster()
+                else self._viz_all_protein_labels)
+
+    def _viz_active_anchor_col(self) -> str:
+        return "anchor_mutation" if self._viz_is_cluster() else "ptm_site"
+
+    def _on_viz_data_source_change(self, _value: str = "") -> None:
+        cluster = self._viz_is_cluster()
+        self._viz_anchor_label.configure(text="Anchor mutation:" if cluster else "PTM site:")
+        self._viz_stack_legend_labels["domain_marker"].configure(
+            text="▼ Anchor mutation (domain map)" if cluster else "▼ PTM position (domain map)",
+        )
+        self._viz_stack_legend_labels["site_marker"].configure(
+            text="★ Anchor mutation" if cluster else "★ PTM site",
+        )
+        # Ensures the target data source has actually been loaded at least
+        # once -- e.g. switching to "Mutation Clusters" before ever visiting
+        # the Results tab. Cheap/no-op if both sources are already fresh
+        # (mtime-cached per source, see ResultsTabMixin._load_results).
+        self._load_results()
+        self._viz_search_var.set("")
+        labels = self._viz_active_labels()
+        self._viz_combo.configure(values=labels)
+        self._viz_combo.set(labels[0] if labels else "")
+        self._viz_protein_search_var.set("")
+        plabels = self._viz_active_protein_labels()
+        self._viz_protein_combo.configure(values=plabels)
+        self._viz_protein_combo.set(plabels[0] if plabels else "")
+        self._generate_current_view()
+
     def _carry_ptm_selection_to_protein(self) -> None:
         """Switching to Whole protein mode defaults to the protein of the PTM
-        that was just being viewed in Single PTM mode, and renders it
-        immediately, rather than leaving the protein selector at whatever it
-        last happened to show.
+        (or anchor mutation, in Mutation Clusters mode) that was just being
+        viewed in Single PTM mode, and renders it immediately, rather than
+        leaving the protein selector at whatever it last happened to show.
         """
-        if self._results_df_wide is None:
+        df = self._viz_active_wide_df()
+        if df is None:
             return
-        idx = self._viz_ptm_rows.get(self._viz_combo.get())
+        idx = self._viz_active_rows().get(self._viz_combo.get())
         if idx is None:
             return
-        row = self._results_df_wide.loc[idx]
+        row = df.loc[idx]
         plabel = f"{row.get('gene', '?')} ({row.get('UniProt', '?')})"
-        if plabel not in self._viz_protein_rows:
+        if plabel not in self._viz_active_protein_rows():
             return
         self._viz_protein_search_var.set("")
         self._viz_protein_combo.set(plabel)
@@ -242,11 +306,55 @@ class VisualizationTabMixin:
         elif not protein_labels:
             self._viz_protein_combo.set("")
 
+    def _refresh_cluster_viz_selector(self, df) -> None:
+        """(Re)populate the anchor-mutation and protein selectors from loaded
+        Mutation Clustering results -- the cluster-mode counterpart of
+        _refresh_viz_selector, kept separate rather than parameterizing that
+        one since the two read from different source dataframes
+        (self._cluster_df_wide, not self._results_df_wide) and the actual
+        dict-building logic is trivial to duplicate.
+        """
+        self._viz_cluster_rows = {}
+        labels: list[str] = []
+        self._viz_cluster_protein_rows = {}
+        protein_labels: list[str] = []
+        for idx, row in df.iterrows():
+            gene = row.get("gene", "?")
+            anchor = row.get("anchor_mutation", "?")
+            uid = row.get("UniProt", "?")
+            label = f"{gene}  {anchor}  ({uid})"
+            labels.append(label)
+            self._viz_cluster_rows[label] = idx
+
+            plabel = f"{gene} ({uid})"
+            if plabel not in self._viz_cluster_protein_rows:
+                protein_labels.append(plabel)
+                self._viz_cluster_protein_rows[plabel] = []
+            self._viz_cluster_protein_rows[plabel].append(idx)
+
+        self._viz_all_cluster_labels = labels
+        self._viz_all_cluster_protein_labels = protein_labels
+        if self._viz_is_cluster():
+            current = self._viz_combo.get()
+            self._viz_combo.configure(values=labels)
+            if labels and current not in labels:
+                self._viz_combo.set(labels[0])
+            elif not labels:
+                self._viz_combo.set("")
+
+            pcurrent = self._viz_protein_combo.get()
+            self._viz_protein_combo.configure(values=protein_labels)
+            if protein_labels and pcurrent not in protein_labels:
+                self._viz_protein_combo.set(protein_labels[0])
+            elif not protein_labels:
+                self._viz_protein_combo.set("")
+
     def _on_viz_search(self, *_args) -> None:
         query = self._viz_search_var.get().strip().lower()
+        all_labels = self._viz_active_labels()
         filtered = (
-            [label for label in self._viz_all_labels if query in label.lower()]
-            if query else self._viz_all_labels
+            [label for label in all_labels if query in label.lower()]
+            if query else all_labels
         )
         self._viz_combo.configure(values=filtered)
         if filtered and self._viz_combo.get() not in filtered:
@@ -254,9 +362,10 @@ class VisualizationTabMixin:
 
     def _on_viz_protein_search(self, *_args) -> None:
         query = self._viz_protein_search_var.get().strip().lower()
+        all_labels = self._viz_active_protein_labels()
         filtered = (
-            [label for label in self._viz_all_protein_labels if query in label.lower()]
-            if query else self._viz_all_protein_labels
+            [label for label in all_labels if query in label.lower()]
+            if query else all_labels
         )
         self._viz_protein_combo.configure(values=filtered)
         if filtered and self._viz_protein_combo.get() not in filtered:
@@ -295,18 +404,22 @@ class VisualizationTabMixin:
 
         legend_frame = ctk.CTkFrame(stack_header, fg_color="transparent")
         legend_frame.pack(side="left")
-        for text, color in [
-            ("▼ PTM position (domain map)", _PTM_MARKER_COLOR),
-            ("★ PTM site", _PTM_MARKER_COLOR),
-            ("Benign", _PP_COLORS["benign"]),
-            ("Possibly damaging", _PP_COLORS["possibly_damaging"]),
-            ("Probably damaging", _PP_COLORS["probably_damaging"]),
-            ("Unknown", _NEEDLE_DEFAULT_COLOR),
+        self._viz_stack_legend_labels: dict[str, ctk.CTkLabel] = {}
+        for key, text, color in [
+            ("domain_marker", "▼ PTM position (domain map)", _PTM_MARKER_COLOR),
+            ("site_marker", "★ PTM site", _PTM_MARKER_COLOR),
+            (None, "Benign", _PP_COLORS["benign"]),
+            (None, "Possibly damaging", _PP_COLORS["possibly_damaging"]),
+            (None, "Probably damaging", _PP_COLORS["probably_damaging"]),
+            (None, "Unknown", _NEEDLE_DEFAULT_COLOR),
         ]:
             swatch = ctk.CTkFrame(legend_frame, fg_color=color, width=14, height=14, corner_radius=3)
             swatch.pack(side="left", padx=(10, 3))
             swatch.pack_propagate(False)
-            ctk.CTkLabel(legend_frame, text=text, font=ctk.CTkFont(size=11)).pack(side="left")
+            label = ctk.CTkLabel(legend_frame, text=text, font=ctk.CTkFont(size=11))
+            label.pack(side="left")
+            if key:
+                self._viz_stack_legend_labels[key] = label
 
         # ── Scrollable lollipop stack ──
         stack_outer = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="#2b2b2b")
@@ -505,6 +618,69 @@ class VisualizationTabMixin:
         note = None
         if not df_fallback.empty:
             note = "patient counts unavailable — re-run the pipeline to generate the long-format table"
+        return df_fallback, note
+
+    def _get_viz_cluster_mutation_df(self, uid: str, anchor_mutation: str, wide_row):
+        """Mutation Clustering counterpart of _get_viz_mutation_df: return
+        (DataFrame, note) of mutations near an anchor mutation, in the same
+        5-column shape (mutation, mutation_position, patient_count,
+        distance_angstrom, polyphen_class) _draw_lollipop_group's needle
+        drawing expects. polyphen_class is always synthesized blank (never
+        computed for this mode, unlike PTM Proximity where it's merely
+        sometimes missing) rather than conditionally checked for.
+        """
+        import pandas as pd
+
+        if self._cluster_df_long is not None:
+            df = self._cluster_df_long
+            mask = (
+                (df.get("UniProt", "") == uid) &
+                (df.get("anchor_mutation", "") == anchor_mutation)
+            )
+            sub = df[mask].copy()
+            if not sub.empty:
+                sub["mutation_position"] = pd.to_numeric(
+                    sub.get("mutation_position", 0), errors="coerce"
+                )
+                sub = sub.dropna(subset=["mutation_position"])
+                sub["patient_count"] = pd.to_numeric(
+                    sub.get("patient_count", 0), errors="coerce"
+                ).fillna(0)
+                sub["distance_angstrom"] = pd.to_numeric(
+                    sub.get("distance_angstrom", 0), errors="coerce"
+                ).fillna(0)
+                sub["polyphen_class"] = ""
+                return sub[[
+                    "mutation", "mutation_position", "patient_count",
+                    "distance_angstrom", "polyphen_class",
+                ]], None
+
+        # Fallback: wide-format "nearby_mutations" summary column only (no
+        # per-mutation patient counts) -- same regex as the PTM fallback
+        # above; its (PP:...) group is already optional, so it parses this
+        # mode's PP-less entries unchanged.
+        rows = []
+        for entry in (wide_row.get("nearby_mutations", "") or "").split(", "):
+            entry = entry.strip()
+            if not entry:
+                continue
+            m = _MUT_ENTRY_RE.match(entry)
+            if not m:
+                continue
+            pos_m = re.search(r"\d+", m.group(1))
+            if not pos_m:
+                continue
+            rows.append({
+                "mutation": m.group(1),
+                "mutation_position": int(pos_m.group()),
+                "patient_count": 1,
+                "distance_angstrom": float(m.group(4)),
+                "polyphen_class": "",
+            })
+        df_fallback = pd.DataFrame(rows)
+        note = None
+        if not df_fallback.empty:
+            note = "patient counts unavailable — re-run Mutation Clustering mode to generate the long-format table"
         return df_fallback, note
 
     # ── Visualization: plotting ──────────────────────────────────────────────
@@ -878,23 +1054,23 @@ class VisualizationTabMixin:
 
         return ax_local, domain_ax
 
-    @staticmethod
-    def _domain_map_legend_handles():
+    def _domain_map_legend_handles(self):
         from matplotlib.lines import Line2D
 
+        label = "Anchor mutation" if self._viz_is_cluster() else "PTM position"
         return [
             Line2D([0], [0], marker="v", color="none", markerfacecolor=_PTM_MARKER_COLOR,
-                   markeredgecolor="white", markersize=10, label="PTM position"),
+                   markeredgecolor="white", markersize=10, label=label),
         ]
 
-    @staticmethod
-    def _lollipop_legend_handles():
+    def _lollipop_legend_handles(self):
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
 
+        marker_label = "Anchor mutation" if self._viz_is_cluster() else "PTM site"
         return [
             Line2D([0], [0], marker="*", color="none", markerfacecolor=_PTM_MARKER_COLOR,
-                   markeredgecolor="white", markersize=14, label="PTM site"),
+                   markeredgecolor="white", markersize=14, label=marker_label),
             Patch(facecolor=_PP_COLORS["benign"], label="Benign"),
             Patch(facecolor=_PP_COLORS["possibly_damaging"], label="Possibly damaging"),
             Patch(facecolor=_PP_COLORS["probably_damaging"], label="Probably damaging"),
@@ -942,22 +1118,26 @@ class VisualizationTabMixin:
         self._viz_canvas.draw()
 
     def _generate_lollipop_plot(self) -> None:
-        if self._results_df_wide is None:
+        cluster = self._viz_is_cluster()
+        df_wide = self._viz_active_wide_df()
+        if df_wide is None:
+            missing = "Mutation Clustering" if cluster else "PTM Proximity"
             self._viz_status.configure(
-                text="No results loaded — run the pipeline or open the Results tab first.",
+                text=f"No {missing} results loaded — run that pipeline mode or open the Results tab first.",
                 text_color=_RED,
             )
             return
 
         label = self._viz_combo.get()
-        idx = self._viz_ptm_rows.get(label)
+        idx = self._viz_active_rows().get(label)
         if idx is None:
-            self._viz_status.configure(text="Select a PTM site to plot.", text_color=_RED)
+            what = "an anchor mutation" if cluster else "a PTM site"
+            self._viz_status.configure(text=f"Select {what} to plot.", text_color=_RED)
             return
 
-        row = self._results_df_wide.loc[idx]
+        row = df_wide.loc[idx]
         gene = row.get("gene", "?")
-        ptm_site = row.get("ptm_site", "?")
+        ptm_site = row.get(self._viz_active_anchor_col(), "?")
         uid = row.get("UniProt", "?")
 
         ptm_m = re.search(r"\d+", str(ptm_site))
@@ -968,7 +1148,10 @@ class VisualizationTabMixin:
             return
         ptm_pos = int(ptm_m.group())
 
-        mut_df, note = self._get_viz_mutation_df(uid, ptm_site, row)
+        mut_df, note = (
+            self._get_viz_cluster_mutation_df(uid, ptm_site, row) if cluster
+            else self._get_viz_mutation_df(uid, ptm_site, row)
+        )
         if mut_df.empty:
             self._viz_fig.clf()
             self._viz_canvas.draw()
@@ -1034,23 +1217,27 @@ class VisualizationTabMixin:
     # ── Visualization: whole-protein view ────────────────────────────────────
 
     def _generate_whole_protein_view(self) -> None:
-        if self._results_df_wide is None:
+        cluster = self._viz_is_cluster()
+        df_wide = self._viz_active_wide_df()
+        if df_wide is None:
+            missing = "Mutation Clustering" if cluster else "PTM Proximity"
             self._viz_status.configure(
-                text="No results loaded — run the pipeline or open the Results tab first.",
+                text=f"No {missing} results loaded — run that pipeline mode or open the Results tab first.",
                 text_color=_RED,
             )
             return
 
         label = self._viz_protein_combo.get()
-        indices = self._viz_protein_rows.get(label)
+        indices = self._viz_active_protein_rows().get(label)
         if not indices:
             self._viz_status.configure(text="Select a protein to plot.", text_color=_RED)
             return
 
-        rows = self._results_df_wide.loc[indices]
+        rows = df_wide.loc[indices]
         first = rows.iloc[0]
         gene = first.get("gene", "?")
         uid = first.get("UniProt", "?")
+        anchor_col = self._viz_active_anchor_col()
 
         try:
             local_window = float(self._viz_window_var.get().strip() or "15")
@@ -1060,29 +1247,33 @@ class VisualizationTabMixin:
 
         ptm_entries = []
         for _, row in rows.iterrows():
-            ptm_site = row.get("ptm_site", "?")
+            ptm_site = row.get(anchor_col, "?")
             ptm_m = re.search(r"\d+", str(ptm_site))
             if not ptm_m:
                 continue
             ptm_pos = int(ptm_m.group())
-            mut_df, _note = self._get_viz_mutation_df(uid, ptm_site, row)
+            mut_df, _note = (
+                self._get_viz_cluster_mutation_df(uid, ptm_site, row) if cluster
+                else self._get_viz_mutation_df(uid, ptm_site, row)
+            )
             if mut_df.empty:
                 continue
             if unique_only:
                 mut_df = self._collapse_to_unique_positions(mut_df)
             ptm_entries.append((ptm_site, ptm_pos, mut_df))
 
+        kind_label = "anchor mutation(s)" if cluster else "PTM site(s)"
         if not ptm_entries:
             self._viz_stack_fig.clf()
             self._viz_stack_canvas.draw()
             self._viz_status.configure(
-                text=f"No nearby mutations found for any PTM site on {gene} ({uid}).",
+                text=f"No nearby mutations found for any {kind_label} on {gene} ({uid}).",
                 text_color=_YELLOW,
             )
             return
 
         self._viz_status.configure(
-            text=f"Rendering {len(ptm_entries)} PTM site(s) for {gene} ({uid})…", text_color="gray60",
+            text=f"Rendering {len(ptm_entries)} {kind_label} for {gene} ({uid})…", text_color="gray60",
         )
         domain_entries = _load_interpro_entries(uid)
         protein_length = get_protein_length(_CIF_DIR / uid)
@@ -1194,7 +1385,8 @@ class VisualizationTabMixin:
 
     def _finish_whole_protein_stack(self, gene: str, uid: str, n: int, dpi: float,
                                      width_in: float, total_height_in: float) -> None:
-        self._viz_stack_title_label.configure(text=f"{gene} — {uid} — {n} PTM site(s)")
+        kind_label = "anchor mutation(s)" if self._viz_is_cluster() else "PTM site(s)"
+        self._viz_stack_title_label.configure(text=f"{gene} — {uid} — {n} {kind_label}")
 
         # matplotlib doesn't resize the Tk widget when the Figure's own size
         # changes — set it explicitly before drawing so the scrollable
@@ -1205,7 +1397,7 @@ class VisualizationTabMixin:
         self._viz_stack_canvas.draw()
 
         self._viz_status.configure(
-            text=f"{n} PTM site(s) for {gene} ({uid})", text_color="gray60",
+            text=f"{n} {kind_label} for {gene} ({uid})", text_color="gray60",
         )
 
     def _save_viz_plot(self) -> None:
