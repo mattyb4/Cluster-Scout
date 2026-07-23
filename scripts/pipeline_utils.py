@@ -66,10 +66,7 @@ def resolve_input_file(
 
 # ── Input file content validation ─────────────────────────────────────────────
 
-# Required columns are only the ones the pipeline scripts index directly
-# (df["col"]) — a missing one would crash a run partway through rather than
-# at the upfront check this backs. Columns only ever accessed via .get(...)
-# with a default are intentionally left out.
+# Only columns the pipeline scripts index directly (df["col"]); .get(...)-with-default columns are left out
 COSMIC_REQUIRED_COLUMNS = (
     "GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID",
     "MUTATION_SOMATIC_STATUS", "TRANSCRIPT_ACCESSION",
@@ -208,11 +205,9 @@ def get_protein_length(uniprot_dir: Path) -> int | None:
     """Return the highest modeled residue position across all AlphaFold
     fragments for this protein, or None if no CIFs are found.
 
-    AlphaFold fragment numbering is continuous in canonical UniProt
-    coordinates (a second fragment continues from where the first left off,
-    rather than resetting to 1 — see export_ca_coordinates.py, which relies
-    on the same fact), so this is a reliable proxy for canonical protein
-    length without a separate UniProt lookup.
+    AlphaFold fragment numbering is continuous in canonical UniProt coordinates
+    (fragment 2 continues from where fragment 1 left off), so this is a
+    reliable proxy for protein length without a separate UniProt lookup.
     """
     cif_files = find_canonical_cifs(uniprot_dir)
     if not cif_files:
@@ -248,46 +243,31 @@ def load_pae_matrix(uniprot_dir: Path):
 # ── Structural-hotspot significance testing (prototype) ──────────────────────
 #
 # Permutation-test + FDR significance for PTM-mutation 3D proximity, adapted
-# from the general method used by HotMAPS for cancer mutation hotspots, and
-# from the standard multiple-testing correction it applies:
+# from HotMAPS's method for cancer mutation hotspots (Tokheim et al. 2016,
+# https://doi.org/10.1158/0008-5472.CAN-15-3190) and Benjamini-Hochberg FDR
+# (Benjamini & Hochberg 1995).
 #
-#   Tokheim C, Bhattacharya R, Niknafs N, Gygax DM, Kim R, Ryan M, Masica DL,
-#   Karchin R. "Exome-Scale Discovery of Hotspot Mutation Regions in Human
-#   Cancer Using 3D Protein Structure." Cancer Research. 2016;76(13):3719-31.
-#   https://doi.org/10.1158/0008-5472.CAN-15-3190
+# Null hypothesis per PTM site: if the same number of distinct mutated
+# positions had instead been placed uniformly at random among the protein's
+# structurally-resolved residues, how often would at least as many land within
+# `cutoff` Angstroms of the site as were actually observed? Normalizes for
+# protein size/shape, unlike a fixed Angstrom cutoff alone.
 #
-#   Benjamini Y, Hochberg Y. "Controlling the False Discovery Rate: A
-#   Practical and Powerful Approach to Multiple Testing." Journal of the
-#   Royal Statistical Society: Series B. 1995;57(1):289-300.
-#
-# Null hypothesis for a given PTM site: if the same number of distinct
-# mutated positions observed in this protein had instead been placed
-# uniformly at random among its structurally-resolved residues, how often
-# would at least as many of them land within `cutoff` Angstroms of the PTM
-# site as were actually observed? This normalizes for protein size/shape —
-# a fixed Angstrom cutoff alone treats every protein as if it had the same
-# residue density, which isn't true.
-#
-# Prototype status: these are standalone statistical primitives, not wired
-# into the production pipeline (scripts/3_find_nearby_mutations.py still
-# uses the fixed-cutoff filter). See scripts/prototype_hotspot_significance.py
-# for a runnable demo against real pipeline data.
+# Prototype status: standalone primitives, not wired into the production
+# pipeline (3_find_nearby_mutations.py still uses the fixed-cutoff filter).
+# See scripts/prototype_hotspot_significance.py for a runnable demo.
 
 def sample_permutation_indices(
     n_residues: int, n_mutations: int, n_permutations: int, rng: np.random.Generator,
 ) -> np.ndarray:
-    """Return an (n_permutations, n_mutations) array of residue indices, each
-    row an independent uniform-random sample without replacement from
-    range(n_residues) — i.e. n_permutations simulated "random mutation sets".
+    """Return an (n_permutations, n_mutations) array of residue indices, each row
+    an independent random sample without replacement from range(n_residues) --
+    i.e. n_permutations simulated "random mutation sets".
 
-    Vectorized via argsort-of-random-keys rather than a per-trial
-    ``rng.choice(..., replace=False)`` loop: generating thousands of
-    independent without-replacement samples one at a time is the dominant
-    cost otherwise, whereas one batched argsort is not. Safe to compute once
-    and reuse across every PTM site tested in the same protein, since
-    n_mutations (the count of distinct hotspot mutations observed in that
-    protein) doesn't vary by site — only which residues fall within cutoff
-    of each site does.
+    Vectorized via argsort-of-random-keys instead of a per-trial
+    ``rng.choice(..., replace=False)`` loop, since the latter is the dominant
+    cost when generating thousands of samples. Safe to reuse across every PTM
+    site in the same protein: n_mutations doesn't vary by site.
     """
     n_mutations = min(n_mutations, n_residues)
     random_keys = rng.random((n_permutations, n_residues))

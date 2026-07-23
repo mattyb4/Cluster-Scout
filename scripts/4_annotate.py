@@ -420,14 +420,9 @@ def build_kinase_window(pos_to_aa: dict[int, str], site_pos: int) -> str | None:
 def _speed_up_kinase_library() -> None:
     """Memoize kinase_library's reference-data loaders for this process.
 
-    Profiling showed Substrate.predict() re-reads the same kinome/matrix
-    reference files from disk on every single call (~50 pd.read_csv calls per
-    prediction) rather than caching them, even though those files never change
-    during a run. get_kinase_list/get_kinome_info are the two most-called
-    loaders and, in every call path reachable from predict(), are only ever
-    invoked with hashable scalar arguments (kin_type, non_canonical) — so
-    wrapping them in an unbounded in-memory cache is safe and eliminates the
-    bulk of that redundant I/O. Idempotent: safe to call more than once.
+    Substrate.predict() re-reads the same kinome/matrix reference files from
+    disk on every call instead of caching them; wrapping the two most-called
+    loaders in an lru_cache eliminates that redundant I/O. Idempotent.
     """
     import kinase_library.modules.data as kl_data
     if getattr(kl_data, "_cluster_scout_cached", False):
@@ -479,10 +474,8 @@ def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
 
     cache = _kin_load_cache()
 
-    # First pass: resolve each row's kinase window (or None if not applicable),
-    # without predicting anything yet, so identical windows shared across rows
-    # (a common case — many PTM sites recur across proteins) are only ever
-    # predicted once instead of once per row.
+    # Resolve each row's window first (without predicting) so identical windows
+    # shared across rows are only predicted once, not once per row
     row_windows: list[str | None] = []
     for _, row in df.iterrows():
         uid = row.get("UniProt", "")
@@ -578,9 +571,9 @@ def _positions_from_str(mutation_str: str) -> list[int]:
 def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.DataFrame:
     """Remove mutations of excluded PP classes from the wide-format proximity DB.
 
-    Filters mutation strings, recomputes count and distance columns, and drops PTM
-    rows where no qualifying mutations remain.  *_total_patient_count columns are
-    left unchanged (they reflect pre-filter totals and cannot be recomputed here).
+    Filters mutation strings, recomputes count/distance columns, and drops PTM
+    rows with no qualifying mutations left. *_total_patient_count columns are
+    left as pre-filter totals -- they can't be recomputed here.
     """
     exclude_codes = {_PP_CODE_MAP[c] for c in exclude_classes if c in _PP_CODE_MAP}
     if not exclude_codes:
@@ -809,14 +802,12 @@ def _interpro_save_cache(cache: dict[str, list[dict]]) -> None:
 def fetch_interpro_domains(uniprot_id: str) -> list[dict]:
     """Fetch curated InterPro entries (domains/families/sites/etc.) for one protein.
 
-    Queries /entry/interpro/ (curated InterPro-integrated entries only, not
-    every individual member-database signature under /entry/all/ — the
-    latter returns many overlapping near-duplicates, e.g. Pfam, CDD, and
-    PROSITE each separately flagging essentially the same domain).
+    Queries /entry/interpro/ (curated entries only) rather than /entry/all/,
+    which returns many overlapping near-duplicates from individual member
+    databases (Pfam, CDD, PROSITE, etc. each flagging the same domain).
 
     Returns a list of {"name", "type", "start", "end"} dicts, one per
-    (entry, fragment) pair — an entry can have multiple discontinuous
-    fragments, each treated as its own range for containment checks.
+    (entry, fragment) pair -- an entry can have multiple discontinuous fragments.
     """
     entries: list[dict] = []
     url = _INTERPRO_API_URL.format(uid=uniprot_id)
@@ -864,10 +855,9 @@ def run_interpro_phase(df: pd.DataFrame) -> dict[str, list[dict]]:
 
 
 def find_domain_at_position(entries: list[dict], position: int | None) -> str:
-    """Return a "name (type, start-end)" string for every InterPro entry
-    containing *position*, semicolon-joined (a residue can legitimately fall
-    inside more than one entry, e.g. a specific domain nested inside a
-    broader homologous-superfamily call), or "" if none / position is None.
+    """Return "name (type, start-end)" for every InterPro entry containing
+    *position*, semicolon-joined (a residue can fall inside more than one
+    entry, e.g. a domain nested in a broader superfamily call).
     """
     if position is None:
         return ""

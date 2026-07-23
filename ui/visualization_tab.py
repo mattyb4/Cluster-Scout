@@ -1,9 +1,7 @@
 """Visualization tab: lollipop (needle) plot of mutations near a PTM site.
 
-Reads `self._results_df_wide`/`self._results_df_long` directly (ResultsTabMixin
-state) — these two tabs are tightly bidirectionally coupled by design, since
-selecting a PTM site in Results drives what's plotted here. `_style_lollipop_axis`
-is also called by AnalysisToolsTabMixin's `_style_dark_figure`.
+Reads ResultsTabMixin's `_results_df_wide`/`_results_df_long` state directly.
+`_style_lollipop_axis` is also reused by AnalysisToolsTabMixin.
 """
 from __future__ import annotations
 
@@ -150,13 +148,7 @@ class VisualizationTabMixin:
         self._viz_canvas_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self._viz_canvas_frame.grid_columnconfigure(0, weight=1)
         self._viz_canvas_frame.grid_rowconfigure(0, weight=1)
-        # Without this, the canvas widget's own requested size (set by our
-        # resize handler below) can inflate this frame's size, which then
-        # fires another <Configure> with an even bigger size -- a runaway
-        # feedback loop confirmed by an actual render (the canvas grew far
-        # past the window edge). This pins the frame's size to whatever the
-        # grid layout above it allocates, so sizing only ever flows one way:
-        # frame -> canvas, never canvas -> frame.
+        # Prevents the canvas from resizing this frame back (avoids a resize loop).
         self._viz_canvas_frame.grid_propagate(False)
 
         self._viz_fig = Figure(figsize=(10, 6), dpi=100, facecolor="#2b2b2b")
@@ -214,10 +206,7 @@ class VisualizationTabMixin:
         self._viz_stack_legend_labels["site_marker"].configure(
             text="★ Anchor mutation" if cluster else "★ PTM site",
         )
-        # Ensures the target data source has actually been loaded at least
-        # once -- e.g. switching to "Mutation Clusters" before ever visiting
-        # the Results tab. Cheap/no-op if both sources are already fresh
-        # (mtime-cached per source, see ResultsTabMixin._load_results).
+        # Loads the target data source if not already loaded.
         self._load_results()
         self._viz_search_var.set("")
         labels = self._viz_active_labels()
@@ -230,11 +219,7 @@ class VisualizationTabMixin:
         self._generate_current_view()
 
     def _carry_ptm_selection_to_protein(self) -> None:
-        """Switching to Whole protein mode defaults to the protein of the PTM
-        (or anchor mutation, in Mutation Clusters mode) that was just being
-        viewed in Single PTM mode, and renders it immediately, rather than
-        leaving the protein selector at whatever it last happened to show.
-        """
+        """Default Whole Protein mode to the PTM/anchor's own protein and render it."""
         df = self._viz_active_wide_df()
         if df is None:
             return
@@ -256,14 +241,7 @@ class VisualizationTabMixin:
             self._generate_lollipop_plot()
 
     def _on_viz_window_changed(self, *_args) -> None:
-        """Regenerate automatically once the ±aa window value settles.
-
-        Debounced (unlike the combobox selections, which fire once per
-        deliberate choice) since this is a free-text field -- typing "15"
-        fires this on every keystroke, and redrawing on each one would be
-        real wasted work, especially in whole-protein mode where a redraw
-        can take several seconds for a PTM-rich protein.
-        """
+        """Regenerate the plot once the ±aa window value settles (debounced)."""
         if getattr(self, "_viz_window_after_id", None) is not None:
             self.after_cancel(self._viz_window_after_id)
         self._viz_window_after_id = self.after(600, self._generate_current_view)
@@ -307,13 +285,7 @@ class VisualizationTabMixin:
             self._viz_protein_combo.set("")
 
     def _refresh_cluster_viz_selector(self, df) -> None:
-        """(Re)populate the anchor-mutation and protein selectors from loaded
-        Mutation Clustering results -- the cluster-mode counterpart of
-        _refresh_viz_selector, kept separate rather than parameterizing that
-        one since the two read from different source dataframes
-        (self._cluster_df_wide, not self._results_df_wide) and the actual
-        dict-building logic is trivial to duplicate.
-        """
+        """Cluster-mode counterpart of _refresh_viz_selector."""
         self._viz_cluster_rows = {}
         labels: list[str] = []
         self._viz_cluster_protein_rows = {}
@@ -383,17 +355,8 @@ class VisualizationTabMixin:
         self._viz_whole_protein_frame.grid_columnconfigure(0, weight=1)
         self._viz_whole_protein_frame.grid_rowconfigure(1, weight=1)
 
-        # ── Stack title + legend: plain Tk chrome, not drawn into the
-        # matplotlib figure. fig.suptitle()/fig.legend() position via
-        # figure-relative (0-1) coordinates, which is meaningless for a
-        # figure that can be 100+ inches tall (a title near y=0.98 lands
-        # deep inside row 2 or 3, not "near the top" the way it would on a
-        # normal-sized figure) -- confirmed by an actual render before
-        # switching to this approach. A persistent label reads correctly
-        # regardless of stack height, and stays visible while scrolling.
-        # The domain map itself is no longer a separate pinned panel here —
-        # each PTM row draws its own strip (see _draw_lollipop_group), so
-        # single-PTM and whole-protein views share one code path for it.
+        # Plain Tk title/legend, not matplotlib artists -- fig.suptitle()/
+        # fig.legend() break down on a figure that can be 100+ inches tall.
         stack_header = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="transparent")
         stack_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
 
@@ -433,11 +396,8 @@ class VisualizationTabMixin:
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
-        # Same CTkScrollableFrame width-clipping workaround used by
-        # analysis_tools_tab.py's plot area: it forces content width to
-        # exactly match the viewport, clipping anything wider (our stack is
-        # a fixed-width figure that needs to render at its natural size, not
-        # be squeezed to fit).
+        # Width-clipping workaround (see analysis_tools_tab.py) so wide
+        # content scrolls instead of being clipped.
         scroll._parent_canvas.unbind("<Configure>")
 
         def _fit_width_at_least_viewport(event):
@@ -462,16 +422,9 @@ class VisualizationTabMixin:
         self._viz_stack_build_token = None
 
     def _current_viz_canvas_size_in(self) -> tuple[float, float]:
-        """Current single-PTM canvas frame size, in inches, so the figure
-        fills the available window space at generate time rather than
-        staying a fixed size regardless of window size. Used for the initial
-        size on each generate call; _bind_viz_canvas_resize (below) handles
-        keeping it in sync afterward as the window is actively resized.
-
-        update_idletasks() first: switching modes reveals/hides frames and
-        generates in the same call stack, with no yield back to Tk's event
-        loop in between, so an unforced winfo_width() can read a stale
-        pre-reveal size.
+        """Current single-PTM canvas size in inches, so the figure fills the
+        window. update_idletasks() first avoids reading a stale size right
+        after a mode switch reveals this frame.
         """
         self.update_idletasks()
         dpi = self._viz_fig.get_dpi()
@@ -482,25 +435,11 @@ class VisualizationTabMixin:
         return (max(w / dpi, 6.0), max(h / dpi, 4.0))
 
     def _bind_viz_canvas_resize(self, frame, canvas, fig) -> None:
-        """Keep *fig* sized to fill *frame* live, as the window is resized.
+        """Keep *fig* sized to fill *frame* live as the window is resized.
 
-        Binds on *frame* (not the canvas widget inside it) -- frame has
-        grid_propagate(False), so its size can only ever change because its
-        own parent's grid layout changed (a real window resize), never
-        because a child inside it requested a new size. Binding on the
-        canvas widget itself was tried first and caused a runaway feedback
-        loop (confirmed by an actual render: the plot grew past the window
-        edge) -- resizing the canvas widget fires its own <Configure> too,
-        indistinguishable from a genuine external resize, so the handler
-        kept re-triggering itself. Binding on the propagate-disabled frame
-        instead means the canvas resizing in response never itself produces
-        another frame-level <Configure>, breaking that path entirely.
-
-        Debounced via self.after() so a live window-drag (many rapid
-        <Configure> events) doesn't trigger a full Agg redraw on every pixel
-        of movement, and skips the redraw entirely if the computed size
-        hasn't meaningfully changed (extra safety margin, not load-bearing
-        given the above, but cheap insurance).
+        Binds on *frame*, not the canvas -- binding the canvas itself causes
+        a resize feedback loop. Debounced to avoid redrawing on every pixel
+        of a drag.
         """
         state = {"after_id": None}
 
@@ -525,18 +464,8 @@ class VisualizationTabMixin:
         frame.bind("<Configure>", _on_configure)
 
     def _bind_viz_stack_resize(self, frame) -> None:
-        """Regenerate the whole-protein stack when the window is resized, so
-        it fills the available width the same way the single-PTM view does.
-
-        Debounced much longer than the single-PTM canvas's resize (500ms vs.
-        150ms) and triggers a full regenerate rather than an in-place
-        fig.set_size_inches() -- unlike the single-PTM figure, the whole-
-        protein figure's layout (every row's gridspec, needle positions,
-        domain-label row assignments) is computed from its width at build
-        time, not just rasterized at a new size, so a real rebuild is
-        unavoidable. The long debounce keeps that from firing repeatedly
-        mid-drag; the chunked build (_draw_whole_protein_view) keeps any one
-        rebuild from freezing the UI regardless.
+        """Regenerate the whole-protein stack on resize (full rebuild, not a
+        resize-in-place, since layout depends on width at build time).
         """
         state = {"after_id": None, "last_width": None}
 
@@ -621,13 +550,8 @@ class VisualizationTabMixin:
         return df_fallback, note
 
     def _get_viz_cluster_mutation_df(self, uid: str, anchor_mutation: str, wide_row):
-        """Mutation Clustering counterpart of _get_viz_mutation_df: return
-        (DataFrame, note) of mutations near an anchor mutation, in the same
-        5-column shape (mutation, mutation_position, patient_count,
-        distance_angstrom, polyphen_class) _draw_lollipop_group's needle
-        drawing expects. polyphen_class is always synthesized blank (never
-        computed for this mode, unlike PTM Proximity where it's merely
-        sometimes missing) rather than conditionally checked for.
+        """Cluster-mode counterpart of _get_viz_mutation_df. polyphen_class is
+        always blank (never computed for this mode).
         """
         import pandas as pd
 
@@ -655,10 +579,7 @@ class VisualizationTabMixin:
                     "distance_angstrom", "polyphen_class",
                 ]], None
 
-        # Fallback: wide-format "nearby_mutations" summary column only (no
-        # per-mutation patient counts) -- same regex as the PTM fallback
-        # above; its (PP:...) group is already optional, so it parses this
-        # mode's PP-less entries unchanged.
+        # Fallback: wide-format "nearby_mutations" column (no patient counts).
         rows = []
         for entry in (wide_row.get("nearby_mutations", "") or "").split(", "):
             entry = entry.strip()
@@ -734,14 +655,7 @@ class VisualizationTabMixin:
     _DOMAIN_STRIP_MARGIN_FRACTION = 0.89  # matches _draw_lollipop_group's left=0.08/right=0.97
 
     def _measure_text_widths_px(self, texts: list[str], fontsize: float) -> list[float]:
-        """Real rendered pixel widths for *texts* at *fontsize*, via a small
-        scratch figure — not tied to any real Axes, so this can run before
-        the actual per-row figure/gridspec exists (needed to size a row
-        before building it). Replaces an earlier character-count-based
-        width guess, which was silently wrong by close to 2x in either
-        direction for some real domain names, confirmed by measuring both
-        against this.
-        """
+        """Real rendered pixel widths for *texts*, via a scratch figure."""
         from matplotlib.figure import Figure as _Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
 
@@ -758,26 +672,8 @@ class VisualizationTabMixin:
 
     def _layout_domain_labels(self, entries: list[dict], length: float,
                                width_in: float) -> tuple[list[tuple[dict, int]], int]:
-        """Assign each entry's label to the lowest stacking row (0 = closest
-        to the boxes) such that, within a row, no two labels' real rendered
-        text extents come within a minimum pixel gap of each other, AND no
-        two labels' arrow anchors (their box's center — see
-        _draw_domain_strip, every arrow is a straight vertical line down
-        from there) come closer than a separate minimum pixel gap either,
-        so adjacent arrows stay visually distinguishable even when their
-        text is short enough to not itself be the constraint. Collisions
-        are always resolved by moving to a new row, never by shifting a
-        label sideways off its box's center.
-
-        Widths come from _measure_text_widths_px (real glyph metrics, not a
-        guess), converted to this specific render's data units via
-        *width_in* — this matters concretely: the same residue range (0..
-        length) maps to a different real pixel width depending on the
-        current window/viewport size, which single-PTM and whole-protein
-        mode do not share even for the same protein, so a fixed data-unit
-        estimate was quietly wrong in one or the other (confirmed by
-        measuring both).
-
+        """Assign each label to the lowest row where it doesn't overlap a
+        neighbor's text or arrow anchor (never shifts a label sideways).
         Returns (assignments, n_rows_used).
         """
         if not entries:
@@ -818,24 +714,8 @@ class VisualizationTabMixin:
         return assignments, len(row_occupied)
 
     def _domain_strip_height_in(self, n_label_rows: int) -> float:
-        """Physical height the domain strip needs to comfortably fit its
-        backbone, boxes, and however many label rows are required, in
-        inches. Everything here is a physical constant (inches), not a
-        data-coordinate one -- _draw_domain_strip sets its axis's y-limits
-        to span exactly this many inches (1 data-unit-of-y == 1 real inch),
-        so a label row is always the same physical size on screen no matter
-        how much total height a row has to work with.
-
-        This replaced an earlier version that expressed row spacing in
-        arbitrary data-coordinate units, sized independently of the axis's
-        real physical height -- that meant the same data-coordinate gap
-        compressed into far fewer actual pixels wherever the axis happened
-        to be shorter, which is exactly what was happening in whole-protein
-        mode specifically (its rows have much less absolute height than
-        single-PTM mode's for the same domain layout): confirmed by
-        computing the real inches-per-data-unit ratio in both and finding
-        they differed by nearly 2x for what was meant to be identical
-        spacing.
+        """Physical height (inches) needed for the domain strip's backbone,
+        boxes, and label rows. 1 data-unit-of-y == 1 real inch.
         """
         n_lanes = max(_DOMAIN_TYPE_LANES.values(), default=0) + 1
         return (self._DOMAIN_BACKBONE_MARGIN_IN + n_lanes * self._DOMAIN_LANE_HEIGHT_IN
@@ -843,28 +723,10 @@ class VisualizationTabMixin:
 
     def _draw_domain_strip(self, ax, entries: list[dict], length: float, ptm_pos: int,
                             domain_layout: tuple[list[tuple[dict, int]], int]) -> None:
-        """Draw a compact linear domain-map strip onto *ax*: a backbone bar,
-        InterPro domain/family/site boxes stacked in lanes by specificity
-        (so a specific domain nested inside a broader family/superfamily
-        call stays distinguishable), each labeled with its own name via a
-        horizontal label connected by a straight vertical arrow to its box
-        (not just a color — color alone can't disambiguate two same-type
-        entries) — labels needing to avoid colliding with a neighbor stack
-        into additional rows above the boxes rather than overlapping — and
-        a single marker for *ptm_pos*.
-
-        The y-axis is set up so 1 data-unit exactly equals 1 physical inch
-        (see _domain_strip_height_in) -- the caller is responsible for
-        actually giving this axis that many inches of real height via its
-        gridspec allocation; if it doesn't, spacing will be wrong, but nothing
-        here computes a size independently of that shared assumption.
-
-        *domain_layout* is pre-computed by the caller (_layout_domain_labels)
-        once per protein, not per PTM row — every row of a given protein
-        shares the identical set of domain entries, so recomputing (which
-        includes real text measurement) for each one would be both
-        needlessly repeated work and a source of row-count drift between
-        rows if it were ever computed slightly differently per call.
+        """Draw a linear domain-map strip on *ax*: backbone, InterPro boxes
+        by lane, labels with vertical arrows, and a marker at *ptm_pos*.
+        Y-axis is inches (see _domain_strip_height_in). *domain_layout* is
+        pre-computed once per protein, not per row.
         """
         from matplotlib.patches import Rectangle
 
@@ -894,10 +756,8 @@ class VisualizationTabMixin:
         for e, row in assignments:
             _y0, box_top_y, box_center_x = _box_position(e)
             label_y = lanes_top_y + self._DOMAIN_LABEL_TOP_PADDING_IN + row * self._DOMAIN_LABEL_ROW_INCHES
-            # xytext's x always matches xy's x (the box's own center) so the
-            # arrow is a straight vertical line -- collisions are resolved
-            # entirely by _layout_domain_labels picking a different row,
-            # never by nudging a label sideways off its box.
+            # xytext's x matches xy's x so the arrow is always vertical;
+            # row collisions are resolved by _layout_domain_labels, not here.
             ax.annotate(
                 e["name"], xy=(box_center_x, box_top_y), xytext=(box_center_x, label_y),
                 fontsize=self._DOMAIN_LABEL_FONTSIZE, color="#dcdcdc", ha="center", va="bottom",
@@ -914,10 +774,8 @@ class VisualizationTabMixin:
         ax.set_ylim(-self._DOMAIN_BACKBONE_MARGIN_IN, strip_height_in - self._DOMAIN_BACKBONE_MARGIN_IN)
         ax.set_yticks([])
         ax.tick_params(labelsize=7)
-        # No "Residue position" x-label here -- the lollipop panel directly
-        # below already has one, on the same residue-number x-axis scale
-        # family; a second copy immediately above it just collided with the
-        # row title text in a real render.
+        # No x-label here -- the lollipop panel below already has one on
+        # the same residue-number scale.
         for spine in ("top", "left", "right"):
             ax.spines[spine].set_visible(False)
 
@@ -934,36 +792,11 @@ class VisualizationTabMixin:
                               available_height_in: float):
         """Draw one PTM site's domain strip + local/far lollipop panels into *fig*.
 
-        If *subplotspec* is None, lays out directly on the whole figure (the
-        single-PTM view's own margins). If given a parent SubplotSpec cell,
-        nests via subgridspec instead — GridSpecFromSubplotSpec doesn't
-        accept left/right/top/bottom (those are figure-level margins, only
-        valid on the top-level gridspec; the parent cell already determines
-        where in the figure this group sits), confirmed directly rather than
-        assumed, since it's an easy thing to get subtly wrong.
-
-        *domain_entries*/*length*/*domain_layout* are pre-computed by the
-        caller once per protein, not per PTM row — every row of a given
-        protein shares the identical domain layout (get_protein_length()
-        parses a CIF file, and _layout_domain_labels does real text
-        measurement -- both real costs that shouldn't repeat for every row
-        of a PTM-rich protein, and would also risk the row count silently
-        drifting between rows if computed separately per call).
-
-        *available_height_in* is this group's outer gridspec cell's actual
-        physical height in inches -- for single-PTM mode, the whole figure's
-        height minus its own top/bottom margins; for whole-protein mode,
-        that row's height (row_height_in in _draw_whole_protein_view). Used
-        to split domain-strip vs. lollipop-panel height so the domain
-        strip's real inches-per-label-row pitch (_domain_strip_height_in) is
-        honored regardless of how much total room a row has, rather than a
-        fixed proportion that compresses however much space is available.
-
-        Returns (ax_local, domain_ax) so the caller decides on legend/title/
-        suptitle — those differ between single-PTM (one lollipop legend plus
-        its own separate domain-map legend, one suptitle) and whole-protein
-        (one shared header legend, no per-row legend, one per-row title)
-        callers.
+        *subplotspec*=None lays out on the whole figure (single-PTM view);
+        otherwise nests via subgridspec (whole-protein view) -- nested
+        gridspecs can't take margin kwargs. *domain_entries*/*length*/
+        *domain_layout* are pre-computed once per protein. *available_height_in*
+        splits domain-strip vs. lollipop height. Returns (ax_local, domain_ax).
         """
         local_df = mut_df[(mut_df["mutation_position"] - ptm_pos).abs() <= local_window] \
             .sort_values("mutation_position")
@@ -1100,12 +933,8 @@ class VisualizationTabMixin:
             handles=self._lollipop_legend_handles(), loc="upper left", fontsize=8,
             facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
         )
-        # Anchored to the FIGURE, not domain_ax, and placed in the margin
-        # strip above the domain axis (which stops at gridspec top=0.86,
-        # set in _draw_lollipop_group) -- an axes-anchored corner like
-        # "upper left" sat on top of domain boxes/labels whenever a domain
-        # started near position 0, since that region isn't actually free of
-        # content the way it is for the lollipop panel below.
+        # Anchored to the figure (not domain_ax) so it can't overlap domain
+        # boxes/labels near position 0.
         fig.legend(
             handles=self._domain_map_legend_handles(), loc="lower left",
             bbox_to_anchor=(0.08, 0.87), fontsize=7,
@@ -1178,10 +1007,8 @@ class VisualizationTabMixin:
         self._viz_status.configure(text=status, text_color="gray60")
 
     def _collapse_to_unique_positions(self, df):
-        """Merge mutations that share a residue position into one entry per position.
-
-        Patient counts are summed across substitutions at that residue; the
-        displayed color reflects the most severe PolyPhen class present.
+        """Merge same-position mutations into one entry (summed patient count,
+        worst PolyPhen class for color).
         """
         import pandas as pd
 
@@ -1280,22 +1107,9 @@ class VisualizationTabMixin:
         self._draw_whole_protein_view(uid, gene, ptm_entries, local_window, domain_entries, protein_length)
 
     def _current_viz_stack_width_in(self) -> float:
-        """Current available viewport width for the whole-protein stack, in
-        inches, so the figure fills the window ("extend to the edge") rather
-        than staying a fixed size regardless of how wide the window actually
-        is. Recomputed at Generate time rather than continuously live-
-        tracked like the single-PTM canvas -- a resize mid-render would need
-        to interrupt an in-progress chunked build, which isn't worth the
-        complexity here. Falls back to a sensible default if the widget
-        hasn't been realized/sized by Tk yet (winfo_width() returns 1).
-
-        update_idletasks() first matters concretely: the mode-switch
-        auto-carry path (_carry_ptm_selection_to_protein) calls .grid() to
-        reveal this frame and generates the plot in the same call stack, with
-        no yield back to Tk's event loop in between -- without forcing
-        pending geometry updates through here, winfo_width() reads the
-        pre-reveal (stale/unmapped) size instead of the real one, confirmed
-        by an actual render that came out at the fallback width.
+        """Current viewport width in inches for the whole-protein stack.
+        update_idletasks() first avoids reading a stale pre-reveal size
+        after a mode switch.
         """
         self.update_idletasks()
         viewport_w = self._viz_stack_scroll._parent_canvas.winfo_width()
@@ -1307,34 +1121,11 @@ class VisualizationTabMixin:
 
     def _draw_whole_protein_view(self, uid: str, gene: str, ptm_entries: list, local_window: float,
                                   domain_entries: list[dict], protein_length: int | None) -> None:
-        """Draw one lollipop-plot row per PTM site into self._viz_stack_fig.
+        """Draw one lollipop row per PTM site into self._viz_stack_fig.
 
-        Rows are built in small batches via self.after() rather than one
-        synchronous loop — matplotlib subplot construction plus a final
-        canvas.draw() rasterization is real main-thread CPU work that scales
-        with PTM count, and this app has already hit (and fixed, for
-        Treeview rows) a real macOS freeze from exactly this kind of
-        synchronous UI-callback work. A token guards against a stale build
-        finishing after the user has already switched proteins.
-
-        Measured against real data (TP53/P04637, 64 PTM sites, some with
-        dozens of nearby mutations each): row-building totals ~3s split
-        across ~13 small batches, each individually short. The final
-        canvas.draw() rasterization is a separate, single ~4-5s block that
-        this chunking does NOT cover -- matplotlib's Agg raster isn't
-        naturally interruptible, so a very PTM-rich protein still has one
-        real (if shorter, and clearly communicated via the "Rendering…"
-        status set by the caller) pause at the end. Not fully solved, since
-        doing so would mean replacing matplotlib's rendering pipeline
-        rather than working with it.
-
-        The domain layout (which label goes on which row) is computed once
-        here, for the whole protein, not per PTM row -- every row shares the
-        identical set of domain entries, so it's both wasted repeated work
-        and a correctness risk to redo it per row (see _draw_lollipop_group).
-        row_height_in is then sized so the domain strip actually gets the
-        real physical inches _domain_strip_height_in says it needs, rather
-        than a fixed guess independent of how many label rows are required.
+        Built in batches via self.after() to avoid freezing the UI; a token
+        guards against a stale build after the user switches proteins.
+        Domain layout is computed once for the whole protein, not per row.
         """
         fig = self._viz_stack_fig
         fig.clf()
@@ -1388,9 +1179,8 @@ class VisualizationTabMixin:
         kind_label = "anchor mutation(s)" if self._viz_is_cluster() else "PTM site(s)"
         self._viz_stack_title_label.configure(text=f"{gene} — {uid} — {n} {kind_label}")
 
-        # matplotlib doesn't resize the Tk widget when the Figure's own size
-        # changes — set it explicitly before drawing so the scrollable
-        # frame's content (and therefore its scroll range) actually grows.
+        # matplotlib doesn't resize the Tk widget when the Figure's size
+        # changes -- set it explicitly so the scroll region grows too.
         self._viz_stack_canvas.get_tk_widget().configure(
             width=int(width_in * dpi), height=int(total_height_in * dpi),
         )

@@ -619,10 +619,8 @@ def main():
 
                     plddt_map = get_plddt_map(chain)
 
-                    # Tag mutations whose reference AA does not match this structure, or whose
-                    # position is past the point where COSMIC's isoform diverges from canonical
-                    # (isoform_safe_length) even if the residue happens to match by coincidence.
-                    # Tagging rather than dropping preserves the data and makes mismatches visible.
+                    # Tag (don't drop) mutations whose reference AA doesn't match this structure,
+                    # or whose position is past isoform_safe_length even if it matches by coincidence
                     safe_length = parse_isoform_safe_length(uniprot)
                     mutation_entries = [
                         (mut + "(isoform?)", pos) if (

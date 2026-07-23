@@ -1,14 +1,10 @@
 """Analysis Tools tab: self-contained Radius Sweep / CIF Variance UI —
 parameters, a Run trigger, status/progress/log feedback, and the result plots.
 
-Running a tool here shares the app's single background-run slot with the
-Pipeline tab (`self._running`, guarded in PipelineRunnerMixin._start_analysis_tool_run)
-since both use the same thread+queue execution engine — only one run (of any
-kind) can be active at a time. `_poll_queue` (pipeline_runner.py) routes the
-generic "status"/"progress"/"log"/etc. queue messages to this tab's widgets
-instead of the Pipeline tab's step-indexed ones whenever `self._at_run_active`
-is set, via `_status_target`/`_progress_target`. `_style_dark_figure` calls
-`self._style_lollipop_axis`, a VisualizationTabMixin method.
+Shares the app's single background-run slot with the Pipeline tab
+(`self._running`); `_poll_queue` (pipeline_runner.py) routes queue messages
+here instead of the Pipeline tab's widgets whenever `self._at_run_active` is
+set. `_style_dark_figure` calls `self._style_lollipop_axis` (VisualizationTabMixin).
 """
 from __future__ import annotations
 
@@ -46,14 +42,10 @@ class AnalysisToolsTabMixin:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-        # Sole creation site now that the Pipeline tab no longer has its own
-        # Analysis Tools mode/panel.
         self._analysis_subtool_var = ctk.StringVar(value="Radius Sweep")
 
-        # One scrollable section for the whole tab (controls, params, run row,
-        # log, and the plot all together) — mirrors the Pipeline tab's own
-        # _build_pipeline_tab exactly, so there's a single scrollbar for the
-        # tab instead of the plot having its own separate scrolling area.
+        # One scrollable section for the whole tab (controls, params, run row, log,
+        # plot) -- a single scrollbar rather than the plot having its own
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
@@ -61,14 +53,10 @@ class AnalysisToolsTabMixin:
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
-        # CTkScrollableFrame's vertical mode only ever shows a vertical
-        # scrollbar, and forces content width to exactly match the viewport —
-        # fine for narrow content, but it clips anything wider (like a big
-        # plot) with no way to reach the rest. It already has working
-        # horizontal-scroll support internally (Shift+wheel), so add a visible
-        # horizontal scrollbar and replace the forced-width handler with one
-        # that only stretches narrow content up to the viewport width, never
-        # shrinks wide content down to it.
+        # CTkScrollableFrame forces content width to match the viewport, clipping
+        # anything wider (like a big plot). Replace its <Configure> handler with
+        # one that only stretches narrow content up to viewport width, never shrinks
+        # wide content down -- and add a visible horizontal scrollbar for the rest.
         scroll._parent_canvas.unbind("<Configure>")
 
         def _fit_width_at_least_viewport(event):
@@ -102,20 +90,14 @@ class AnalysisToolsTabMixin:
             command=self._save_active_analysis_plot,
         ).pack(side="left", padx=(0, 12), pady=10)
 
-        # Parameter fields — cleared and rebuilt by _rebuild_analysis_tool_fields
-        # whenever the segmented button above toggles Radius Sweep <-> CIF Variance.
+        # Cleared and rebuilt by _rebuild_analysis_tool_fields on Radius Sweep <-> CIF Variance toggle
         self._at_params_frame = ctk.CTkFrame(p)
-        # sticky="w", not "ew": this frame shares its grid column with the much
-        # wider plot canvas below it (canvas_frame, row 5 -- the matplotlib
-        # figure alone renders at 1400px). With "ew" this frame was forced to
-        # stretch to match that column width, dragging its own Browse button
-        # far past the edge of any normal-sized window. "w" keeps it sized to
-        # its own natural content instead of the unrelated plot's width.
+        # sticky="w", not "ew": this frame shares a grid column with the much wider
+        # plot canvas below (row 5); "ew" would stretch it to match that width
         self._at_params_frame.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
         self._at_params_frame.grid_columnconfigure(1, weight=1)
 
-        # Run trigger + status/progress — persistent, built once (unlike the
-        # params frame above, this tab is never torn down on toggle).
+        # Persistent, built once -- unlike the params frame, this tab is never torn down on toggle
         run_row = ctk.CTkFrame(p, fg_color="transparent")
         run_row.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
         run_row.grid_columnconfigure(2, weight=1)
@@ -140,8 +122,7 @@ class AnalysisToolsTabMixin:
         )
         self._at_status_label.grid(row=0, column=2, padx=(0, 12), pady=8, sticky="w")
 
-        # Log (collapsible, mirrors the Pipeline tab's _toggle_log — collapsed by
-        # default here since the plot is this tab's primary content).
+        # Collapsible, collapsed by default since the plot is this tab's primary content
         self._at_log_visible = False
         self._at_log_toggle = ctk.CTkButton(
             p, text="Show Details", width=120, height=28,
@@ -159,14 +140,11 @@ class AnalysisToolsTabMixin:
         isolate_textbox_scroll(self._at_log)
         add_resize_grip(self._at_log).pack(fill="x")
 
-        # Plot area: a plain frame, part of the same single scrollable section
-        # as everything above it — no independent scrollbar of its own.
         canvas_frame = ctk.CTkFrame(p, fg_color="#2b2b2b")
         canvas_frame.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="nsew")
 
-        # Both figures live in the same canvas_frame; only one is gridded at a time
-        # (toggled by the segmented button above) so switching is instant and each
-        # tool keeps its own plot in memory without re-running anything.
+        # Both figures live in canvas_frame; only one is gridded at a time so
+        # switching is instant and each tool keeps its plot without re-running
         self._radius_sweep_fig = Figure(figsize=(14, 9), dpi=100, facecolor="#2b2b2b")
         self._radius_sweep_canvas = FigureCanvasTkAgg(self._radius_sweep_fig, master=canvas_frame)
         self._radius_sweep_canvas.get_tk_widget().grid(row=0, column=0)
@@ -178,9 +156,7 @@ class AnalysisToolsTabMixin:
         self._rebuild_analysis_tool_fields()
         self._show_active_analysis_plot()
 
-        # Hide each scrollbar when content already fits that axis; show it
-        # only when scrolling is needed — same convention as the Pipeline
-        # tab's own _update_scrollbar, extended to the horizontal axis too.
+        # Hide each scrollbar when content already fits that axis; show only when needed
         def _update_scrollbar(*_):
             try:
                 canvas = scroll._parent_canvas
@@ -228,8 +204,7 @@ class AnalysisToolsTabMixin:
 
     def _build_radius_sweep_fields(self):
         """Radius Sweep parameter fields, built into self._at_params_frame."""
-        # Genes — added one at a time (no pre-filled defaults); self._radius_genes
-        # is the source of truth, persisted across sub-tool toggles via the guard.
+        # self._radius_genes is the source of truth, persisted across sub-tool toggles
         genes_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
         genes_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="nw")
         ctk.CTkLabel(genes_label_frame, text="Genes / UniProt IDs:", anchor="w").pack(side="left")
@@ -284,9 +259,8 @@ class AnalysisToolsTabMixin:
             ctk.CTkLabel(range_frame, text=label).pack(side="left", padx=(0, 4))
             ctk.CTkEntry(range_frame, textvariable=var, width=50).pack(side="left", padx=(0, 12))
 
-        # Min samples — the hotspot recurrence threshold, computed live from raw
-        # COSMIC by Radius Sweep itself, independent of whatever "Min samples"
-        # value the main Pipeline tab used to build the intermediate TSV.
+        # Hotspot recurrence threshold, computed live from raw COSMIC -- independent
+        # of the "Min samples" value the Pipeline tab used to build the intermediate TSV
         ctk.CTkLabel(self._at_params_frame, text="Min samples:", anchor="w").grid(
             row=4, column=0, padx=(12, 6), pady=6, sticky="w"
         )
@@ -315,10 +289,9 @@ class AnalysisToolsTabMixin:
         help_icon(unfiltered_frame, _RADIUS_SWEEP_HELP["unfiltered"]).pack(side="left", padx=(4, 0))
 
     def _add_radius_gene(self) -> None:
-        """Add a gene, accepting either a gene symbol or a UniProt accession
-        (auto-detected by format). Validates upfront — both that the dataset
-        has an entry for it, and that its AlphaFold CIF is actually
-        downloaded — rather than silently skipping it later at run time.
+        """Add a gene (symbol or UniProt accession, auto-detected). Validates
+        upfront that the dataset has an entry and its AlphaFold CIF is downloaded,
+        rather than silently skipping it later at run time.
         """
         token = self._radius_gene_input_var.get().strip()
         if not token:
@@ -327,8 +300,7 @@ class AnalysisToolsTabMixin:
         from radius_sweep import PTM_TSV, resolve_gene_token, has_cif, has_multiple_fragments
 
         if not PTM_TSV.exists():
-            # Can't validate yet — the Run button's own check already reports
-            # this clearly ("Run the pipeline (step 1) first").
+            # Can't validate yet -- the Run button's own check reports this clearly
             gene = token.upper()
             if gene not in self._radius_genes:
                 self._radius_gene_error_label.grid_remove()
@@ -367,8 +339,7 @@ class AnalysisToolsTabMixin:
         self._refresh_radius_gene_chips()
         self._radius_gene_input_var.set("")
 
-        # Non-blocking: the gene is still added, but large proteins AlphaFold
-        # split into multiple fragments only get fragment 1 analyzed here.
+        # Non-blocking warning: only fragment 1 is analyzed for multi-fragment proteins
         if has_multiple_fragments(uid):
             self._radius_gene_error_label.configure(
                 text=f"⚠  {gene} ({uid}) spans multiple AlphaFold fragments — only "

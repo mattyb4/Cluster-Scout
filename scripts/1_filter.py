@@ -21,9 +21,7 @@ UNMATCHED_GENES_LOG = PROJECT_ROOT / "Output" / "logs" / "ptm_genes_without_cosm
 
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 
-# Gene/UniProt mapping and isoform-mismatch checking are reported to the app as one
-# continuous progress bar (rather than two bars that complete and restart) by treating
-# them as two equal-weighted phases of a single overall percentage.
+# Two equal-weighted phases (gene mapping, isoform check) reported as one continuous progress bar
 _NUM_PHASES = 2
 
 
@@ -258,15 +256,11 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
 
 
 def _load_and_filter_cosmic(cosmic_file):
-    """Shared COSMIC Mutant Census loading and filtering logic used by both pipeline modes.
+    """Load and filter the COSMIC Mutant Census, shared by both pipeline modes.
 
-    The Mutant Census is one row per (mutation, sample) occurrence rather than
-    pre-aggregated hotspots, so affected-case counts are computed here by counting
-    distinct samples per (gene, amino-acid change).
-
-    Also returns a gene -> Ensembl transcript accession mapping (one per gene),
-    used to detect when COSMIC's mutation numbering follows a different UniProt
-    isoform than the canonical AlphaFold-modeled sequence.
+    Aggregates the raw (mutation, sample) rows into per-(gene, amino-acid
+    change) affected-case counts. Also returns a gene -> Ensembl transcript
+    mapping, used later to detect COSMIC/canonical isoform mismatches.
     """
     cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS", "TRANSCRIPT_ACCESSION"]
     cosmic = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
@@ -278,9 +272,7 @@ def _load_and_filter_cosmic(cosmic_file):
 
     gene_to_transcript = cosmic.groupby("GENE_SYMBOL")["TRANSCRIPT_ACCESSION"].first().to_dict()
 
-    # Total distinct patients with any missense mutation in each gene, regardless of
-    # the hotspot recurrence threshold below. Used as a baseline for comparing
-    # nearby/distant mutation patient counts in step 3.
+    # Total distinct patients per gene, regardless of hotspot threshold below.
     gene_to_total_missense_patients = (
         cosmic.groupby("GENE_SYMBOL")["COSMIC_SAMPLE_ID"].nunique().to_dict()
     )
@@ -294,9 +286,8 @@ def _load_and_filter_cosmic(cosmic_file):
     cosmic = cosmic[cosmic["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
 
     cosmic["mutation"] = cosmic["aa_change"]
-    # DataFrame.apply(axis=1) on an empty frame returns an empty DataFrame rather
-    # than a Series, which breaks the column assignment below -- guard explicitly
-    # rather than let a "zero rows survived filtering" input crash here.
+    # .apply(axis=1) on an empty frame returns a DataFrame, not a Series -- guard
+    # against that so a "zero rows survived filtering" input doesn't crash here.
     cosmic["mutation_with_count"] = (
         cosmic.apply(format_mutation_with_count, axis=1) if not cosmic.empty
         else pd.Series(dtype=str)
@@ -321,19 +312,16 @@ ISOFORM_SAFE_LENGTH_CACHE_FILE = "isoform_safe_lengths.tsv"
 
 
 def compute_isoform_safe_lengths(gene_to_transcript, gene_to_uniprot, batch_size=10):
-    """For genes whose COSMIC transcript is annotated against a UniProt isoform with a
-    different sequence than the canonical AlphaFold-modeled accession, compute the
-    length of the longest shared prefix between the two sequences. Mutation positions
-    beyond this point cannot be reliably mapped onto the canonical structure and should
-    be flagged as isoform mismatches in step 3, regardless of whether the residue
-    happens to match.
+    """For genes whose COSMIC transcript maps to a UniProt isoform that differs
+    from the canonical AlphaFold-modeled sequence, compute the longest shared
+    prefix length between the two -- mutations past that point can't be
+    reliably mapped onto the canonical structure.
 
-    Results are cached in data/cache/isoform_safe_lengths.tsv, keyed by gene and the
-    COSMIC transcript accession used to compute them. A gene is only re-checked if it
-    wasn't cached before or its COSMIC transcript accession has changed.
+    Cached in data/cache/isoform_safe_lengths.tsv; a gene is only re-checked
+    if uncached or its COSMIC transcript accession changed.
 
-    Returns a DataFrame with columns: gene, isoform_safe_length. Genes not present
-    have no restriction (COSMIC numbering matches the canonical sequence).
+    Returns a DataFrame with columns: gene, isoform_safe_length. Genes not
+    present have no restriction.
     """
     genes = [g for g in gene_to_uniprot if g in gene_to_transcript]
 
@@ -409,17 +397,13 @@ def _run_ptm_proximity_filter(output_file):
     ptmd = pd.read_csv(ptmd_file, sep="\t", low_memory=False)
     cosmic, gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
 
-    # -----------------------
     # Filter PTMD disruptions
-    # -----------------------
     ptmd = ptmd[ptmd["State"] == "N"].copy()
 
     # Normalize variant UniProt IDs to canonical accession (e.g. Q16613_VAR_A129T -> Q16613)
     ptmd["UniProt"] = ptmd["UniProt"].str.split("_").str[0]
 
-    # -----------------------
     # Map UniProt -> gene via UniProt REST API
-    # -----------------------
     uniprot_ids = ptmd["UniProt"].dropna().unique().tolist()
     print(f"Mapping {len(uniprot_ids)} UniProt IDs to gene names via UniProt API...")
     t0 = time.time()
@@ -433,16 +417,12 @@ def _run_ptm_proximity_filter(output_file):
 
     ptmd = ptmd[ptmd["gene"].notna()].copy()
 
-    # -----------------------
     # Build PTM site and PTM-disease pair
-    # -----------------------
     ptmd["ptm_site"] = ptmd.apply(build_ptm_site, axis=1)
     ptmd["ptm_disease_pair"] = ptmd["ptm_site"] + " | " + ptmd["Disease"].astype(str)
 
-    # -----------------------
-    # Build known disrupting mutations per PTM site
-    # MutationSite records the specific mutations documented in literature as disrupting each PTM.
-    # -----------------------
+    # Build known disrupting mutations per PTM site (MutationSite = mutations
+    # documented in literature as disrupting that PTM)
     ptmd["parsed_mutations"] = ptmd["MutationSite"].apply(parse_mutation_site)
     ptmd_with_muts = ptmd[ptmd["parsed_mutations"].map(len) > 0].copy()
 
@@ -470,11 +450,9 @@ def _run_ptm_proximity_filter(output_file):
         disruptions_grouped = pd.DataFrame(columns=["uniprot_id", "ptm_known_disruptions"])
 
     print("Filtering COSMIC mutations and aggregating by gene...")
-    # -----------------------
-    # Aggregate PTMs by UniProt so each isoform is kept separate.
-    # Grouping by gene previously collapsed all isoforms under one UniProt ID,
-    # causing PTM positions from one isoform to be checked against another's structure.
-    # -----------------------
+    # Aggregate PTMs by UniProt, not gene -- grouping by gene collapses all
+    # isoforms under one UniProt ID, so PTM positions from one isoform get
+    # checked against another isoform's structure.
     ptmd_grouped = (
         ptmd.groupby("UniProt", as_index=False)
         .agg(
@@ -486,9 +464,7 @@ def _run_ptm_proximity_filter(output_file):
     )
     ptmd_grouped = ptmd_grouped.merge(disruptions_grouped, on="uniprot_id", how="left")
 
-    # -----------------------
     # Aggregate hotspot mutations by gene
-    # -----------------------
     cosmic_grouped = (
         cosmic.groupby("gene", as_index=False)
         .agg(
@@ -496,9 +472,6 @@ def _run_ptm_proximity_filter(output_file):
         )
     )
 
-    # -----------------------
-    # Merge datasets
-    # -----------------------
     merged = ptmd_grouped.merge(cosmic_grouped, on="gene", how="left")
 
     merged = merged[
@@ -512,11 +485,8 @@ def _run_ptm_proximity_filter(output_file):
         ]
     ]
 
-    # -----------------------
     # Log PTMD proteins with no matching COSMIC hotspot mutations for their gene
-    # (gene-name mismatch between PTMD/UniProt and COSMIC, or no mutation met
-    # HOTSPOT_MIN_AFFECTED_CASES for that gene) before dropping them.
-    # -----------------------
+    # (gene-name mismatch, or no mutation met HOTSPOT_MIN_AFFECTED_CASES) before dropping them
     unmatched = merged[merged["mutations_on_protein"].isna()].copy()
     UNMATCHED_GENES_LOG.parent.mkdir(parents=True, exist_ok=True)
     unmatched[["uniprot_id", "gene", "ptms_on_protein"]].to_csv(
@@ -526,10 +496,8 @@ def _run_ptm_proximity_filter(output_file):
 
     merged = merged[merged["mutations_on_protein"].notna()].copy()
 
-    # -----------------------
     # Flag genes where COSMIC's mutation numbering follows a different UniProt
-    # isoform than the canonical AlphaFold-modeled sequence.
-    # -----------------------
+    # isoform than the canonical AlphaFold-modeled sequence
     print("Checking for COSMIC/canonical isoform mismatches...")
     gene_to_uniprot = dict(zip(merged["gene"], merged["uniprot_id"]))
     t0 = time.time()
@@ -537,15 +505,9 @@ def _run_ptm_proximity_filter(output_file):
     print(f"  Isoform mismatch check completed in {fmt_time(time.time() - t0)}")
     merged = merged.merge(isoform_lengths, on="gene", how="left")
 
-    # -----------------------
-    # Total COSMIC missense patients per gene, for comparison against the
-    # nearby/distant mutation patient counts computed in step 3.
-    # -----------------------
+    # For comparison against nearby/distant mutation patient counts computed in step 3
     merged["total_cosmic_missense_patients"] = merged["gene"].map(gene_to_total_missense_patients)
 
-    # -----------------------
-    # Save result
-    # -----------------------
     print("Saving output...")
     merged.to_csv(output_file, sep="\t", index=False)
 
@@ -583,10 +545,8 @@ def _run_mutation_clustering_filter(output_file):
     result = result.rename(columns={"UniProt": "uniprot_id"})
     result = result[["uniprot_id", "gene", "mutations_on_protein"]]
 
-    # -----------------------
     # Flag genes where COSMIC's mutation numbering follows a different UniProt
-    # isoform than the canonical AlphaFold-modeled sequence.
-    # -----------------------
+    # isoform than the canonical AlphaFold-modeled sequence
     print("Checking for COSMIC/canonical isoform mismatches...")
     gene_to_uniprot = dict(zip(result["gene"], result["uniprot_id"]))
     t0 = time.time()
@@ -594,10 +554,7 @@ def _run_mutation_clustering_filter(output_file):
     print(f"  Isoform mismatch check completed in {fmt_time(time.time() - t0)}")
     result = result.merge(isoform_lengths, on="gene", how="left")
 
-    # -----------------------
-    # Total COSMIC missense patients per gene, for comparison against the
-    # nearby/distant mutation patient counts computed in step 3.
-    # -----------------------
+    # For comparison against nearby/distant mutation patient counts computed in step 3
     result["total_cosmic_missense_patients"] = result["gene"].map(gene_to_total_missense_patients)
 
     print("Saving output...")

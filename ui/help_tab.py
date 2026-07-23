@@ -46,13 +46,8 @@ class HelpTabMixin:
             from tkinterweb import HtmlFrame
             frame = HtmlFrame(
                 tab, messages_enabled=False,
-                # Without this, clicking a link (e.g. the COSMIC/PTMD sources)
-                # navigates this embedded frame itself to that external site,
-                # replacing the help content with no way back short of
-                # restarting the app. Providing on_link_click replaces the
-                # default in-place navigation entirely, so opening the URL in
-                # the system browser instead means this frame never navigates
-                # away from the docs at all.
+                # Without this, clicking a link navigates this embedded frame itself
+                # away from the docs; open in the system browser instead
                 on_link_click=lambda url: webbrowser.open(url),
             )
             frame.load_html(full_html)

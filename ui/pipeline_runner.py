@@ -47,13 +47,8 @@ class PipelineRunnerMixin:
 
         est = getattr(self, "_precheck_estimate", None)
         hist = self._historical_times
-        # Real timing from a previous run of this exact (mode, run_type) is
-        # strictly better signal than the heuristic precheck -- it reflects
-        # this machine's actual network/CPU conditions rather than generic
-        # per-item constants. Previously the heuristic always won here (it's
-        # set right after pipeline_start, so `est is not None` was true for
-        # nearly the whole run), which meant _save_runtimes' historical data
-        # was recorded but never actually used for a later estimate.
+        # Real timing from a past run of this (mode, run_type) beats the heuristic
+        # precheck -- it reflects this machine's actual conditions, not generic constants
         if hist and len(hist) == self._total_steps:
             text += f"  |  Est. total: ~{_fmt_time(sum(hist))}"
         elif est is not None:
@@ -174,8 +169,7 @@ class PipelineRunnerMixin:
             except (FileNotFoundError, RuntimeError) as exc:
                 problems.append(str(exc))
 
-            # Bundled reference data, not user-provided — only checked if present,
-            # since a missing/misconfigured copy shouldn't block the whole run.
+            # Bundled reference data -- only checked if present, shouldn't block the run
             interactors_dir = input_dir(PROJECT_ROOT, INTERACTORS_1433_INPUT_DIR)
             try:
                 interactors_file = resolve_input_file(interactors_dir, (".xlsx", ".xls"))
@@ -251,23 +245,17 @@ class PipelineRunnerMixin:
         threading.Thread(target=self._run_pipeline, args=(mode,), daemon=True).start()
 
     def _set_run_controls(self, running: bool) -> None:
-        """Keep the Pipeline tab's and Analysis Tools tab's Run buttons in sync —
-        only one run (of any kind) can be active at a time, app-wide, since both
-        share the same `self._running` flag and background-thread execution engine.
-        """
+        """Sync Pipeline tab's and Analysis Tools tab's Run buttons -- only one run of any kind is active app-wide."""
         state = "disabled" if running else "normal"
         self._run_btn.configure(state=state)
         self._at_run_btn.configure(state=state)
 
     def _start_analysis_tool_run(self, kind: str) -> None:
-        """Validate and launch a Radius Sweep / CIF Variance run triggered from
-        the Analysis Tools tab. Shares `self._running` with `_start_pipeline` —
-        only one run of any kind can be active at a time.
+        """Validate and launch a Radius Sweep / CIF Variance run from the Analysis Tools tab.
 
-        Unlike `_start_pipeline`, this skips the locked-output-file check and
-        `_backup_outputs()`: those only guard the 3 main-pipeline TSVs
-        (`_DEFAULT_OUTPUT_FILES`), which radius_sweep.tsv/cif_variance/ aren't
-        part of.
+        Skips the locked-output-file check and `_backup_outputs()` that
+        `_start_pipeline` does -- those only guard `_DEFAULT_OUTPUT_FILES`,
+        not radius_sweep.tsv/cif_variance/.
         """
         if self._running:
             return
@@ -349,14 +337,10 @@ class PipelineRunnerMixin:
     def _stop_pipeline(self):
         """Suspend the running subprocess immediately and show Resume/Cancel options.
 
-        During the precheck/backup phase before step 1 (local pandas/file-glob
-        work, no subprocess yet) there's nothing to suspend, so `actually_suspended`
-        stays False -- previously that left the Stop button disabled with no
-        Resume/Cancel shown and `_stop_requested` never set, so the click did
-        nothing and the pipeline silently ran to completion with both buttons
-        stuck disabled. Now that case still registers the stop request directly;
-        the per-step loop in `_run_pipeline` checks it before starting each step
-        (including the first), so the run halts there instead of continuing.
+        During the precheck/backup phase (before step 1's subprocess exists)
+        there's nothing to suspend, so `actually_suspended` stays False; in that
+        case we still set `_stop_requested` so the per-step loop in
+        `_run_pipeline` halts before starting the first step.
         """
         if not self._running:
             return
@@ -443,19 +427,13 @@ class PipelineRunnerMixin:
             bar.set(0)
             bar.grid_remove()
 
-    # Per-item time estimates (seconds) for runtime calculation. Where a step
-    # is backed by a ThreadPoolExecutor in the actual script, the raw
-    # (unamortized) per-request time is divided by that same worker count
-    # here -- these constants used to assume sequential execution for CIF
-    # downloads/AIUPred/kinase despite the scripts already running them
-    # concurrently, which was the dominant source of a ~2.7x runtime
-    # overestimate confirmed against real historical run data.
+    # Per-item time estimates (seconds) for runtime calculation. For steps backed
+    # by a ThreadPoolExecutor, the raw per-request time is divided by that worker
+    # count so the estimate reflects concurrent, not sequential, execution.
     _CIF_DOWNLOAD_WORKERS = 6           # scripts/2_download_structures.py: _DOWNLOAD_MAX_WORKERS
     _TIME_PER_CIF_DOWNLOAD = 2.5 / _CIF_DOWNLOAD_WORKERS
     _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
-    _TIME_PER_ISOFORM_BATCH = 5.5       # ~10 genes per batch, sequential (1_filter.py's
-                                         # compute_isoform_safe_lengths -- calibrated
-                                         # against real cold-run step1 timing)
+    _TIME_PER_ISOFORM_BATCH = 5.5       # ~10 genes per batch, sequential (1_filter.py's compute_isoform_safe_lengths)
     _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
     _TIME_PER_PP_FETCH = 0.05           # already amortized, 30 concurrent workers
     _KINASE_WORKERS = 6                 # scripts/4_annotate.py: _KIN_MAX_WORKERS
@@ -489,15 +467,8 @@ class PipelineRunnerMixin:
                 pass
 
         if n_proteins == 0:
-            # Estimate from COSMIC directly, applying the same somatic-status and
-            # hotspot-recurrence filtering step 1 will apply, so the count approximates
-            # genes that will actually survive filtering (not just genes mentioned
-            # anywhere in COSMIC). This works for both modes: in ptm-proximity mode,
-            # PTMD's PTM-site coverage is broad enough that COSMIC's hotspot threshold
-            # — not the PTMD intersection — is the dominant bottleneck in practice, and
-            # PTMD's own "Gene name" column is too sparse to use directly (most rows
-            # only resolve to a gene via a UniProt API lookup, which isn't available
-            # before step 1 has run).
+            # Step 1 hasn't run yet -- estimate gene count directly from COSMIC by
+            # applying the same somatic-status/hotspot filters step 1 will apply
             try:
                 cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
                 cosmic_cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
@@ -525,13 +496,8 @@ class PipelineRunnerMixin:
                 pass
         uncached_batches = max(0, (n_proteins - cached_genes)) // 100 + 1 if n_proteins > cached_genes else 0
 
-        # 1_filter.py's compute_isoform_safe_lengths() also runs here -- a
-        # separate, sequential, batch-of-10 UniProt lookup (plus follow-up
-        # per-gene sequence fetches for any isoform mismatches it finds) that
-        # isn't part of the gene-mapping cache above. Previously left out of
-        # this estimate entirely, which was the dominant reason step 1's
-        # estimate (~50s) undershot its real cold-run time (~465s, confirmed
-        # against Output/logs/pipeline_runtimes.json).
+        # compute_isoform_safe_lengths() also runs in step 1: a separate,
+        # sequential, batch-of-10 UniProt lookup not covered by the gene-mapping cache above
         isoform_cache = cache_dir / "isoform_safe_lengths.tsv"
         cached_isoform = 0
         if isoform_cache.exists():
@@ -1050,13 +1016,10 @@ class PipelineRunnerMixin:
         self._queue.put(args)
 
     def _status_target(self, idx: int):
-        """Resolve which status label a "status"/"progress" queue message should
-        update: the Analysis Tools tab's single persistent label when a run was
-        triggered from there, otherwise the Pipeline tab's step-indexed one.
-
-        Not a cached list reference — `_rebuild_step_rows` rebinds
-        `self._step_status_labels` to a brand-new list on every Pipeline-tab
-        mode change, so anything resolved once up front would go stale.
+        """Resolve which status label to update for a queue message: the Analysis
+        Tools tab's label if a run was triggered from there, else the Pipeline
+        tab's step-indexed one. Looked up fresh each call since `_rebuild_step_rows`
+        rebinds `self._step_status_labels` to a new list on mode change.
         """
         if self._at_run_active:
             return self._at_status_label

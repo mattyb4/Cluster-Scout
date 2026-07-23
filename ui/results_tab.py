@@ -25,11 +25,9 @@ _MUT_TV_SRC_IDS = [c[1] for c in _MUT_TV_COLS if c[1] != "#col"]
 _ANCHOR_TV_SRC_IDS = [c[1] for c in _ANCHOR_TV_COLS if c[1] != "#col"]
 _NEARBY_TV_SRC_IDS = [c[1] for c in _NEARBY_TV_COLS if c[1] != "#col"]
 
-# which -> (full column registry, hover-help dict, Columns-picker title,
-# Filter-picker title). Drives _open_column_picker/_open_filter_picker's
-# dispatch across all 4 tables; the treeview/visible-cols/filters/filter-
-# button instance attrs themselves are looked up as f"_{which}_..." below,
-# since "ptm"/"mut"/"anchor"/"nearby" all follow that naming convention.
+# which -> (column registry, hover-help dict, Columns-picker title, Filter-picker
+# title). Drives _open_column_picker/_open_filter_picker; per-table instance
+# attrs are looked up as f"_{which}_..." (ptm/mut/anchor/nearby).
 _TV_REGISTRY = {
     "ptm":    (_PTM_TV_COLS,    _PTM_COL_HELP,    "PTM Sites Columns",        "Filter PTM Sites"),
     "mut":    (_MUT_TV_COLS,    _MUT_COL_HELP,    "Mutation Details Columns", "Filter Mutation Details"),
@@ -112,8 +110,7 @@ class ResultsTabMixin:
     def _bind_treeview_zoom_override(self, tv) -> None:
         """Intercept Ctrl+wheel on this treeview before ttk's own unmodified
         `<MouseWheel>` class-binding scrolls it (widget-level bindings run
-        before class-level ones, so this reliably wins). See
-        App._on_ctrl_scroll_zoom for why this override is needed at all.
+        before class-level ones, so this reliably wins).
         """
         tv.bind("<Control-MouseWheel>", self._on_ctrl_scroll_zoom)
         tv.bind("<Control-Button-4>", self._on_ctrl_scroll_zoom)
@@ -123,14 +120,10 @@ class ResultsTabMixin:
         """Keep every column at exactly its configured width, always.
 
         ttk.Treeview's `stretch=True` doesn't just grow a column into extra
-        room when there's space to spare -- if the visible columns'
-        configured widths already add up to more than the widget's actual
-        width, ttk instead shrinks the stretchy column below its configured
-        width (down to `minwidth`) to force everything to fit. Rather than
-        try to distinguish those two cases, no column ever stretches: any
-        leftover space after the last column is just left blank, and
-        overflow is handled by the horizontal scrollbar. Every column then
-        reliably renders at the width set for it in the registry.
+        room -- if the visible columns' widths already exceed the widget's
+        actual width, ttk shrinks the stretchy column down to `minwidth`
+        instead. So no column ever stretches: leftover space is left blank,
+        and overflow is handled by the horizontal scrollbar.
         """
         for c in tv["columns"]:
             tv.column(c, stretch=False)
@@ -221,11 +214,9 @@ class ResultsTabMixin:
         instead of one synchronous loop.
 
         Each tv.insert() is its own blocking Tcl call; on macOS's Aqua Tk
-        backend a multi-thousand-row results table can pin the main thread
-        for the better part of a second in that loop (confirmed via stack
-        sampling), during which clicks are silently dropped rather than
-        just delayed. Yielding back to the event loop between batches keeps
-        each block small enough that queued input still gets processed.
+        backend, a multi-thousand-row table can pin the main thread long
+        enough that clicks get dropped rather than delayed. Yielding back to
+        the event loop between batches keeps queued input responsive.
         """
         token = object()
         self._tv_insert_tokens[tv] = token
@@ -489,10 +480,8 @@ class ResultsTabMixin:
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_rowconfigure(1, weight=1)
 
-        # ── Mode toggle + shared Refresh/status (PTM Proximity vs Mutation
-        # Clusters data source — mirrors the Visualization tab's "Single
-        # PTM"/"Whole protein" CTkSegmentedButton grid()/grid_remove() swap
-        # between two frames built once, never rebuilt) ──
+        # Mode toggle + shared Refresh/status: PTM Proximity vs Mutation Clusters,
+        # via grid()/grid_remove() swap between two frames built once
         mode_row = ctk.CTkFrame(outer, fg_color="transparent")
         mode_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         self._results_mode_var = ctk.StringVar(value="PTM Proximity")
@@ -725,36 +714,20 @@ class ResultsTabMixin:
             return (path, None)
 
     def _load_results(self, force: bool = False) -> None:
-        """Show a 'Loading data…' placeholder immediately, then do the actual
-        file read/populate — unless *force* is False and neither output file
-        has changed since its last load, in which case this is a no-op.
+        """Show a 'Loading data…' placeholder immediately, then read/populate --
+        unless *force* is False and neither output file changed since its last
+        load, in which case this is a no-op.
 
-        Loads BOTH data sources (PTM Proximity and Mutation Clusters)
-        independently on every call, regardless of which mode is currently
-        selected in the tab -- so switching the mode toggle never needs a
-        separate "have I loaded this before?" check, and the Visualization
-        tab's own data-source toggle always has both selectors populated
-        without needing to visit this tab in both modes first. Each source
-        has its own mtime-cache key, so revisiting with neither file changed
-        is still a no-op read-wise.
+        Loads both data sources (PTM Proximity and Mutation Clusters)
+        independently on every call regardless of the active mode, each with
+        its own mtime-cache key, so the mode toggle and the Visualization
+        tab's selectors are always populated without a separate load. The
+        "↺ Refresh" button passes force=True to bypass the mtime cache.
 
-        Every switch to the Results tab calls this, so without the mtime
-        check, revisiting a tab you'd already loaded would still re-read and
-        re-populate a multi-thousand-row TSV from disk each time — a ~1.5s
-        block that's laggy no matter how well a loading placeholder paints.
-        The "↺ Refresh" button passes force=True to always bypass this.
-
-        `after(..., callback)` only *schedules* the callback — it doesn't
-        guarantee the pending tab-switch/placeholder redraw is flushed to
-        screen before the callback (often blocking-fast) timer fires, so that
-        approach still let the tab switch look frozen. `update_idletasks()`
-        alone isn't enough either — it flushes Tk's internal geometry/idle
-        queue but doesn't pump the window system's own redraw/expose events,
-        so on some triggers (e.g. clicking Refresh with no tab-raise involved)
-        the canvas changes were queued but never actually painted to screen
-        before the blocking read started. A full `update()` processes those
-        pending redraw events too, guaranteeing the placeholder is actually
-        visible before we block on the pandas read here.
+        Calls `update()`, not just `update_idletasks()`, before the blocking
+        pandas read: idletasks flushes Tk's geometry queue but not the window
+        system's redraw events, so the placeholder wouldn't actually be
+        painted to screen yet on some triggers (e.g. clicking Refresh).
         """
         wide_path = self._output_dir / "ptm_mutation_proximity_db.tsv"
         cluster_wide_path = self._output_dir / "mutation_cluster_db.tsv"
@@ -1011,13 +984,9 @@ class ResultsTabMixin:
         """Show a temporary message in the Results-tab status label, then
         revert to whatever it displayed before.
 
-        Unlike the persistent "N PTM sites / M proteins" summary this label
-        normally shows, a warning like "select a PTM site first" has no
-        natural moment where something else overwrites it — left as a plain
-        .configure(), it would just sit there indefinitely with no way to
-        dismiss it. Repeated flashes reuse the same saved original text
-        rather than saving over each other, so they don't end up "reverting"
-        to a previous warning instead of the real original status.
+        Repeated flashes reuse the same saved original text rather than
+        overwriting each other, so they revert to the real original status
+        instead of a previous warning.
         """
         if not getattr(self, "_results_status_flashing", False):
             self._results_status_prev = (

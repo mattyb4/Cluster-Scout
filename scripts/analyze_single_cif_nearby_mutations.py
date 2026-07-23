@@ -42,12 +42,11 @@ def get_ca_coord(chain, residue_number):
                 return residue["CA"].get_coord()
     return None
 
-#compute distance between two 3D points
 def compute_distance(coord1, coord2):
     return np.linalg.norm(coord1 - coord2)
 
-#find mutations within cutoff distance of PTM site
-def find_nearby_mutations(chain, ptm_pos, mutation_map, cutoff=10.0, pae_matrix=None, max_pae=None): #adjust cutoff as needed
+
+def find_nearby_mutations(chain, ptm_pos, mutation_map, cutoff=10.0, pae_matrix=None, max_pae=None):
     results = []
 
     ptm_coord = get_ca_coord(chain, ptm_pos)

@@ -28,12 +28,10 @@ from pipeline_utils import (  # noqa: E402
     get_protein_length,
 )
 
-# The 14-3-3 confirmed-interactors file isn't listed here: unlike COSMIC/PTMD,
-# it's small, rarely updated, and bundled with the app (see
-# data/input/1433_interactors/) rather than something the user is expected to
-# provide — scripts/4_annotate.py still reads it from that same folder via
-# INTERACTORS_1433_INPUT_DIR, this just keeps it out of the Pipeline tab's
-# input-file browse/status UI.
+# 14-3-3 confirmed-interactors file isn't listed here: it's bundled with the app
+# (data/input/1433_interactors/), not something the user provides, so it's kept
+# out of the Pipeline tab's input-file browse/status UI even though
+# scripts/4_annotate.py still reads it via INTERACTORS_1433_INPUT_DIR.
 _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
     "COSMIC": (
         input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR),
@@ -55,10 +53,9 @@ _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
 class _Tooltip:
     """Hover pop-up bubble anchored to a single widget.
 
-    A plain tk.Toplevel/tk.Label rather than CTk widgets: it's a short-lived,
-    unmanaged popup outside the normal widget tree, so there's nothing to gain
-    from CTk's theming machinery here — just fixed colors that match the
-    app's dark theme (see app.py's `ctk.set_appearance_mode("dark")`).
+    Plain tk.Toplevel/tk.Label rather than CTk widgets, since it's a short-lived
+    unmanaged popup with no benefit from CTk's theming -- just fixed colors
+    matching the app's dark theme.
     """
     _DELAY_MS = 400
 
@@ -152,18 +149,11 @@ def isolate_textbox_scroll(textbox: ctk.CTkTextbox) -> None:
     """Keep mouse-wheel scrolling over *textbox* from also scrolling the
     outer page it sits on.
 
-    CTkScrollableFrame binds ``<MouseWheel>`` at bind_all (app-wide) and
-    scrolls itself whenever the event's target widget has its canvas
-    anywhere in its ancestor chain — true for anything placed on a
-    scrollable tab, textboxes included. Tk's own unmodified class-binding on
-    Text widgets already scrolls the textbox itself, but bind_all still runs
-    afterward regardless (it isn't skipped just because something else
-    handled the event first), so scrolling the log also scrolled the whole
-    page underneath it. A widget-level binding on the real ``tkinter.Text``
-    instance replicates the scroll and returns "break" to stop the event
-    before it reaches that bind_all handler — the same intercept-before-
-    bind_all pattern used for Ctrl+scroll zoom on the Results-tab treeviews
-    (see App._on_ctrl_scroll_zoom / ResultsTabMixin._bind_treeview_zoom_override).
+    CTkScrollableFrame binds <MouseWheel> at bind_all and scrolls itself
+    whenever the event's target has its canvas in its ancestor chain -- true
+    for any textbox on a scrollable tab, so a normal wheel-scroll runs both
+    the textbox's own scroll and the page's. Binding directly on the real
+    tkinter.Text and returning "break" stops the event before bind_all sees it.
     """
     real_text = textbox._textbox
 
@@ -302,12 +292,10 @@ _PP_COLORS = {
 _PTM_MARKER_COLOR = _BLUE
 _NEEDLE_DEFAULT_COLOR = "#888888"
 
-# Domain-map diagram (Visualization tab, whole-protein view): color and lane
-# per InterPro entry type. Lane groups by specificity (0 = broadest,
-# rendered lowest) so a specific domain nested inside a broader
-# family/superfamily call — a routine occurrence, not an edge case — stays
-# visually distinguishable rather than overdrawing the same strip. Types not
-# listed fall back to _DOMAIN_TYPE_FALLBACK_COLOR / lane 1.
+# Domain-map diagram (Visualization tab): color and lane per InterPro entry
+# type. Lane groups by specificity (0 = broadest, rendered lowest) so a domain
+# nested inside a broader family/superfamily call stays visually distinct
+# instead of overdrawing the same strip. Unlisted types fall back to lane 1.
 _DOMAIN_TYPE_COLORS: dict[str, str] = {
     "homologous_superfamily": _GRAY,
     "family": _GREEN,
@@ -335,10 +323,8 @@ _DOMAIN_TYPE_FALLBACK_LANE = 1
 def _load_interpro_entries(uid: str) -> list[dict]:
     """Read cached InterPro domain/family/site entries for one protein.
 
-    Returns [] if the cache doesn't exist or has no row for this UniProt ID
-    (e.g. results predate the InterPro annotation phase, or that API call
-    failed for this protein) — callers should treat that as "no domain data
-    available", not an error.
+    Returns [] if there's no cached row for this UniProt ID -- callers should
+    treat that as "no domain data available", not an error.
     """
     cache_file = _CACHE_DIR / "interpro_domains.tsv"
     if not cache_file.exists():

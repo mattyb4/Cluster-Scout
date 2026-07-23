@@ -296,17 +296,11 @@ def write_defattr_file(
     attr_name: str = "patients_within_10A",
 ) -> Path:
     """Write a ChimeraX attribute-assignment file (.defattr) with one
-    per-residue value, using the format documented at
-    https://www.cgl.ucsf.edu/chimerax/docs/user/formats/defattr.html
+    per-residue value: https://www.cgl.ucsf.edu/chimerax/docs/user/formats/defattr.html
 
-    Each data line needs a LEADING tab before the residue spec (confirmed
-    against ChimeraX's own shipped example files via raw byte inspection —
-    the rendered docs example is easy to misread as spec+tab+value only,
-    but ChimeraX's parser rejects a data line missing that initial tab,
-    reporting it as "not of the form 'name: value'"), and the residue spec
-    itself needs a leading "/" before the chain letter (ChimeraX's atom-spec
-    grammar requires it for a chain specifier — bare "A:1" is rejected as
-    "Bad atom specifier"; it must be "/A:1").
+    Each data line needs a leading tab before the residue spec (ChimeraX's
+    parser rejects a line missing it), and the residue spec needs a leading
+    "/" before the chain letter (bare "A:1" is rejected as "Bad atom specifier").
     """
     lines = [f"attribute: {attr_name}", "recipient: residues", "#"]
     for _, row in ca_df.iterrows():
@@ -324,23 +318,18 @@ def write_chimerax_script(
     value_range: tuple[float, float] | None = None,
     palette: str = "Reds",
 ) -> Path:
-    """Write a ChimeraX command script (.cxc) that opens *cif_path*, loads
-    the attribute data from *defattr_path*, and colors the cartoon by it as
-    a heatmap. Open this file directly in ChimeraX (File > Open, or drag
-    onto the window) to reproduce the view with no manual steps.
+    """Write a ChimeraX command script (.cxc) that opens *cif_path*, loads the
+    attribute data from *defattr_path*, and colors the cartoon by it as a
+    heatmap. Open directly in ChimeraX to reproduce the view with no manual steps.
 
-    *palette* defaults to "Reds", a built-in ColorBrewer sequential palette
-    (light-to-dark, one hue) — a diverging blue-white-red scale implies a
-    meaningful midpoint/"neutral" value, which mutation density doesn't
-    have; every value is "how much", not "which direction from zero".
+    *palette* defaults to "Reds" (sequential, light-to-dark) rather than a
+    diverging scale, since mutation density has no meaningful zero-midpoint --
+    every value is "how much", not "which direction".
 
-    *value_range*, if given, is passed to ChimeraX's `range` option instead
-    of letting it auto-scale to the attribute's true min/max. COSMIC patient
-    counts are heavily right-skewed — one true hotspot residue can be 10-100x
-    any other position — so an unclamped auto-range stretches the whole
-    gradient to fit that single outlier, crushing every other residue down
-    into the lightest color. Values above the given upper bound are simply
-    clamped to the top color rather than further stretching the scale.
+    *value_range*, if given, clamps ChimeraX's `range` instead of auto-scaling
+    to the true min/max: COSMIC patient counts are heavily right-skewed, so an
+    unclamped range lets one hotspot outlier crush every other residue into
+    the lightest color.
     """
     range_clause = f" range {value_range[0]:g},{value_range[1]:g}" if value_range else ""
     lines = [

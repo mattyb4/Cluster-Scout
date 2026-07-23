@@ -111,12 +111,9 @@ def has_cif(uniprot_id: str) -> bool:
 
 def has_multiple_fragments(uniprot_id: str) -> bool:
     """True if AlphaFold split this protein into multiple structural fragments
-    (only happens for very large proteins, roughly >2700 residues). The
-    AlphaFold DB names each one AF-{uid}-F{n}-model_v{v}.cif, so fragment
-    count is readable straight from the downloaded filenames — no need to
-    parse structure content. Radius Sweep only ever loads fragment 1 (see
-    load_first_chain / find_canonical_cif), so PTM sites or mutations that
-    fall in fragment 2+ are silently excluded from the analysis.
+    (only happens for very large proteins, roughly >2700 residues). Radius
+    Sweep only ever loads fragment 1, so PTM sites/mutations in fragment 2+
+    are silently excluded from the analysis.
     """
     cif_dir = MODELS_ROOT / uniprot_id
     if not cif_dir.is_dir():

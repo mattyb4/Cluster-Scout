@@ -17,19 +17,13 @@ from pathlib import Path
 
 def _fix_tcl_tk_library_paths() -> None:
     """uv-managed (python-build-standalone) macOS Pythons can fail to locate
-    their own bundled Tcl/Tk init.tcl when run from inside a venv --
-    TclError: "Can't find a usable init.tcl" -- because the interpreter's
-    relocation logic doesn't account for a venv's symlinked layout (only
-    the base interpreter, not a venv built from it, resolves correctly on
-    its own). sys.base_prefix still points at the real base install even
-    though the interpreter itself can't find init.tcl relative to it, so
-    pointing TCL_LIBRARY/TK_LIBRARY there directly sidesteps the bug. Must
-    run before `import tkinter` (below), since that's what loads the
-    _tkinter C extension and triggers the lookup. A no-op if TCL_LIBRARY is
-    already set (respects an explicit override) or if the base install
-    doesn't have this lib/tclX.Y layout (e.g. a python.org install where
-    this bug doesn't occur -- confirmed both layouts exist there too, so
-    setting it is harmless, just redundant).
+    their bundled Tcl/Tk init.tcl when run from inside a venv (TclError:
+    "Can't find a usable init.tcl"), since the interpreter's relocation logic
+    doesn't account for a venv's symlinked layout. sys.base_prefix still
+    points at the real base install, so pointing TCL_LIBRARY/TK_LIBRARY there
+    sidesteps the bug. Must run before `import tkinter`, which loads the
+    _tkinter C extension and triggers the lookup. No-op if TCL_LIBRARY is
+    already set, or the base install doesn't have this lib/tclX.Y layout.
     """
     if sys.platform != "darwin" or os.environ.get("TCL_LIBRARY"):
         return
@@ -62,14 +56,11 @@ ctk.set_default_color_theme("blue")
 
 
 def _patch_customtkinter_textbox_scroll_callback() -> None:
-    """CTkTextbox schedules a recurring self.after() poll to auto-show/hide its
-    scrollbars, guarded by a winfo_exists() check -- but only *before*
-    rescheduling the *next* call, not before touching the widget on the
-    *current* one. If the widget was destroyed since the poll was queued (e.g.
-    a Pipeline-tab mode switch tearing down and rebuilding its steps frame),
-    the current call's own xview()/yview() calls raise TclError first, which
-    aborts the function before it reaches that guard -- so the loop still
-    stops correctly, but the exception escapes uncaught in the meantime.
+    """CTkTextbox's recurring self.after() poll for auto-show/hide scrollbars
+    only checks winfo_exists() before scheduling the *next* call, not before
+    touching the widget on the *current* one -- so if the widget was destroyed
+    since the poll was queued, its own xview()/yview() calls raise TclError
+    uncaught before reaching that guard.
     """
     try:
         from customtkinter.windows.widgets import ctk_textbox
@@ -88,17 +79,12 @@ def _patch_customtkinter_textbox_scroll_callback() -> None:
 
 
 def _patch_customtkinter_scaling_tracker() -> None:
-    """ScalingTracker polls every registered window every 100ms, forever, to
-    detect OS-level per-monitor DPI changes -- a real feature on Windows, but
-    ScalingTracker.get_window_dpi_scaling() hard-codes a return of 1 on macOS
-    and Linux ("scaling works automatically on macOS" / "not implemented" on
-    Linux), so on those platforms the loop can never detect a change: it's
-    pure overhead for the app's entire lifetime, and its winfo_exists() check
-    on each window isn't enough to stop it throwing TclError once the app
-    starts closing (the interpreter can be torn down between the check and
-    the following calls in the same pass). Since it provably does nothing
-    outside Windows, skip it there entirely instead of just guarding it --
-    that fixes the wasted CPU and removes the crash source in one place.
+    """ScalingTracker polls every window every 100ms forever to detect OS-level
+    per-monitor DPI changes -- a real feature on Windows, but
+    get_window_dpi_scaling() hard-codes a return of 1 on macOS/Linux, so the
+    loop can never detect a change there: pure overhead, and its
+    winfo_exists() check isn't enough to stop TclError once the app starts
+    closing. Since it does nothing outside Windows, skip it there entirely.
     """
     if sys.platform == "win32":
         return
@@ -116,17 +102,11 @@ def _patch_customtkinter_scaling_tracker() -> None:
 
 
 def _patch_customtkinter_appearance_mode_tracker() -> None:
-    """AppearanceModeTracker polls every 30ms, forever -- three times more
-    often than the ScalingTracker loop above -- to detect a live OS-level
-    light/dark mode change via the darkdetect package. This app hardcodes
-    ctk.set_appearance_mode("dark") once at import and never calls "system"
-    or offers any way to change it at runtime, so the live-detection this
-    loop exists for never applies here: every widget already gets its
-    correct color at creation time from the mode set once up front. Skip
-    the loop entirely on every platform (not just macOS) since it's dead
-    weight for this app regardless of OS -- and at 30ms it's the more
-    likely of the two loops to be felt as UI lag, since it fires while
-    genuinely idle far more often than the 100ms scaling loop did.
+    """AppearanceModeTracker polls every 30ms forever to detect a live OS-level
+    light/dark mode change via darkdetect. This app hardcodes
+    ctk.set_appearance_mode("dark") once at import and never offers a way to
+    change it at runtime, so the loop this exists for never applies -- skip
+    it on every platform.
     """
     try:
         from customtkinter.windows.widgets.appearance_mode import appearance_mode_tracker
@@ -141,25 +121,16 @@ def _patch_customtkinter_appearance_mode_tracker() -> None:
 
 
 def _patch_customtkinter_tabview_switch() -> None:
-    """CTkTabview switches tabs by grid_forget()-ing the outgoing tab's frame
-    and grid()-ing the incoming one back in -- on Tk's macOS (Aqua) backend
-    each widget is backed by a real Cocoa NSView, so unmapping/mapping a
-    tab's whole subtree is a genuine per-widget Cocoa operation, not a cheap
-    flag flip. Stack-sampling this app's reported click-lag showed a
-    50-211ms main-thread stall inside exactly this grid_forget() call on
-    every single tab switch, regardless of which tab -- long enough to eat
-    several queued clicks per switch.
+    """CTkTabview switches tabs by grid_forget()-ing the outgoing frame and
+    grid()-ing the incoming one -- on Tk's macOS Aqua backend each widget is a
+    real Cocoa NSView, so unmapping/mapping a tab's whole subtree is a genuine
+    per-widget Cocoa operation, causing a 50-211ms main-thread stall per switch.
 
     Once a tab has been shown at least once, keeping it permanently gridded
-    (in the same cell as every other tab) and switching only which one is on
-    top via tkraise() avoids that unmap/map cost entirely -- grid() on an
-    already-managed widget with unchanged options is a cheap no-op geometry
-    call, and tkraise() only reorders stacking, which doesn't touch map
-    state at all. No code in this app relies on hidden tabs actually being
-    unmapped (no winfo_ismapped/winfo_viewable/<Map>/<Unmap> use anywhere),
-    and this app only ever adds tabs at startup (never deletes/renames/moves
-    one), so the narrower always-gridded behavior is safe here even though
-    it isn't a general-purpose fix for every CTkTabview usage.
+    and switching only which one is on top via tkraise() avoids that cost:
+    grid() on an already-managed widget is a cheap no-op, and tkraise() only
+    reorders stacking. Safe here since no code relies on hidden tabs being
+    actually unmapped, and tabs are only ever added at startup.
     """
     try:
         from customtkinter.windows.widgets import ctk_tabview
@@ -261,9 +232,8 @@ class App(
         self._build_analysis_tools_tab(analysis_tools_tab)
         self._build_help_tab(help_tab)
 
-        # Transient zoom-percentage toast (see _show_zoom_indicator) — a sibling
-        # of the tabview, floated on top via place() so it stays visible
-        # regardless of which tab is active.
+        # Transient zoom-percentage toast, floated over the tabview via place()
+        # so it stays visible regardless of which tab is active
         self._zoom_indicator = ctk.CTkLabel(
             self, font=ctk.CTkFont(size=14, weight="bold"),
             fg_color="#242424", text_color=_BLUE, corner_radius=8,
@@ -288,12 +258,9 @@ class App(
     def _on_ctrl_scroll_zoom(self, event) -> str:
         """Nudge the app-wide CTk widget scaling up/down a step and re-clamp.
 
-        Bound both at bind_all (app-wide) and directly on the Results-tab
-        treeviews (see ResultsTabMixin) — Tk's unmodified `<MouseWheel>`
-        class-binding on Treeview still matches Ctrl+wheel events (extra
-        modifiers don't block a pattern that doesn't specify them), so
-        without the widget-level override, scrolling those tables would
-        also fire alongside the zoom.
+        Also bound directly on the Results-tab treeviews (ResultsTabMixin):
+        Tk's unmodified `<MouseWheel>` class-binding on Treeview still matches
+        Ctrl+wheel, so without that override those tables would scroll too.
         """
         if getattr(event, "num", None) == 4:
             direction = 1

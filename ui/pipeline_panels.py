@@ -359,11 +359,9 @@ class PipelineTabMixin:
 
         mode = self._mode.get()
 
-        # Cutoff/Min samples/Min pLDDT/Max PAE are all accepted by
-        # analyze_single_cif_nearby_mutations.py too, so this frame is shown
-        # for single-protein as well. PolyPhen filter only feeds step 4 of
-        # the numbered-step pipeline (ptm-proximity only). Neither applies to
-        # ca-coordinates, which doesn't run any of this filtering at all.
+        # Settings frame also applies to single-protein (accepted by
+        # analyze_single_cif_nearby_mutations.py); PolyPhen filter only feeds step 4
+        # (ptm-proximity). Neither applies to ca-coordinates.
         if mode in ("ptm-proximity", "mutation-clustering", "single-protein"):
             self._settings_frame.grid()
         else:
@@ -548,12 +546,10 @@ class PipelineTabMixin:
         """Open a file dialog, validate the selected file's content, then swap it
         into the input folder and refresh status.
 
-        Copies to a hidden staging name inside `folder` first and only clears the
-        existing file(s) once the new file is confirmed fully copied AND valid.
-        This deliberately never deletes-then-copies directly: a prior version did,
-        which left the input folder permanently empty if the copy failed partway,
-        or if the selected source file happened to already live inside `folder`
-        (its own delete step would unlink the source out from under the copy).
+        Copies to a hidden staging name in `folder` first and only clears the
+        existing file(s) once the new file is confirmed copied and valid --
+        never deletes-then-copies, which would empty the folder on a failed
+        copy or if the source file already lives inside `folder`.
         """
         path = filedialog.askopenfilename(
             title=f"Select {name} input file",
