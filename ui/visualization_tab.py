@@ -296,6 +296,7 @@ class VisualizationTabMixin:
         legend_frame = ctk.CTkFrame(stack_header, fg_color="transparent")
         legend_frame.pack(side="left")
         for text, color in [
+            ("▼ PTM position (domain map)", _PTM_MARKER_COLOR),
             ("★ PTM site", _PTM_MARKER_COLOR),
             ("Benign", _PP_COLORS["benign"]),
             ("Possibly damaging", _PP_COLORS["possibly_damaging"]),
@@ -782,9 +783,11 @@ class VisualizationTabMixin:
         honored regardless of how much total room a row has, rather than a
         fixed proportion that compresses however much space is available.
 
-        Returns ax_local so the caller decides on legend/title/suptitle —
-        those differ between single-PTM (one legend, one suptitle) and
-        whole-protein (one shared legend, one per-row title) callers.
+        Returns (ax_local, domain_ax) so the caller decides on legend/title/
+        suptitle — those differ between single-PTM (one lollipop legend plus
+        its own separate domain-map legend, one suptitle) and whole-protein
+        (one shared header legend, no per-row legend, one per-row title)
+        callers.
         """
         local_df = mut_df[(mut_df["mutation_position"] - ptm_pos).abs() <= local_window] \
             .sort_values("mutation_position")
@@ -873,7 +876,16 @@ class VisualizationTabMixin:
             ax_far.set_xticklabels(far_df["mutation"], rotation=45, ha="right", fontsize=8)
             ax_far.set_title(f"> {local_window:g} aa away", fontsize=9, color="gray")
 
-        return ax_local
+        return ax_local, domain_ax
+
+    @staticmethod
+    def _domain_map_legend_handles():
+        from matplotlib.lines import Line2D
+
+        return [
+            Line2D([0], [0], marker="v", color="none", markerfacecolor=_PTM_MARKER_COLOR,
+                   markeredgecolor="white", markersize=10, label="PTM position"),
+        ]
 
     @staticmethod
     def _lollipop_legend_handles():
@@ -903,13 +915,24 @@ class VisualizationTabMixin:
         domain_layout = self._layout_domain_labels(domain_entries, length, fig.get_figwidth())
         available_height_in = fig.get_figheight() * (0.86 - 0.14)
 
-        ax_local = self._draw_lollipop_group(
+        ax_local, domain_ax = self._draw_lollipop_group(
             fig, None, gene, ptm_site, ptm_pos, mut_df, local_window,
             domain_entries, length, domain_layout, available_height_in,
         )
 
         ax_local.legend(
             handles=self._lollipop_legend_handles(), loc="upper left", fontsize=8,
+            facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
+        )
+        # Anchored to the FIGURE, not domain_ax, and placed in the margin
+        # strip above the domain axis (which stops at gridspec top=0.86,
+        # set in _draw_lollipop_group) -- an axes-anchored corner like
+        # "upper left" sat on top of domain boxes/labels whenever a domain
+        # started near position 0, since that region isn't actually free of
+        # content the way it is for the lollipop panel below.
+        fig.legend(
+            handles=self._domain_map_legend_handles(), loc="lower left",
+            bbox_to_anchor=(0.08, 0.87), fontsize=7,
             facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
         )
 
@@ -1157,7 +1180,7 @@ class VisualizationTabMixin:
             end = min(start + batch_size, n)
             for i in range(start, end):
                 ptm_site, ptm_pos, mut_df = ptm_entries[i]
-                ax_local = self._draw_lollipop_group(
+                ax_local, _domain_ax = self._draw_lollipop_group(
                     fig, outer_gs[i, 0], gene, ptm_site, ptm_pos, mut_df, local_window,
                     domain_entries, length, domain_layout, row_height_in,
                 )
