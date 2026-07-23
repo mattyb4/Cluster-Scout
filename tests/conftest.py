@@ -34,6 +34,23 @@ def nearby_module():
     return import_script("3_find_nearby_mutations.py")
 
 
+@pytest.fixture(scope="session")
+def pipeline_utils_module():
+    """pipeline_utils.py isn't digit-prefixed, so unlike the fixtures above it
+    doesn't need import_script's path-loader workaround -- a plain import
+    after adding scripts/ to sys.path is exactly what every production
+    script (1_filter.py, 3_find_nearby_mutations.py, etc.) already does.
+    """
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    import pipeline_utils
+    return pipeline_utils
+
+
+@pytest.fixture(scope="session")
+def download_module():
+    return import_script("2_download_structures.py")
+
+
 class FakeResponse:
     """Minimal stand-in for requests.Response used to mock UniProt API calls."""
 

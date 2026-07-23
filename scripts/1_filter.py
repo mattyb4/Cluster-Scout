@@ -294,7 +294,13 @@ def _load_and_filter_cosmic(cosmic_file):
     cosmic = cosmic[cosmic["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
 
     cosmic["mutation"] = cosmic["aa_change"]
-    cosmic["mutation_with_count"] = cosmic.apply(format_mutation_with_count, axis=1)
+    # DataFrame.apply(axis=1) on an empty frame returns an empty DataFrame rather
+    # than a Series, which breaks the column assignment below -- guard explicitly
+    # rather than let a "zero rows survived filtering" input crash here.
+    cosmic["mutation_with_count"] = (
+        cosmic.apply(format_mutation_with_count, axis=1) if not cosmic.empty
+        else pd.Series(dtype=str)
+    )
 
     return cosmic, gene_to_transcript, gene_to_total_missense_patients
 
