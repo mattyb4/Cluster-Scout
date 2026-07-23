@@ -527,29 +527,16 @@ class PipelineRunnerMixin:
         step3_est = n_proteins * self._TIME_PER_PROTEIN_STEP3 if n_proteins else 60
         self._q("log", f"Step 3: {n_proteins} proteins to process")
 
-        # Step 4: annotation caches (only for ptm-proximity)
+        # Step 4: annotation caches. PolyPhen/AIUPred/InterPro run for both modes
+        # (mutation/position-level); 14-3-3/Kinase are ptm-proximity-only (PTM-site-level).
         step4_est = 0
-        if mode == "ptm-proximity":
-            # 14-3-3
-            cache_1433 = cache_dir / "1433pred"
-            cached_1433 = len(list(cache_1433.glob("*.json"))) if cache_1433.exists() else 0
-            uncached_1433 = max(0, n_proteins - cached_1433)
-
+        if mode in ("ptm-proximity", "mutation-clustering"):
             # PolyPhen
             pp_cache = cache_dir / "polyphen.tsv"
             cached_pp = 0
             if pp_cache.exists():
                 try:
                     cached_pp = len(pd.read_csv(pp_cache, sep="\t", dtype=str))
-                except Exception:
-                    pass
-
-            # Kinase
-            kin_cache = cache_dir / "kinase_predictions.tsv"
-            cached_kin = 0
-            if kin_cache.exists():
-                try:
-                    cached_kin = len(pd.read_csv(kin_cache, sep="\t", dtype=str))
                 except Exception:
                     pass
 
@@ -575,17 +562,37 @@ class PipelineRunnerMixin:
                     pass
             uncached_interpro = max(0, n_proteins - cached_interpro)
 
-            self._q("log", f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
-                    f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
-                    f"{cached_aiupred}/{n_proteins} AIUPred cached, "
-                    f"{cached_interpro}/{n_proteins} InterPro cached")
-
-            step4_est = (uncached_1433 * self._TIME_PER_1433_FETCH
-                         + max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
-                         + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT
+            step4_est = (max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
                          + uncached_aiupred * self._TIME_PER_AIUPRED_FETCH
                          + uncached_interpro * self._TIME_PER_INTERPRO_FETCH
                          + self._TIME_STEP4_BASE)
+            log_msg = (f"Step 4: {cached_pp} PolyPhen pairs cached, "
+                       f"{cached_aiupred}/{n_proteins} AIUPred cached, "
+                       f"{cached_interpro}/{n_proteins} InterPro cached")
+
+            if mode == "ptm-proximity":
+                # 14-3-3
+                cache_1433 = cache_dir / "1433pred"
+                cached_1433 = len(list(cache_1433.glob("*.json"))) if cache_1433.exists() else 0
+                uncached_1433 = max(0, n_proteins - cached_1433)
+
+                # Kinase
+                kin_cache = cache_dir / "kinase_predictions.tsv"
+                cached_kin = 0
+                if kin_cache.exists():
+                    try:
+                        cached_kin = len(pd.read_csv(kin_cache, sep="\t", dtype=str))
+                    except Exception:
+                        pass
+
+                step4_est += (uncached_1433 * self._TIME_PER_1433_FETCH
+                             + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT)
+                log_msg = (f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
+                           f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
+                           f"{cached_aiupred}/{n_proteins} AIUPred cached, "
+                           f"{cached_interpro}/{n_proteins} InterPro cached")
+
+            self._q("log", log_msg)
 
         total_est = step1_est + step2_est + step3_est + step4_est
         self._q("log", "")
@@ -636,8 +643,8 @@ class PipelineRunnerMixin:
              *(["--min-plddt", min_plddt] if min_plddt else []),
              *(["--max-pae", max_pae] if max_pae else [])],
         ]
-        if mode == "ptm-proximity":
-            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"),
+        if mode in ("ptm-proximity", "mutation-clustering"):
+            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"), "--mode", mode,
                          "--output-dir", str(self._output_dir),
                          *(["--pp-exclude"] + pp_exclude if pp_exclude else [])])
 

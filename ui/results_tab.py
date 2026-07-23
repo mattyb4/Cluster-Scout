@@ -952,6 +952,13 @@ class ResultsTabMixin:
                 "near_count": row.get("nearby_mutation_count", ""),
                 "uniq_pos": row.get("unique_nearby_position_count", ""),
                 "near_pts": row.get("total_nearby_patient_count", ""),
+                "ppc": row.get("anchor_polyphen_class", ""),
+                "pps": row.get("anchor_polyphen_score", ""),
+                "isdis": row.get("anchor_is_disordered", ""),
+                "isbnd": row.get("anchor_is_binding", ""),
+                "anchor_aiupred_gen": row.get("anchor_aiupred_general", ""),
+                "anchor_aiupred_bind": row.get("anchor_aiupred_binding", ""),
+                "anchor_domain": row.get("anchor_domain", ""),
             }
             values = [i] + [values_map.get(c, "") for c in _ANCHOR_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
@@ -1177,6 +1184,8 @@ class ResultsTabMixin:
                 "pae": m.group(5) or "",
                 "mpld": "",
                 "pts": "",
+                "ppc": _PP_LABEL.get(m.group(2) or "", ""),
+                "pps": m.group(3) or "",
             }
             values = [i] + [per_row.get(c, "") for c in _NEARBY_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))

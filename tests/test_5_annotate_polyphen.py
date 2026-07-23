@@ -1,4 +1,5 @@
 """Unit tests for PolyPhen-2 annotation functions in scripts/4_annotate.py."""
+import pandas as pd
 import pytest
 
 from conftest import import_script
@@ -180,4 +181,133 @@ class TestFetchPolyphen:
         assert calls == [], (
             "the early-return for an unparseable mutation string should happen BEFORE "
             f"any API call is attempted, but got {len(calls)} call(s)"
+        )
+
+
+class TestPpLookupSingle:
+    def setup_method(self):
+        self.cache = {("TP53", "R175H"): ("D", "0.99")}
+
+    def test_finds_bare_mutation(self):
+        result = mod._pp_lookup_single("R175H", "TP53", self.cache)
+        assert result == ("D", "0.99"), (
+            f"a bare mutation label with no distance suffix (e.g. an anchor_mutation "
+            f"cell) should look up directly in the cache, got {result}"
+        )
+
+    def test_strips_isoform_tag_before_lookup(self):
+        result = mod._pp_lookup_single("R175H(isoform?)", "TP53", self.cache)
+        assert result == ("D", "0.99"), (
+            f"the '(isoform?)' suffix must be stripped before the cache lookup, got {result}"
+        )
+
+    def test_unknown_mutation_returns_blanks(self):
+        result = mod._pp_lookup_single("X999Y", "TP53", self.cache)
+        assert result == ("", ""), (
+            f"a mutation with no cache entry should return blanks, not raise, got {result}"
+        )
+
+    def test_none_mutation_returns_blanks(self):
+        result = mod._pp_lookup_single(None, "TP53", self.cache)
+        assert result == ("", ""), (
+            f"a None mutation (e.g. a missing anchor_mutation cell) must not raise on "
+            f".replace(), should return blanks, got {result}"
+        )
+
+
+class TestRunPolyphenPhaseMutationCols:
+    def test_only_tags_specified_columns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        df = pd.DataFrame([{
+            "gene": "TP53",
+            "nearby_mutations": "R175H-3.52Å(PAE:2.1)",
+            "mutations_within_5_positions": "V143A-1.00Å",
+        }])
+        # Pre-seed the cache so both mutations are already known -- no network call needed.
+        pd.DataFrame([
+            {"gene": "TP53", "mutation": "R175H", "pred": "D", "score": "0.99"},
+            {"gene": "TP53", "mutation": "V143A", "pred": "B", "score": "0.01"},
+        ]).to_csv(mod._PP_CACHE_FILE, sep="\t", index=False)
+
+        mod.run_polyphen_phase(df, mutation_cols=["nearby_mutations"])
+
+        assert "(PP:D,0.99)" in df.iloc[0]["nearby_mutations"], (
+            f"nearby_mutations was passed via mutation_cols -- it should be tagged, "
+            f"got {df.iloc[0]['nearby_mutations']!r}"
+        )
+        assert df.iloc[0]["mutations_within_5_positions"] == "V143A-1.00Å", (
+            f"mutations_within_5_positions was NOT passed in mutation_cols -- it must "
+            f"be left completely untouched, got {df.iloc[0]['mutations_within_5_positions']!r}"
+        )
+
+    def test_default_mutation_cols_covers_ptm_proximity_columns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        df = pd.DataFrame([{
+            "gene": "TP53",
+            "mutations_within_5_positions": "R175H-3.52Å",
+            "mutations_more_than_5_positions": "V143A-8.10Å",
+        }])
+        pd.DataFrame([
+            {"gene": "TP53", "mutation": "R175H", "pred": "D", "score": "0.99"},
+            {"gene": "TP53", "mutation": "V143A", "pred": "B", "score": "0.01"},
+        ]).to_csv(mod._PP_CACHE_FILE, sep="\t", index=False)
+
+        mod.run_polyphen_phase(df)
+
+        assert "(PP:D,0.99)" in df.iloc[0]["mutations_within_5_positions"], (
+            "with no mutation_cols override, the default _MUTATION_COLS (ptm-proximity's "
+            "within/beyond columns) should still be tagged"
+        )
+        assert "(PP:B,0.01)" in df.iloc[0]["mutations_more_than_5_positions"], (
+            "the second default column should also be tagged"
+        )
+
+    def test_bare_mutation_cols_fetch_but_are_not_tagged_inline(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        df = pd.DataFrame([{
+            "gene": "TP53",
+            "anchor_mutation": "R175H",
+            "nearby_mutations": "",
+        }])
+        calls = []
+
+        def fake_fetch(gene, mut):
+            calls.append((gene, mut))
+            return "D", "0.99"
+
+        monkeypatch.setattr(mod, "fetch_polyphen", fake_fetch)
+
+        cache = mod.run_polyphen_phase(
+            df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
+        )
+
+        assert ("TP53", "R175H") in calls, (
+            f"anchor_mutation is an uncached bare mutation label -- it must trigger a "
+            f"live fetch (via bare_mutation_cols), not silently stay blank forever, "
+            f"got fetched pairs: {calls}"
+        )
+        assert cache.get(("TP53", "R175H")) == ("D", "0.99"), (
+            f"the fetched result must land in the returned cache so callers can look "
+            f"it up afterward, got {cache.get(('TP53', 'R175H'))}"
+        )
+        assert df.iloc[0]["anchor_mutation"] == "R175H", (
+            "bare_mutation_cols have no '-distance' entry format to tag inline -- "
+            f"anchor_mutation must be left as the plain label, got {df.iloc[0]['anchor_mutation']!r}"
+        )
+
+    def test_bare_mutation_col_already_cached_triggers_no_fetch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        pd.DataFrame([
+            {"gene": "TP53", "mutation": "R175H", "pred": "D", "score": "0.99"},
+        ]).to_csv(mod._PP_CACHE_FILE, sep="\t", index=False)
+        df = pd.DataFrame([{"gene": "TP53", "anchor_mutation": "R175H", "nearby_mutations": ""}])
+        calls = []
+        monkeypatch.setattr(mod, "fetch_polyphen", lambda g, m: calls.append((g, m)))
+
+        mod.run_polyphen_phase(
+            df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
+        )
+        assert calls == [], (
+            f"anchor_mutation is already in the on-disk cache -- it must not trigger "
+            f"another fetch, got {calls}"
         )

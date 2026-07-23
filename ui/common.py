@@ -530,28 +530,42 @@ _MUT_LONG_SRC_MAP = {
     "mut_domain": "mutation_domain",
 }
 
-# Mutation-Clustering mode's equivalent of _PTM_TV_COLS/_MUT_TV_COLS. Kept
-# deliberately short: this mode never runs step 4 (annotate), so there's no
-# PolyPhen/kinase/14-3-3/AIUPred/domain data to show, unlike PTM Proximity.
+# Mutation-Clustering mode's equivalent of _PTM_TV_COLS/_MUT_TV_COLS. No
+# 14-3-3/kinase columns -- those are PTM-site-specific and this mode has no
+# concept of a PTM site (the anchor is itself a mutation).
 _ANCHOR_TV_COLS = [
     ("#",                "#col",        32,  True,  True),
     ("UniProt",          "uniprot",     70,  False, True),
     ("Gene",             "gene",        58,  False, True),
     ("Anchor mutation",  "anchor",     100,  False, True),
+    ("Binding?",         "isbnd",       58,  False, True),
+    ("Disordered?",      "isdis",       78,  False, True),
+    ("PP Class",         "ppc",        115,  False, True),
+    ("PP Score",         "pps",         62,  True,  False),
     ("Anchor pLDDT",     "anchor_plddt", 90, True,  True),
     ("Nearby count",     "near_count",  95,  True,  True),
     ("Unique positions", "uniq_pos",   100,  True,  True),
     ("Nearby patients",  "near_pts",   100,  True,  True),
+    ("Anchor AIUPred gen.",  "anchor_aiupred_gen",  120, True,  False),
+    ("Anchor AIUPred bind.", "anchor_aiupred_bind", 120, True,  False),
+    ("Anchor domain",    "anchor_domain", 180, False, False),
 ]
 
 _NEARBY_TV_COLS = [
-    ("#",         "#col", 32, True,  True),
-    ("Mutation",  "mut",  80, False, True),
-    ("Seq dist",  "seqd", 62, True,  True),
-    ("Dist (Å)",  "dist", 62, True,  True),
-    ("PAE",       "pae",  48, True,  True),
-    ("Mut pLDDT", "mpld", 75, True,  True),
-    ("Patients",  "pts",  62, True,  True),
+    ("#",                    "#col", 32, True,  True),
+    ("Mutation",             "mut",  80, False, True),
+    ("Seq dist",             "seqd", 62, True,  True),
+    ("Dist (Å)",             "dist", 62, True,  True),
+    ("Binding?",             "isbnd",             58, False, True),
+    ("Disordered?",          "isdis",             78, False, True),
+    ("PP Class",             "ppc",              115, False, True),
+    ("PP Score",             "pps",               62, True,  False),
+    ("PAE",                  "pae",  48, True,  True),
+    ("Mut pLDDT",            "mpld", 75, True,  True),
+    ("Patients",             "pts",  62, True,  True),
+    ("Mut AIUPred gen.",     "mut_aiupred_gen",   120, True,  False),
+    ("Mut AIUPred bind.",    "mut_aiupred_bind",  120, True,  False),
+    ("Mutation domain",      "mut_domain",       180, False, False),
 ]
 
 _ANCHOR_COL_HELP: dict[str, str] = {
@@ -570,6 +584,23 @@ _ANCHOR_COL_HELP: dict[str, str] = {
                 "including multiple substitutions at the same position).",
     "near_pts": "Total COSMIC patient count summed across every nearby "
                 "mutation for this anchor.",
+    "isbnd": "Yes/no: is the anchor mutation's residue predicted to be a "
+             "disordered binding region (AIUPred binding score > 0.5)?",
+    "isdis": "Yes/no: is the anchor mutation's residue predicted to be "
+             "intrinsically disordered (AIUPred general score > 0.5)?",
+    "ppc": "PolyPhen-2's classification of the anchor mutation's predicted "
+           "effect on protein function: benign, possibly damaging, or "
+           "probably damaging.",
+    "pps": "PolyPhen-2's raw score (0-1) for the anchor mutation; higher "
+           "means more likely to be damaging.",
+    "anchor_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at the "
+                          "anchor mutation's residue.",
+    "anchor_aiupred_bind": "AIUPred binding-region disorder score (0-1) at "
+                           "the anchor mutation's residue.",
+    "anchor_domain": "InterPro functional domain(s) (name, type, and residue "
+                     "range) containing the anchor mutation's position, if "
+                     "any. A residue can fall inside more than one entry - "
+                     "all are shown, semicolon-separated.",
 }
 
 _NEARBY_COL_HELP: dict[str, str] = {
@@ -578,12 +609,29 @@ _NEARBY_COL_HELP: dict[str, str] = {
             "and the anchor mutation.",
     "dist": "3D spatial distance, in Ångströms, between this mutation and "
             "the anchor mutation in the AlphaFold structure.",
+    "isbnd": "Yes/no: is this mutation's residue predicted to be a "
+             "disordered binding region (AIUPred binding score > 0.5)?",
+    "isdis": "Yes/no: is this mutation's residue predicted to be "
+             "intrinsically disordered (AIUPred general score > 0.5)?",
+    "ppc": "PolyPhen-2's classification of this mutation's predicted effect "
+           "on protein function: benign, possibly damaging, or probably "
+           "damaging.",
+    "pps": "PolyPhen-2's raw score (0-1) for this mutation; higher means "
+           "more likely to be damaging.",
     "pae": "Predicted Aligned Error (Å) between the anchor and this "
            "mutation - AlphaFold's confidence in their relative 3D position.",
     "mpld": "AlphaFold's per-residue confidence (pLDDT, 0-100) at this "
             "mutation's position.",
     "pts": "Number of distinct COSMIC patient samples carrying this "
            "specific mutation.",
+    "mut_aiupred_gen": "AIUPred intrinsic disorder score (0-1) at this "
+                       "mutation's residue.",
+    "mut_aiupred_bind": "AIUPred binding-region disorder score (0-1) at "
+                        "this mutation's residue.",
+    "mut_domain": "InterPro functional domain(s) (name, type, and residue "
+                  "range) containing this mutation's position, if any. A "
+                  "residue can fall inside more than one entry - all are "
+                  "shown, semicolon-separated.",
 }
 
 # mutation_cluster_long.tsv column names for every _NEARBY_TV_COLS entry
@@ -592,9 +640,16 @@ _CLUSTER_LONG_SRC_MAP = {
     "mut": "mutation",
     "seqd": "sequence_distance",
     "dist": "distance_angstrom",
+    "isbnd": "mut_is_binding",
+    "isdis": "mut_is_disordered",
+    "ppc": "polyphen_class",
+    "pps": "polyphen_score",
     "pae": "pair_pae",
     "mpld": "mutation_plddt",
     "pts": "patient_count",
+    "mut_aiupred_gen": "mut_aiupred_general",
+    "mut_aiupred_bind": "mut_aiupred_binding",
+    "mut_domain": "mutation_domain",
 }
 
 

@@ -176,3 +176,79 @@ class TestAnnotateLongFormat:
             f"an unparseable ptm_position also has no position for the domain lookup "
             f"-- must be blank, got {row['ptm_domain']!r}"
         )
+
+
+class TestAnnotateClusterLongFormat:
+    def test_fills_annotation_columns_from_mutation_position_column(self):
+        df = pd.DataFrame([{
+            "UniProt": "P04637", "gene": "TP53",
+            "anchor_mutation": "R248Q", "mutation": "R175H", "mutation_position": "175",
+        }])
+        mod.annotate_cluster_long_format(
+            df,
+            pp_cache={("TP53", "R175H"): ("D", "0.99")},
+            disorder_maps={
+                "general": {"P04637": {175: 0.8}},
+                "binding": {"P04637": {175: 0.2}},
+            },
+            domain_maps={"P04637": [{"name": "DBD", "type": "domain", "start": 100, "end": 200}]},
+        )
+        row = df.iloc[0]
+
+        assert row["polyphen_class"] == "probably_damaging", (
+            f"pp_cache's 'D' code should map to probably_damaging, got {row['polyphen_class']!r}"
+        )
+        assert row["polyphen_score"] == "0.99", f"the raw score should pass through, got {row['polyphen_score']!r}"
+        assert row["mut_aiupred_general"] == "0.800", (
+            f"disorder should be looked up directly from mutation_position (175) -- no "
+            f"regex parsing needed, unlike annotate_long_format -- got {row['mut_aiupred_general']!r}"
+        )
+        assert row["mut_is_disordered"] == "yes", f"0.8 > 0.5 -- should classify as disordered, got {row['mut_is_disordered']!r}"
+        assert row["mut_is_binding"] == "no", f"0.2 is not > 0.5, got {row['mut_is_binding']!r}"
+        assert row["mutation_domain"] == "DBD (domain, 100-200)", (
+            f"position 175 falls inside DBD (100-200), got {row['mutation_domain']!r}"
+        )
+
+    def test_isoform_tagged_mutation_is_stripped_before_polyphen_lookup(self):
+        df = pd.DataFrame([{
+            "UniProt": "P04637", "gene": "TP53",
+            "anchor_mutation": "R248Q", "mutation": "R175H(isoform?)", "mutation_position": "175",
+        }])
+        mod.annotate_cluster_long_format(df, pp_cache={("TP53", "R175H"): ("B", "0.02")})
+        assert df.iloc[0]["polyphen_class"] == "benign", (
+            f"pp_cache is keyed by the clean mutation label -- the '(isoform?)' suffix "
+            f"must be stripped before lookup, got {df.iloc[0]['polyphen_class']!r}"
+        )
+
+    def test_blank_mutation_position_does_not_crash(self):
+        df = pd.DataFrame([{
+            "UniProt": "P04637", "gene": "TP53",
+            "anchor_mutation": "R248Q", "mutation": "R175H", "mutation_position": "",
+        }])
+        mod.annotate_cluster_long_format(
+            df, pp_cache={},
+            disorder_maps={"general": {"P04637": {}}, "binding": {"P04637": {}}},
+            domain_maps={"P04637": []},
+        )
+        row = df.iloc[0]
+        assert row["mut_aiupred_general"] == "" and row["mutation_domain"] == "", (
+            "a blank mutation_position has no position to look up -- both the disorder "
+            f"and domain columns must be blank rather than raise, got "
+            f"aiupred={row['mut_aiupred_general']!r} domain={row['mutation_domain']!r}"
+        )
+
+    def test_maps_not_supplied_leaves_columns_blank(self):
+        df = pd.DataFrame([{
+            "UniProt": "P04637", "gene": "TP53",
+            "anchor_mutation": "R248Q", "mutation": "R175H", "mutation_position": "175",
+        }])
+        mod.annotate_cluster_long_format(df, pp_cache={})
+        row = df.iloc[0]
+        assert row["mut_aiupred_general"] == "" and row["mutation_domain"] == "", (
+            "with disorder_maps/domain_maps omitted (default None), both must be "
+            "blank rather than raise"
+        )
+        assert row["mut_is_disordered"] == "no" and row["mut_is_binding"] == "no", (
+            f"a blank score must classify as 'no', not crash on float(''), got "
+            f"disordered={row['mut_is_disordered']!r} binding={row['mut_is_binding']!r}"
+        )

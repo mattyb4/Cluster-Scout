@@ -172,3 +172,80 @@ class TestApplyPolyphenFilter:
             f"class-based filtering as the main mutation columns, got "
             f"{result.iloc[0]['confirmed_disrupting_mutations']!r}"
         )
+
+
+class TestApplyPolyphenFilterCluster:
+    def _row(self, anchor, anchor_class, nearby):
+        return {
+            "UniProt": "P04637",
+            "anchor_mutation": anchor,
+            "anchor_polyphen_class": anchor_class,
+            "nearby_mutations": nearby,
+            "nearby_mutation_count": 0,
+            "unique_nearby_position_count": 0,
+            "total_nearby_patient_count": 5,
+        }
+
+    def test_no_op_when_exclude_classes_is_empty(self):
+        df = pd.DataFrame([self._row("R175H", "probably_damaging", "A101B(PP:D,0.99)-1.00Å")])
+        result = mod.apply_polyphen_filter_cluster(df, [])
+        assert result is df, (
+            "with nothing excluded, apply_polyphen_filter_cluster should return the "
+            "SAME DataFrame object untouched (no-op fast path)"
+        )
+
+    def test_removes_excluded_nearby_mutation_but_keeps_row(self):
+        df = pd.DataFrame([self._row(
+            "R175H", "benign",
+            "A101B(PP:D,0.99)-1.00Å, C102D(PP:B,0.10)-2.00Å",
+        )])
+        result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
+
+        assert len(result) == 1, (
+            f"the anchor isn't excluded and one qualifying (benign) neighbor remains "
+            f"-- the row must survive, got {len(result)} row(s)"
+        )
+        assert result.iloc[0]["nearby_mutations"] == "C102D(PP:B,0.10)-2.00Å", (
+            f"the D-tagged neighbor should be removed from the string, got "
+            f"{result.iloc[0]['nearby_mutations']!r}"
+        )
+        assert result.iloc[0]["nearby_mutation_count"] == 1, (
+            f"nearby_mutation_count must be recomputed from the filtered string, got "
+            f"{result.iloc[0]['nearby_mutation_count']}"
+        )
+
+    def test_drops_row_when_anchor_own_class_is_excluded(self):
+        df = pd.DataFrame([self._row(
+            "R175H", "probably_damaging",
+            "C102D(PP:B,0.10)-2.00Å",
+        )])
+        result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
+        assert len(result) == 0, (
+            f"the anchor mutation itself is in an excluded class, even though a "
+            f"qualifying neighbor remains -- the whole row must be dropped, got "
+            f"{len(result)} row(s)"
+        )
+
+    def test_drops_row_when_all_neighbors_filtered_out(self):
+        df = pd.DataFrame([self._row(
+            "R175H", "benign",
+            "A101B(PP:D,0.99)-1.00Å",
+        )])
+        result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
+        assert len(result) == 0, (
+            f"the anchor's own class survives, but its only neighbor was filtered out "
+            f"-- a row with zero neighbors is meaningless cluster data and must be "
+            f"dropped, got {len(result)} row(s)"
+        )
+
+    def test_total_nearby_patient_count_left_as_pre_filter_total(self):
+        df = pd.DataFrame([self._row(
+            "R175H", "benign",
+            "A101B(PP:D,0.99)-1.00Å, C102D(PP:B,0.10)-2.00Å",
+        )])
+        result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
+        assert result.iloc[0]["total_nearby_patient_count"] == 5, (
+            "total_nearby_patient_count can't be recomputed from the mutation string "
+            "(no per-entry patient count embedded in it) -- it must retain its "
+            f"pre-filter value, got {result.iloc[0]['total_nearby_patient_count']}"
+        )

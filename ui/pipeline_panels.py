@@ -360,13 +360,13 @@ class PipelineTabMixin:
         mode = self._mode.get()
 
         # Settings frame also applies to single-protein (accepted by
-        # analyze_single_cif_nearby_mutations.py); PolyPhen filter only feeds step 4
-        # (ptm-proximity). Neither applies to ca-coordinates.
+        # analyze_single_cif_nearby_mutations.py); PolyPhen filter feeds step 4 of
+        # both ptm-proximity and mutation-clustering. Neither applies to ca-coordinates.
         if mode in ("ptm-proximity", "mutation-clustering", "single-protein"):
             self._settings_frame.grid()
         else:
             self._settings_frame.grid_remove()
-        if mode == "ptm-proximity":
+        if mode in ("ptm-proximity", "mutation-clustering"):
             self._pp_frame.grid()
         else:
             self._pp_frame.grid_remove()

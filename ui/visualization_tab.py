@@ -550,9 +550,7 @@ class VisualizationTabMixin:
         return df_fallback, note
 
     def _get_viz_cluster_mutation_df(self, uid: str, anchor_mutation: str, wide_row):
-        """Cluster-mode counterpart of _get_viz_mutation_df. polyphen_class is
-        always blank (never computed for this mode).
-        """
+        """Cluster-mode counterpart of _get_viz_mutation_df."""
         import pandas as pd
 
         if self._cluster_df_long is not None:
@@ -573,7 +571,8 @@ class VisualizationTabMixin:
                 sub["distance_angstrom"] = pd.to_numeric(
                     sub.get("distance_angstrom", 0), errors="coerce"
                 ).fillna(0)
-                sub["polyphen_class"] = ""
+                if "polyphen_class" not in sub.columns:
+                    sub["polyphen_class"] = ""
                 return sub[[
                     "mutation", "mutation_position", "patient_count",
                     "distance_angstrom", "polyphen_class",
@@ -596,7 +595,7 @@ class VisualizationTabMixin:
                 "mutation_position": int(pos_m.group()),
                 "patient_count": 1,
                 "distance_angstrom": float(m.group(4)),
-                "polyphen_class": "",
+                "polyphen_class": _PP_LABEL.get(m.group(2) or "", ""),
             })
         df_fallback = pd.DataFrame(rows)
         note = None

@@ -8,6 +8,14 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import matplotlib
+# Force a headless backend before any test imports pyplot (cif_variance.py,
+# radius_sweep.py). Otherwise matplotlib auto-selects a GUI backend on first
+# use and caches that choice for the rest of the session -- on this machine
+# that can land on a Tk-based backend with a broken Tcl/Tk install, crashing
+# any later plt.subplots() call that doesn't inject its own Figure.
+matplotlib.use("Agg")
+
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

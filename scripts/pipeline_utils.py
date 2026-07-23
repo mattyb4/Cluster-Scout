@@ -338,4 +338,6 @@ MUTATION_CLUSTERING_STEPS = [
      "Downloading AlphaFold CIF models and PAE files"),
     ("Find mutation clusters in 3D space",
      "Finding mutation clusters in 3D space"),
+    ("Annotate results (PolyPhen-2, AIUPred, InterPro predictions)",
+     "Annotating results (PolyPhen-2, AIUPred, InterPro predictions)"),
 ]

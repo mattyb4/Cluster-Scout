@@ -1,7 +1,6 @@
-"""Annotate the proximity database with 14-3-3 binding predictions, PolyPhen-2
-pathogenicity scores, and predicted upstream kinases.
-
-Reads the proximity DB once, runs three annotation phases, and writes back once:
+"""Annotate the pipeline's output with 14-3-3 binding predictions, PolyPhen-2
+pathogenicity scores, predicted upstream kinases, AIUPred disorder, and
+InterPro functional domains.
 
   Phase 1 — 14-3-3: Queries the 14-3-3-Pred API for predicted binding-site
             scores and cross-references experimentally confirmed interactors.
@@ -10,6 +9,14 @@ Reads the proximity DB once, runs three annotation phases, and writes back once:
   Phase 3 — Kinases: Uses the Kinase Library to predict the top 5 upstream
             kinases for each phosphorylation site based on the ±7 residue
             sequence window from AlphaFold CIF structures.
+  Phase 4 — AIUPred: Predicted intrinsic disorder / binding-region scores.
+  Phase 5 — InterPro: Curated functional-domain lookup per position.
+
+--mode ptm-proximity (default) runs all 5 phases against
+ptm_mutation_proximity_db.tsv/_long.tsv. --mode mutation-clustering runs only
+Phases 2/4/5 (PolyPhen/AIUPred/InterPro are mutation/position-level; 14-3-3
+and Kinase require a curated PTM site, which mutation-clustering mode has no
+concept of) against mutation_cluster_db.tsv/_long.tsv.
 """
 from __future__ import annotations
 
@@ -40,9 +47,9 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 _NUM_PHASES = 5
 
 
-def _emit_progress(phase: int, phase_pct: float, desc: str) -> None:
+def _emit_progress(phase: int, phase_pct: float, desc: str, num_phases: int = _NUM_PHASES) -> None:
     """Print overall progress for the app to parse. phase is 0-indexed, phase_pct is 0-100."""
-    overall = int((phase * 100 + phase_pct) / _NUM_PHASES)
+    overall = int((phase * 100 + phase_pct) / num_phases)
     print(f"\r##PROGRESS## {overall} {desc}", end="", flush=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -309,8 +316,18 @@ def annotate_mutation_string(
     return ", ".join(parts)
 
 
-def run_polyphen_phase(df: pd.DataFrame) -> dict:
-    """Phase 2: fetch PolyPhen-2 scores and tag mutation strings. Returns the full cache."""
+def run_polyphen_phase(
+    df: pd.DataFrame, mutation_cols: list[str] = _MUTATION_COLS,
+    bare_mutation_cols: tuple[str, ...] = (),
+    phase_idx: int = 1, num_phases: int = _NUM_PHASES,
+) -> dict:
+    """Phase 2: fetch PolyPhen-2 scores and tag mutation strings. Returns the full cache.
+
+    *bare_mutation_cols* are columns holding a single bare mutation label with
+    no distance suffix (e.g. anchor_mutation) -- scanned for fetching but not
+    tagged inline (no entry format to tag); read back afterward via
+    _pp_lookup_single once the cache is populated.
+    """
     print("\n── Phase 2: PolyPhen-2 pathogenicity scores ──")
 
     cache = _pp_load_cache()
@@ -320,7 +337,7 @@ def run_polyphen_phase(df: pd.DataFrame) -> dict:
         gene = row.get("gene", "")
         if not gene:
             continue
-        for col in _MUTATION_COLS:
+        for col in mutation_cols:
             cell = row.get(col, "")
             if not cell:
                 continue
@@ -331,6 +348,10 @@ def run_polyphen_phase(df: pd.DataFrame) -> dict:
                 base = m.group(1)
                 if "(PP:" not in m.group(2) and (gene, base) not in cache:
                     needed.add((gene, base))
+        for col in bare_mutation_cols:
+            bare = str(row.get(col, "") or "").replace("(isoform?)", "").strip()
+            if bare and MUT_RE.match(bare) and (gene, bare) not in cache:
+                needed.add((gene, bare))
 
     to_fetch = list(needed)
     print(f"{len(to_fetch)} unique (gene, mutation) pairs to fetch "
@@ -348,13 +369,13 @@ def run_polyphen_phase(df: pd.DataFrame) -> dict:
                 pred, score = future.result()
                 cache[(g, mut)] = (pred, score)
                 done += 1
-                _emit_progress(1, done / total * 100, f"PolyPhen-2 scores: {done}/{total}")
+                _emit_progress(phase_idx, done / total * 100, f"PolyPhen-2 scores: {done}/{total}", num_phases)
         _pp_save_cache(cache)
     else:
-        _emit_progress(1, 100, "PolyPhen-2 scores: all cached")
+        _emit_progress(phase_idx, 100, "PolyPhen-2 scores: all cached", num_phases)
 
     tagged = 0
-    for col in _MUTATION_COLS:
+    for col in mutation_cols:
         if col not in df.columns:
             continue
         new_values = []
@@ -367,6 +388,12 @@ def run_polyphen_phase(df: pd.DataFrame) -> dict:
 
     print(f"  Tagged {tagged} mutation entries with PolyPhen-2 predictions")
     return cache
+
+
+def _pp_lookup_single(mutation: str, gene: str, cache: dict[tuple[str, str], tuple[str, str]]) -> tuple[str, str]:
+    """Look up PolyPhen (pred, score) for a single bare mutation label with no distance suffix."""
+    clean = (mutation or "").replace("(isoform?)", "").strip()
+    return cache.get((gene, clean), ("", ""))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -632,6 +659,41 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
     return df
 
 
+def apply_polyphen_filter_cluster(df: pd.DataFrame, exclude_classes: list[str]) -> pd.DataFrame:
+    """Remove mutations of excluded PP classes from the wide-format cluster DB.
+
+    Filters nearby_mutations and recomputes its count/position columns, then
+    drops the whole anchor row if the anchor's own class is excluded or no
+    nearby mutations remain. total_nearby_patient_count is left as the
+    pre-filter total -- same caveat as apply_polyphen_filter's *_total_patient_count.
+    """
+    exclude_codes = {_PP_CODE_MAP[c] for c in exclude_classes if c in _PP_CODE_MAP}
+    if not exclude_codes:
+        return df
+
+    print(f"\nApplying PolyPhen filter — excluding: {', '.join(exclude_classes)}")
+    print("  Note: total_nearby_patient_count retains pre-filter totals")
+
+    df["nearby_mutations"] = df["nearby_mutations"].fillna("").apply(
+        lambda s: _filter_mut_str(s, exclude_codes)
+    )
+    df["nearby_mutation_count"] = df["nearby_mutations"].apply(
+        lambda s: len([e for e in s.split(", ") if e.strip()]) if s else 0
+    )
+    df["unique_nearby_position_count"] = df["nearby_mutations"].apply(
+        lambda s: len(set(_positions_from_str(s)))
+    )
+
+    before = len(df)
+    anchor_excluded = df["anchor_polyphen_class"].isin(exclude_classes)
+    no_neighbors_left = df["nearby_mutations"].fillna("").str.len() == 0
+    df = df[~anchor_excluded & ~no_neighbors_left].reset_index(drop=True)
+    removed = before - len(df)
+    print(f"  Removed {removed} anchor rows (excluded anchor class or no qualifying neighbors); "
+          f"{len(df)} rows remaining")
+    return df
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 4: AIUPred disorder scores
 # ═════════════════════════════════════════════════════════════════════════════
@@ -715,7 +777,9 @@ def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, flo
     return result
 
 
-def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]]:
+def run_aiupred_phase(
+    df: pd.DataFrame, phase_idx: int = 3, num_phases: int = _NUM_PHASES,
+) -> dict[str, dict[str, dict[int, float]]]:
     """Phase 4: fetch general and binding disorder scores for each protein.
 
     Makes one API call per protein (binding), which yields both general and
@@ -746,8 +810,8 @@ def run_aiupred_phase(df: pd.DataFrame) -> dict[str, dict[str, dict[int, float]]
                 for t, scores in future.result().items():
                     cache[(uid, t)] = scores
                 done += 1
-                _emit_progress(3, done / max(total_fetches, 1) * 100,
-                               f"AIUPred {uid}: {done}/{total_fetches}")
+                _emit_progress(phase_idx, done / max(total_fetches, 1) * 100,
+                               f"AIUPred {uid}: {done}/{total_fetches}", num_phases)
         any_new = True
 
     if any_new:
@@ -832,7 +896,9 @@ def fetch_interpro_domains(uniprot_id: str) -> list[dict]:
     return entries
 
 
-def run_interpro_phase(df: pd.DataFrame) -> dict[str, list[dict]]:
+def run_interpro_phase(
+    df: pd.DataFrame, phase_idx: int = 4, num_phases: int = _NUM_PHASES,
+) -> dict[str, list[dict]]:
     """Phase 5: fetch InterPro functional-domain entries for each protein."""
     print("\n── Phase 5: InterPro functional domains ──")
     cache = _interpro_load_cache()
@@ -848,7 +914,7 @@ def run_interpro_phase(df: pd.DataFrame) -> dict[str, list[dict]]:
             for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="  InterPro"), 1):
                 uid = futures[future]
                 cache[uid] = future.result()
-                _emit_progress(4, i / max(len(need), 1) * 100, f"InterPro {uid}: {i}/{len(need)}")
+                _emit_progress(phase_idx, i / max(len(need), 1) * 100, f"InterPro {uid}: {i}/{len(need)}", num_phases)
         _interpro_save_cache(cache)
 
     return {uid: cache.get(uid, []) for uid in uniprots}
@@ -973,30 +1039,70 @@ def annotate_long_format(
     df["mutation_domain"] = mut_domains
 
 
+def annotate_cluster_long_format(
+    df: pd.DataFrame,
+    pp_cache: dict,
+    disorder_maps: dict | None = None,
+    domain_maps: dict | None = None,
+) -> None:
+    """Fill mutation-level annotation columns in the long-format cluster table in-place.
+
+    Cluster-mode counterpart of annotate_long_format's PolyPhen/AIUPred/domain
+    blocks (no 14-3-3/kinase -- those are PTM-site-specific). Simpler than the
+    PTM version since mutation_position is already a column here, not something
+    to regex out of the mutation label.
+    """
+    pp_scores, pp_classes = [], []
+    _ATYPES = ("general", "binding")
+    mut_disorder: dict[str, list] = {t: [] for t in _ATYPES}
+    mut_domains = []
+
+    for _, row in df.iterrows():
+        uid = str(row.get("UniProt", "") or "")
+        gene = str(row.get("gene", "") or "")
+        mutation = str(row.get("mutation", "") or "")
+        clean_mut = mutation.replace("(isoform?)", "")
+        try:
+            raw_pos = str(row.get("mutation_position", "")).strip()
+            mut_pos = int(float(raw_pos)) if raw_pos else None
+        except ValueError:
+            mut_pos = None
+
+        pred, pp_score = pp_cache.get((gene, clean_mut), ("", ""))
+        pp_scores.append(pp_score)
+        pp_classes.append(_PP_CLASS.get(pred, ""))
+
+        for t in _ATYPES:
+            if disorder_maps is not None:
+                ps = disorder_maps[t].get(uid, {})
+                mut_disorder[t].append(f"{ps[mut_pos]:.3f}" if mut_pos in ps else "")
+            else:
+                mut_disorder[t].append("")
+
+        if domain_maps is not None:
+            mut_domains.append(find_domain_at_position(domain_maps.get(uid, []), mut_pos))
+        else:
+            mut_domains.append("")
+
+    df["polyphen_score"] = pp_scores
+    df["polyphen_class"] = pp_classes
+    for t in _ATYPES:
+        df[f"mut_aiupred_{t}"] = mut_disorder[t]
+    df["mut_is_disordered"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["general"]
+    ]
+    df["mut_is_binding"] = [
+        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["binding"]
+    ]
+    df["mutation_domain"] = mut_domains
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Main
 # ═════════════════════════════════════════════════════════════════════════════
 
-def main() -> None:
-    """Run all three annotation phases on the proximity database."""
-    import argparse
-    parser = argparse.ArgumentParser(description="Annotate the proximity database.")
-    parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="Directory containing the proximity DB (default: Output/)",
-    )
-    parser.add_argument(
-        "--pp-exclude",
-        nargs="+",
-        choices=["benign", "possibly_damaging", "probably_damaging"],
-        default=[],
-        metavar="CLASS",
-        help="Exclude mutations with these PolyPhen-2 classes from the output",
-    )
-    args = parser.parse_args()
-
-    output_dir = Path(args.output_dir)
+def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str]) -> None:
+    """Run all 5 annotation phases on the PTM Proximity proximity database."""
     proximity_db = output_dir / "ptm_mutation_proximity_db.tsv"
     print(f"Reading proximity DB: {proximity_db}")
     df = pd.read_csv(proximity_db, sep="\t", encoding="utf-16", dtype=str,
@@ -1047,8 +1153,8 @@ def main() -> None:
         col_vals.append(find_domain_at_position(domain_maps.get(uid, []), pos))
     df["ptm_domain"] = col_vals
 
-    if args.pp_exclude:
-        df = apply_polyphen_filter(df, args.pp_exclude)
+    if pp_exclude:
+        df = apply_polyphen_filter(df, pp_exclude)
 
     df.to_csv(proximity_db, sep="\t", index=False, encoding="utf-16")
     print(f"\nUpdated proximity DB written to: {proximity_db}")
@@ -1063,16 +1169,135 @@ def main() -> None:
             df_long, score_maps, confirmed_sites, pp_cache, seq_maps, kin_cache,
             disorder_maps, domain_maps,
         )
-        if args.pp_exclude:
+        if pp_exclude:
             before = len(df_long)
             df_long = df_long[
-                ~df_long["polyphen_class"].isin(args.pp_exclude)
+                ~df_long["polyphen_class"].isin(pp_exclude)
             ].reset_index(drop=True)
             print(f"  Long format: removed {before - len(df_long)} rows by PolyPhen filter")
         df_long.to_csv(long_db, sep="\t", index=False, encoding="utf-16")
         print(f"Updated long-format DB written to: {long_db}")
     else:
         print(f"\nNo long-format DB found at {long_db} — skipping")
+
+
+def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> None:
+    """Run PolyPhen-2/AIUPred/InterPro (no 14-3-3/kinase) on the Mutation Clustering database."""
+    cluster_db = output_dir / "mutation_cluster_db.tsv"
+    print(f"Reading mutation cluster DB: {cluster_db}")
+    df = pd.read_csv(cluster_db, sep="\t", encoding="utf-16", dtype=str,
+                     keep_default_na=False)
+    print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
+
+    t0 = time.time()
+    pp_cache = run_polyphen_phase(
+        df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
+        phase_idx=0, num_phases=3,
+    )
+    anchor_classes, anchor_scores = [], []
+    for _, row in df.iterrows():
+        pred, score = _pp_lookup_single(row.get("anchor_mutation", ""), row.get("gene", ""), pp_cache)
+        anchor_classes.append(_PP_CLASS.get(pred, ""))
+        anchor_scores.append(score)
+    df["anchor_polyphen_class"] = anchor_classes
+    df["anchor_polyphen_score"] = anchor_scores
+    print(f"  Phase 2 (PolyPhen-2) completed in {fmt_time(time.time() - t0)}")
+
+    t0 = time.time()
+    disorder_maps = run_aiupred_phase(df, phase_idx=1, num_phases=3)
+    print(f"  Phase 4 (AIUPred) completed in {fmt_time(time.time() - t0)}")
+    for atype in ("general", "binding"):
+        col_vals = []
+        for _, row in df.iterrows():
+            uid = str(row.get("UniProt", "") or "")
+            try:
+                raw_pos = str(row.get("anchor_position", "")).strip()
+                pos = int(float(raw_pos)) if raw_pos else None
+            except ValueError:
+                pos = None
+            ps = disorder_maps[atype].get(uid, {})
+            col_vals.append(f"{ps[pos]:.3f}" if pos in ps else "")
+        df[f"anchor_aiupred_{atype}"] = col_vals
+    df["anchor_is_disordered"] = df["anchor_aiupred_general"].apply(
+        lambda v: "yes" if v and float(v) > 0.5 else "no"
+    )
+    df["anchor_is_binding"] = df["anchor_aiupred_binding"].apply(
+        lambda v: "yes" if v and float(v) > 0.5 else "no"
+    )
+
+    t0 = time.time()
+    domain_maps = run_interpro_phase(df, phase_idx=2, num_phases=3)
+    print(f"  Phase 5 (InterPro) completed in {fmt_time(time.time() - t0)}")
+    col_vals = []
+    for _, row in df.iterrows():
+        uid = str(row.get("UniProt", "") or "")
+        try:
+            raw_pos = str(row.get("anchor_position", "")).strip()
+            pos = int(float(raw_pos)) if raw_pos else None
+        except ValueError:
+            pos = None
+        col_vals.append(find_domain_at_position(domain_maps.get(uid, []), pos))
+    df["anchor_domain"] = col_vals
+
+    if pp_exclude:
+        df = apply_polyphen_filter_cluster(df, pp_exclude)
+
+    df.to_csv(cluster_db, sep="\t", index=False, encoding="utf-16")
+    print(f"\nUpdated mutation cluster DB written to: {cluster_db}")
+
+    long_db = output_dir / "mutation_cluster_long.tsv"
+    if long_db.exists():
+        print(f"\nAnnotating long-format cluster DB: {long_db}")
+        df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
+                              keep_default_na=False)
+        print(f"{len(df_long)} rows")
+        annotate_cluster_long_format(df_long, pp_cache, disorder_maps, domain_maps)
+        if pp_exclude:
+            before = len(df_long)
+            kept_anchors = set(zip(df["UniProt"], df["anchor_mutation"]))
+            anchor_kept = df_long.apply(
+                lambda r: (r["UniProt"], r["anchor_mutation"]) in kept_anchors, axis=1
+            )
+            df_long = df_long[
+                anchor_kept & ~df_long["polyphen_class"].isin(pp_exclude)
+            ].reset_index(drop=True)
+            print(f"  Long format: removed {before - len(df_long)} rows by PolyPhen filter")
+        df_long.to_csv(long_db, sep="\t", index=False, encoding="utf-16")
+        print(f"Updated long-format cluster DB written to: {long_db}")
+    else:
+        print(f"\nNo long-format cluster DB found at {long_db} — skipping")
+
+
+def main() -> None:
+    """Parse CLI args and annotate the selected pipeline mode's output database."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Annotate the pipeline's output database.")
+    parser.add_argument(
+        "--mode",
+        choices=["ptm-proximity", "mutation-clustering"],
+        default="ptm-proximity",
+        help="Which pipeline mode's output to annotate (default: ptm-proximity)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Directory containing the output database (default: Output/)",
+    )
+    parser.add_argument(
+        "--pp-exclude",
+        nargs="+",
+        choices=["benign", "possibly_damaging", "probably_damaging"],
+        default=[],
+        metavar="CLASS",
+        help="Exclude mutations with these PolyPhen-2 classes from the output",
+    )
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    if args.mode == "mutation-clustering":
+        _annotate_mutation_clustering(output_dir, args.pp_exclude)
+    else:
+        _annotate_ptm_proximity(output_dir, args.pp_exclude)
 
 
 if __name__ == "__main__":
