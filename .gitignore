@@ -34,6 +34,7 @@ data/steps/
 Output/ptm_mutation_proximity_db.tsv
 Output/ptm_mutation_proximity_long.tsv
 Output/mutation_cluster_db.tsv
+Output/mutation_cluster_long.tsv
 Output/radius_sweep.*
 Output/*.png
 Output/coordinates/
