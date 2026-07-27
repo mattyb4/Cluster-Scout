@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+APP_VERSION = "0.1.2"
+
 
 def _fix_tcl_tk_library_paths() -> None:
     """uv-managed (python-build-standalone) macOS Pythons can fail to locate
@@ -174,7 +176,7 @@ class App(
 ):
     def __init__(self):
         super().__init__()
-        self.title("Cluster-Scout (Beta)")
+        self.title(f"Cluster-Scout v{APP_VERSION} (Beta)")
         self.geometry("1100x820")
         self.minsize(900, 560)
         ico = PROJECT_ROOT / "cluster_scout.ico"
