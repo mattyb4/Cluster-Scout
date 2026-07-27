@@ -432,7 +432,11 @@ def main():
                     skip_writer.writerow([uniprot, gene, "no_afdb_directory",
                                            "protein not found in AlphaFold DB (no download directory)"])
 
-                uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir()) if d.is_dir()]
+                # Only scan directories relevant to this mode's target proteins -- cif_models/
+                # is a shared download cache, and may also hold structures downloaded for the
+                # other mode or an earlier run's protein set.
+                uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir())
+                                if d.is_dir() and d.name in all_cluster_uniprots]
                 for uniprot_dir in tqdm(uniprot_dirs, desc="Scanning structures"):
                     uniprot = uniprot_dir.name
                     if args.uniprot and uniprot != args.uniprot:
@@ -580,7 +584,11 @@ def main():
                     write_skips(skip_writer, uniprot, gene, ptm_entries, "no_afdb_directory",
                                 "protein not found in AlphaFold DB (no download directory)")
 
-                uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir()) if d.is_dir()]
+                # Only scan directories relevant to this mode's target proteins -- cif_models/
+                # is a shared download cache, and may also hold structures downloaded for the
+                # other mode or an earlier run's protein set.
+                uniprot_dirs = [d for d in sorted(MODELS_ROOT.iterdir())
+                                if d.is_dir() and d.name in all_ptm_uniprots]
                 for uniprot_dir in tqdm(uniprot_dirs, desc="Scanning structures"):
                     uniprot = uniprot_dir.name
                     if args.uniprot and uniprot != args.uniprot:

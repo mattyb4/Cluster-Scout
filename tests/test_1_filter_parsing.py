@@ -89,6 +89,16 @@ class TestBuildPtmSite:
             f"a NaN Residue should contribute an empty string, not the literal 'nan', got {result!r}"
         )
 
+    def test_both_residue_and_position_missing_returns_empty(self, mod):
+        # Real PTMD rows exist with a Type but no Residue/Position at all (e.g. B7ZKN7/BLM).
+        # Without this guard, the result would be the meaningless ":Phosphorylation".
+        row = pd.Series({"Residue": float("nan"), "Position": float("nan"), "Type": "Phosphorylation"})
+        result = mod.build_ptm_site(row)
+        assert result == "", (
+            f"a row with no residue AND no position has nothing to build a site label from -- "
+            f"must return '' (dropped by the caller) rather than a bare ':Phosphorylation', got {result!r}"
+        )
+
 
 class TestFormatMutationWithCount:
     def test_basic(self, mod):

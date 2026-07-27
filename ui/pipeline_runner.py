@@ -459,10 +459,18 @@ class PipelineRunnerMixin:
         # Count proteins from the intermediate TSV if a previous run produced one;
         # otherwise step 1 hasn't run yet, so estimate from the raw input files.
         n_proteins = 0
+        n_mutations = 0
         if input_tsv.exists():
             try:
-                df = pd.read_csv(input_tsv, sep="\t", usecols=["uniprot_id"], dtype=str)
+                df = pd.read_csv(input_tsv, sep="\t", usecols=["uniprot_id", "mutations_on_protein"], dtype=str)
                 n_proteins = df["uniprot_id"].nunique()
+                # Total hotspot mutations across all target proteins -- the real scale of
+                # PolyPhen work for mutation-clustering mode, where nearly every recurrent
+                # mutation gets scored (unlike ptm-proximity, where only mutations near a
+                # PTM site do, so n_proteins stays the scaling factor there).
+                n_mutations = int(df["mutations_on_protein"].fillna("").apply(
+                    lambda s: len([e for e in s.split(";") if e.strip()])
+                ).sum())
             except Exception:
                 pass
 
@@ -562,7 +570,10 @@ class PipelineRunnerMixin:
                     pass
             uncached_interpro = max(0, n_proteins - cached_interpro)
 
-            step4_est = (max(0, n_proteins * 2 - cached_pp) * self._TIME_PER_PP_FETCH
+            # mutation-clustering scores nearly every hotspot mutation, not just ~2/protein
+            pp_target = n_mutations if mode == "mutation-clustering" and n_mutations else n_proteins * 2
+
+            step4_est = (max(0, pp_target - cached_pp) * self._TIME_PER_PP_FETCH
                          + uncached_aiupred * self._TIME_PER_AIUPRED_FETCH
                          + uncached_interpro * self._TIME_PER_INTERPRO_FETCH
                          + self._TIME_STEP4_BASE)

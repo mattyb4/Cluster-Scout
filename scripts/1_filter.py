@@ -95,8 +95,10 @@ def build_ptm_site(row):
             position = str(row["Position"]).strip()
 
     site = f"{residue}{position}".strip()
-    ptm_type = str(row["Type"]).strip() if pd.notna(row["Type"]) else ""
+    if not site:
+        return ""
 
+    ptm_type = str(row["Type"]).strip() if pd.notna(row["Type"]) else ""
     return f"{site}:{ptm_type}" if ptm_type else site
 
 
@@ -419,6 +421,15 @@ def _run_ptm_proximity_filter(output_file):
 
     # Build PTM site and PTM-disease pair
     ptmd["ptm_site"] = ptmd.apply(build_ptm_site, axis=1)
+
+    # Drop PTMD rows with no usable residue+position (e.g. both fields blank in
+    # the source data) -- build_ptm_site returns "" for these; keeping them would
+    # add meaningless entries like ":Phosphorylation" to ptms_on_protein.
+    missing_site = (ptmd["ptm_site"] == "").sum()
+    if missing_site:
+        print(f"Dropping {missing_site} PTMD row(s) with no residue/position")
+    ptmd = ptmd[ptmd["ptm_site"] != ""].copy()
+
     ptmd["ptm_disease_pair"] = ptmd["ptm_site"] + " | " + ptmd["Disease"].astype(str)
 
     # Build known disrupting mutations per PTM site (MutationSite = mutations
