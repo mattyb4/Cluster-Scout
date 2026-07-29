@@ -148,16 +148,70 @@ class TestFetchPolyphen:
             f"but the key is missing from {cache}"
         )
 
-    def test_returns_blanks_on_network_error(self, tmp_path, monkeypatch):
+    def test_returns_none_on_network_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
         monkeypatch.setattr(
             mod._pp_session, "get",
             lambda *a, **k: (_ for _ in ()).throw(mod.requests.RequestException("timeout"))
         )
         result = mod.fetch_polyphen("TP53", "R175H")
-        assert result == ("", ""), (
-            f"a network exception must be caught and return blanks, not propagate and "
-            f"crash the whole annotation phase, got {result}"
+        assert result is None, (
+            f"a network exception must be caught (not propagate and crash the whole "
+            f"annotation phase) but must return None, NOT ('', '') -- a transient failure "
+            f"must never be cached as if it were a confirmed 'no PolyPhen data' result, "
+            f"or it would be permanently treated as blank on every future run, got {result!r}"
+        )
+
+    def test_retries_on_429_and_succeeds(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)  # skip real backoff waits
+        calls = []
+
+        class RateLimited:
+            status_code = 429
+            def raise_for_status(self):
+                raise mod.requests.HTTPError("429")
+
+        class Success:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"hits": SAMPLE_HITS}
+
+        def fake_get(url, **kwargs):
+            calls.append(1)
+            return RateLimited() if len(calls) == 1 else Success()
+
+        monkeypatch.setattr(mod._pp_session, "get", fake_get)
+
+        result = mod.fetch_polyphen("TP53", "R175H")
+        assert result == ("D", "0.999"), (
+            f"a 429 on the first attempt should be retried, not treated as a final "
+            f"failure -- the second (successful) attempt's result should be returned, "
+            f"got {result}"
+        )
+        assert len(calls) == 2, f"expected exactly one retry after the first 429, got {len(calls)} total calls"
+
+    def test_persistent_429_exhausts_retries_and_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        calls = []
+
+        class RateLimited:
+            status_code = 429
+            def raise_for_status(self):
+                raise mod.requests.HTTPError("429")
+
+        monkeypatch.setattr(mod._pp_session, "get", lambda url, **kw: (calls.append(1), RateLimited())[1])
+
+        result = mod.fetch_polyphen("TP53", "R175H")
+        assert result is None, (
+            f"if every attempt is rate-limited, fetch_polyphen must give up and return "
+            f"None (not cached) rather than raising or returning a false blank, got {result!r}"
+        )
+        assert len(calls) == mod._PP_RATE_LIMIT_RETRIES, (
+            f"should attempt exactly _PP_RATE_LIMIT_RETRIES times before giving up, "
+            f"got {len(calls)} calls"
         )
 
     def test_stop_codon_returns_blanks(self, tmp_path, monkeypatch):
@@ -279,6 +333,7 @@ class TestRunPolyphenPhaseMutationCols:
 
         cache = mod.run_polyphen_phase(
             df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
+            request_delay=0,
         )
 
         assert ("TP53", "R175H") in calls, (
@@ -310,4 +365,21 @@ class TestRunPolyphenPhaseMutationCols:
         assert calls == [], (
             f"anchor_mutation is already in the on-disk cache -- it must not trigger "
             f"another fetch, got {calls}"
+        )
+
+    def test_failed_fetch_is_not_cached_and_stays_available_for_retry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
+        df = pd.DataFrame([{"gene": "TP53", "nearby_mutations": "R175H-3.52Å(PAE:2.1)"}])
+        monkeypatch.setattr(mod, "fetch_polyphen", lambda g, m: None)  # simulates a transient failure
+
+        cache = mod.run_polyphen_phase(df, mutation_cols=["nearby_mutations"], request_delay=0)
+
+        assert ("TP53", "R175H") not in cache, (
+            f"fetch_polyphen returning None means the request failed (not 'confirmed no "
+            f"data') -- it must NOT be cached, or a transient failure would be permanently "
+            f"mistaken for a real answer on every future run, got cache={cache}"
+        )
+        assert "(PP:" not in df.iloc[0]["nearby_mutations"], (
+            f"with no cached result, the entry should be left untagged rather than tagged "
+            f"with a blank/garbage prediction, got {df.iloc[0]['nearby_mutations']!r}"
         )

@@ -435,7 +435,7 @@ class PipelineRunnerMixin:
     _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
     _TIME_PER_ISOFORM_BATCH = 5.5       # ~10 genes per batch, sequential (1_filter.py's compute_isoform_safe_lengths)
     _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
-    _TIME_PER_PP_FETCH = 0.05           # already amortized, 30 concurrent workers
+    _TIME_PER_PP_FETCH = 0.15            # sequential, paced (scripts/4_annotate.py: _PP_REQUEST_DELAY + real API latency)
     _KINASE_WORKERS = 6                 # scripts/4_annotate.py: _KIN_MAX_WORKERS
     _TIME_PER_KINASE_PREDICT = 1.0 / _KINASE_WORKERS
     _AIUPRED_WORKERS = 5                # scripts/4_annotate.py: _AIUPRED_MAX_WORKERS

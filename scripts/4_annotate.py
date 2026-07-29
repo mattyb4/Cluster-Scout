@@ -210,7 +210,13 @@ def run_1433_phase(df: pd.DataFrame) -> tuple[dict, dict]:
 
 _PP_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "polyphen.tsv"
 _PP_API_URL = "https://myvariant.info/v1/query"
-_PP_MAX_WORKERS = 30
+# myvariant.info rate-limits by burst/concurrency, not steady request rate -- 30
+# concurrent workers triggered ~90% HTTP 429s within a second in testing, while
+# sequential requests paced this closely succeeded ~100% of the time. So this
+# phase fetches sequentially with a small delay instead of via a thread pool.
+_PP_REQUEST_DELAY = 0.1
+_PP_RATE_LIMIT_RETRIES = 3
+_PP_RATE_LIMIT_BACKOFF = 1.0
 _pp_session = requests.Session()
 _PP_SEVERITY = {"D": 2, "P": 1, "B": 0}
 _PP_CLASS = {"D": "probably_damaging", "P": "possibly_damaging", "B": "benign"}
@@ -271,8 +277,19 @@ def _pp_best_prediction(hits: list[dict]) -> tuple[str, str]:
     return best_pred, (f"{best_score:.3f}" if best_score >= 0 else "")
 
 
-def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str]:
-    """Query myvariant.info for PolyPhen-2 HDIV prediction using a shared session."""
+def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str] | None:
+    """Query myvariant.info for PolyPhen-2 HDIV prediction using a shared session.
+
+    Returns ("", "") for a successful query that genuinely found no HDIV score --
+    a real, cacheable answer. Returns None if the request itself failed (network
+    error, timeout, non-200 after retries): the caller must NOT cache this, so a
+    transient failure gets retried on the next run instead of being permanently
+    mistaken for "no data".
+
+    Retries on HTTP 429 with backoff as a safety net -- the caller is expected to
+    already be pacing requests sequentially (see _PP_REQUEST_DELAY), so 429s here
+    should be rare, not the normal case.
+    """
     m = MUT_RE.match(mutation)
     if not m:
         return "", ""
@@ -281,16 +298,28 @@ def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str]:
         return "", ""
     q = (f"dbnsfp.genename:{gene} AND dbnsfp.aa.ref:{ref} "
          f"AND dbnsfp.aa.alt:{alt} AND dbnsfp.aa.pos:{pos}")
-    try:
-        resp = _pp_session.get(
-            _PP_API_URL,
-            params={"q": q, "fields": "dbnsfp.polyphen2", "size": 10},
-            timeout=15,
-        )
-        resp.raise_for_status()
+    backoff = _PP_RATE_LIMIT_BACKOFF
+    for attempt in range(_PP_RATE_LIMIT_RETRIES):
+        try:
+            resp = _pp_session.get(
+                _PP_API_URL,
+                params={"q": q, "fields": "dbnsfp.polyphen2", "size": 10},
+                timeout=15,
+            )
+        except Exception:
+            return None
+        if resp.status_code == 429:
+            if attempt < _PP_RATE_LIMIT_RETRIES - 1:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return None
+        try:
+            resp.raise_for_status()
+        except Exception:
+            return None
         return _pp_best_prediction(resp.json().get("hits", []))
-    except Exception:
-        return "", ""
+    return None
 
 
 def annotate_mutation_string(
@@ -320,6 +349,7 @@ def run_polyphen_phase(
     df: pd.DataFrame, mutation_cols: list[str] = _MUTATION_COLS,
     bare_mutation_cols: tuple[str, ...] = (),
     phase_idx: int = 1, num_phases: int = _NUM_PHASES,
+    request_delay: float = _PP_REQUEST_DELAY,
 ) -> dict:
     """Phase 2: fetch PolyPhen-2 scores and tag mutation strings. Returns the full cache.
 
@@ -327,6 +357,9 @@ def run_polyphen_phase(
     no distance suffix (e.g. anchor_mutation) -- scanned for fetching but not
     tagged inline (no entry format to tag); read back afterward via
     _pp_lookup_single once the cache is populated.
+
+    Fetches sequentially with *request_delay* between calls rather than
+    concurrently -- see the comment above _PP_REQUEST_DELAY.
     """
     print("\n── Phase 2: PolyPhen-2 pathogenicity scores ──")
 
@@ -358,18 +391,19 @@ def run_polyphen_phase(
           f"({len(cache)} already in cache from prior runs)")
 
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=_PP_MAX_WORKERS) as pool:
-            futures = {pool.submit(fetch_polyphen, g, mut): (g, mut)
-                       for g, mut in to_fetch}
-            done = 0
-            total = len(futures)
-            for future in tqdm(as_completed(futures), total=total,
-                               desc="Fetching PolyPhen-2 scores"):
-                g, mut = futures[future]
-                pred, score = future.result()
-                cache[(g, mut)] = (pred, score)
-                done += 1
-                _emit_progress(phase_idx, done / total * 100, f"PolyPhen-2 scores: {done}/{total}", num_phases)
+        failed = 0
+        total = len(to_fetch)
+        for done, (g, mut) in enumerate(tqdm(to_fetch, desc="Fetching PolyPhen-2 scores"), 1):
+            result = fetch_polyphen(g, mut)
+            if result is not None:
+                cache[(g, mut)] = result
+            else:
+                failed += 1
+            _emit_progress(phase_idx, done / total * 100, f"PolyPhen-2 scores: {done}/{total}", num_phases)
+            if request_delay:
+                time.sleep(request_delay)
+        if failed:
+            print(f"  {failed} request(s) failed and will be retried on the next run (not cached)")
         _pp_save_cache(cache)
     else:
         _emit_progress(phase_idx, 100, "PolyPhen-2 scores: all cached", num_phases)
