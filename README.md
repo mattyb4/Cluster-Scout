@@ -86,7 +86,7 @@ or equivalently:
 uv run main.py --mode ptm-proximity
 ```
 
-**Mutation-clustering mode** — finds recurrent cancer mutations that cluster together in 3D space, with no PTM requirement. Runs steps 1-3 only and outputs `Output/mutation_cluster_db.tsv`.
+**Mutation-clustering mode** — finds recurrent cancer mutations that cluster together in 3D space, with no PTM requirement. Runs all four steps (step 4's annotations are PolyPhen-2, AIUPred, and InterPro only — 14-3-3 and kinase predictions are PTM-site-specific and don't apply here) and outputs `Output/mutation_cluster_db.tsv`.
 
 ```bash
 uv run main.py --mode mutation-clustering
@@ -104,12 +104,15 @@ uv run main.py --mode mutation-clustering
 1. **Filter** — filters the COSMIC dataset for recurrent hotspot mutations and maps gene names to UniProt IDs
 2. **Download structures** — same as above (previously downloaded files are reused automatically)
 3. **Find mutation clusters** — computes pairwise 3D distances between all recurrent mutations on each protein; outputs mutations that cluster within 10 Å of at least one other mutation
+4. **Annotate results** — annotates each anchor mutation and its nearby mutations with PolyPhen-2 pathogenicity scores, AIUPred intrinsic disorder / binding-region scores, and InterPro functional domains
 
 The main output for PTM-proximity mode is **`Output/ptm_mutation_proximity_db.tsv`** — a table of PTM sites, their nearby COSMIC mutations, 3D distances, 14-3-3 binding predictions, kinase predictions, disorder scores, and PolyPhen-2 pathogenicity scores.
 
 PTM-proximity mode also always produces **`Output/ptm_mutation_proximity_long.tsv`**, with one row per PTM/mutation pair instead of one row per PTM site. This is what powers the per-mutation detail table on the Results tab and the patient-count-aware Visualization plots.
 
-The main output for mutation-clustering mode is **`Output/mutation_cluster_db.tsv`** — a table of recurrent mutations and other mutations clustering within 10 Å of them in 3D space.
+The main output for mutation-clustering mode is **`Output/mutation_cluster_db.tsv`** — a table of recurrent mutations and other mutations clustering within 10 Å of them in 3D space. It also always produces **`Output/mutation_cluster_long.tsv`**, the per-mutation-pair equivalent of `ptm_mutation_proximity_long.tsv` above.
+
+**A note on file encoding:** all of these output TSVs are UTF-16 encoded, chosen deliberately because it's the encoding Excel reliably auto-detects as tab-delimited when a file is opened directly (double-clicked) rather than imported through Data > From Text/CSV — plain UTF-8, with or without a BOM, does not behave the same way in that workflow. If you're reading these files programmatically instead of opening them in Excel, specify the encoding explicitly or you'll get a decode error or garbled columns: `pd.read_csv(path, sep="\t", encoding="utf-16")` in pandas, or `read.delim(path, fileEncoding="UTF-16")` in R.
 
 ---
 ## Interpreting the Data

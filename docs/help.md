@@ -27,7 +27,7 @@ Finds recurrent cancer mutations that cluster in 3D space near disease-associate
 
 ### Mutation Clustering
 
-Finds recurrent cancer mutations that cluster together in 3D space, with no PTM requirement. Runs steps 1-3 only.
+Finds recurrent cancer mutations that cluster together in 3D space, with no PTM requirement. Runs all 4 steps; step 4 annotates with PolyPhen-2, AIUPred, and InterPro only (14-3-3 and kinase predictions are PTM-site-specific and don't apply here).
 
 ### Single Protein
 
@@ -59,7 +59,7 @@ Computes 3D distances between PTM sites and mutation hotspots using the AlphaFol
 
 ### Step 4: Annotate Results
 
-Adds five types of annotations to each PTM site:
+In PTM Proximity mode, adds five types of annotations to each PTM site:
 
 - **14-3-3 binding predictions** — Queries the 14-3-3-Pred API and cross-references experimentally confirmed interactors (Ser/Thr sites only)
 - **PolyPhen-2 scores** — Queries myvariant.info for pathogenicity predictions on each mutation
@@ -67,9 +67,15 @@ Adds five types of annotations to each PTM site:
 - **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue
 - **InterPro functional domains** — Queries the InterPro REST API for curated domain/family/site entries on each protein, then reports which entry (if any) contains the PTM site's or mutation's specific residue position
 
+Mutation Clustering mode also runs this step, applying the PolyPhen-2, AIUPred, and InterPro annotations above to the anchor mutation and its nearby mutations — 14-3-3 and kinase predictions are skipped, since both require a curated PTM site that this mode has no concept of.
+
 ---
 
 ## Understanding the Output
+
+### File Encoding
+
+All output TSVs (`ptm_mutation_proximity_db.tsv`, `mutation_cluster_db.tsv`, and their `_long.tsv` companions) are UTF-16 encoded. This is deliberate: it's the encoding Excel reliably auto-detects as tab-delimited when a file is opened directly (double-clicked), unlike plain UTF-8 with or without a BOM. If you're reading these files programmatically instead — pandas, R, etc. — specify the encoding explicitly, or you'll get a decode error or garbled columns: `pd.read_csv(path, sep="\t", encoding="utf-16")` in pandas, or `read.delim(path, fileEncoding="UTF-16")` in R.
 
 ### Results Tab
 
