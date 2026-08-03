@@ -82,15 +82,18 @@ def _patch_customtkinter_textbox_scroll_callback() -> None:
 
 def _patch_customtkinter_scaling_tracker() -> None:
     """ScalingTracker polls every window every 100ms forever to detect OS-level
-    per-monitor DPI changes -- a real feature on Windows, but
-    get_window_dpi_scaling() hard-codes a return of 1 on macOS/Linux, so the
-    loop can never detect a change there: pure overhead, and its
-    winfo_exists() check isn't enough to stop TclError once the app starts
-    closing. Since it does nothing outside Windows, skip it there entirely.
+    per-monitor DPI changes, rescaling every CTk widget in response. On
+    macOS/Linux get_window_dpi_scaling() hard-codes a return of 1, so the loop
+    can never detect a change there -- pure overhead. On Windows it's a real
+    per-monitor DPI detector (GetDpiForMonitor(MonitorFromWindow(...))), which
+    fires exactly when the window is dragged to a differently-scaled monitor --
+    but its whole-tree rescale isn't safe against this app's own tab-switching
+    patch below (permanently-gridded frames toggled via grid()/grid_remove()
+    and tkraise() instead of normal mount/unmount): dragging to another
+    monitor was observed to leave the Results tab showing the wrong sub-tab's
+    content and the Visualization tab's plot canvas permanently blank, both
+    requiring a restart to fix. Skip the loop on every platform.
     """
-    if sys.platform == "win32":
-        return
-
     try:
         from customtkinter.windows.widgets.scaling import scaling_tracker
     except ImportError:
