@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 
 
 def _fix_tcl_tk_library_paths() -> None:
