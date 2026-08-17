@@ -9,6 +9,9 @@ compose into.
 """
 from __future__ import annotations
 
+import csv
+import re
+
 import customtkinter as ctk
 
 from ui.common import (
@@ -545,6 +548,9 @@ class ResultsTabMixin:
         bot_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
         ctk.CTkLabel(bot_header, text="Mutation Details",
                      font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
+        ctk.CTkButton(bot_header, text="⬇  Export", width=90, height=28,
+                       font=ctk.CTkFont(size=12),
+                       command=self._export_mut_tv).pack(side=tk.RIGHT, padx=(0, 6))
         ctk.CTkButton(bot_header, text="⚙  Columns", width=95, height=28,
                        font=ctk.CTkFont(size=12),
                        command=lambda: self._open_column_picker("mut")).pack(side=tk.RIGHT, padx=(0, 6))
@@ -689,6 +695,47 @@ class ResultsTabMixin:
     def _filter_mut_tv(self, *_args) -> None:
         self._filter_treeview(self._mut_tv, self._mut_tv_all_rows,
                                self._results_mut_search_var.get(), self._mut_filters)
+
+    def _export_mut_tv(self) -> None:
+        """Write the Mutation Details table to a TSV in the output folder.
+
+        Exports exactly what's currently shown (respecting the active search
+        and column filters, and current sort order), but every registered
+        column regardless of which are toggled visible on screen -- the
+        treeview always carries values for all of them (see _make_treeview),
+        just not all displayed. Same UTF-16 tab-delimited convention as the
+        pipeline's own output files, so it opens correctly if double-clicked.
+        """
+        tv = self._mut_tv
+        shown_iids = tv.get_children("")
+        if not shown_iids:
+            self._flash_results_status("No Mutation Details rows to export.", _YELLOW)
+            return
+
+        all_cols = list(tv["columns"])
+        data_cols = [c for c in all_cols if c != "#col"]
+        col_index = {c: i for i, c in enumerate(all_cols)}
+        headers = [display for display, col_id, *_rest in _MUT_TV_COLS if col_id in data_cols]
+
+        gene = site = ""
+        sel = self._ptm_tv.selection()
+        if sel and self._results_df_wide is not None:
+            row = self._results_df_wide.iloc[int(sel[0]) - 1]
+            gene, site = row.get("gene", ""), row.get("ptm_site", "")
+        safe = re.sub(r"[^\w-]+", "_", f"{gene}_{site}").strip("_") or "mutation_details"
+
+        out_dir = self._output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"mutation_details_{safe}.tsv"
+
+        with out_path.open("w", encoding="utf-16", newline="") as handle:
+            writer = csv.writer(handle, delimiter="\t")
+            writer.writerow(headers)
+            for iid in shown_iids:
+                values = tv.item(iid, "values")
+                writer.writerow([values[col_index[c]] for c in data_cols])
+
+        self._flash_results_status(f"Exported {len(shown_iids)} rows to {out_path}", _GREEN)
 
     def _filter_anchor_tv(self, *_args) -> None:
         self._filter_treeview(self._anchor_tv, self._anchor_tv_all_rows,

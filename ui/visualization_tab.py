@@ -615,6 +615,69 @@ class VisualizationTabMixin:
         ax.yaxis.label.set_color("#dcdcdc")
         ax.xaxis.label.set_color("#dcdcdc")
 
+    _MUT_LABEL_FONTSIZE = 8
+    _MUT_LABEL_BASE_OFFSET_PTS = (0, 10)  # directly above the marker (label is rotated fully vertical)
+    _MUT_LABEL_PUSH_STEP_PTS = 8          # increment used to push a colliding label clear
+    _MUT_LABEL_PAD_PX = 3                 # breathing room added around each label's box
+
+    def _layout_mutation_label_offsets(self, ax, mutations: list[str],
+                                        x_plot: list[float], y_plot: list[float]) -> dict[int, float]:
+        """Push mutation labels straight up, one at a time, until each one's
+        actual rendered footprint (in real screen pixels) no longer overlaps
+        any label already placed.
+
+        Needed because a label's on-screen position depends on *both* its
+        residue position (x) and its marker height (y = patient count) --
+        two mutations a residue apart can still land far apart vertically if
+        their patient counts differ, while two at very different positions
+        can still collide if one has a tall needle. A purely x-order row
+        assignment (as used for the domain map, where every label sits on
+        the same baseline) can't account for that, so this checks true
+        pixel-space bounding boxes instead. Returns {df_row_index: extra
+        y-offset in points} to add on top of _MUT_LABEL_BASE_OFFSET_PTS;
+        entries with no collision map to 0.0, reproducing the original fixed
+        offset.
+        """
+        if not mutations:
+            return {}
+
+        fig = ax.figure
+        px_per_pt = fig.dpi / 72.0
+        base_x_px, base_y_px = (v * px_per_pt for v in self._MUT_LABEL_BASE_OFFSET_PTS)
+        push_step_px = self._MUT_LABEL_PUSH_STEP_PTS * px_per_pt
+        pad = self._MUT_LABEL_PAD_PX
+
+        px_lengths = self._measure_text_widths_px(mutations, self._MUT_LABEL_FONTSIZE)
+        text_h_px = self._MUT_LABEL_FONTSIZE * px_per_pt * 1.2  # approx line height incl. leading
+        # Labels are rotated fully vertical (90 degrees): the string's own
+        # rendered length becomes its vertical footprint, and the font's
+        # line height becomes its (much narrower) horizontal footprint.
+        box_sizes = [(text_h_px + pad, length + pad) for length in px_lengths]
+
+        anchors_px = ax.transData.transform(list(zip(x_plot, y_plot)))
+
+        order = sorted(range(len(mutations)), key=lambda i: x_plot[i])
+        placed: list[tuple[float, float, float, float]] = []
+        offsets: dict[int, float] = {}
+        for i in order:
+            ax_px, ay_px = anchors_px[i]
+            w, h = box_sizes[i]
+            x0 = ax_px + base_x_px - w / 2  # centered horizontally on the marker
+            extra_px = 0.0
+            while True:
+                y0 = ay_px + base_y_px + extra_px
+                box = (x0, y0, x0 + w, y0 + h)
+                conflict = any(
+                    box[0] < o[2] and box[2] > o[0] and box[1] < o[3] and box[3] > o[1]
+                    for o in placed
+                )
+                if not conflict:
+                    placed.append(box)
+                    break
+                extra_px += push_step_px
+            offsets[i] = extra_px / px_per_pt
+        return offsets
+
     def _draw_mutation_needles(self, ax, df, jitter: bool, x_col: str = "mutation_position") -> None:
         from collections import defaultdict
 
@@ -631,6 +694,12 @@ class VisualizationTabMixin:
                     for k, i in enumerate(idxs):
                         x_plot[i] = pos + (k - (n - 1) / 2) * 0.6
 
+        label_offsets = (
+            self._layout_mutation_label_offsets(
+                ax, df["mutation"].astype(str).tolist(), x_plot, df["patient_count"].tolist(),
+            ) if jitter else {}
+        )
+
         for i, (_, r) in enumerate(df.iterrows()):
             x = x_plot[i]
             count = r["patient_count"]
@@ -640,10 +709,12 @@ class VisualizationTabMixin:
             # The far (categorical) panel already names each mutation via its x-tick
             # label, so only annotate above the marker for the true-scale local panel.
             if jitter:
+                base_x, base_y = self._MUT_LABEL_BASE_OFFSET_PTS
                 ax.annotate(
-                    str(r["mutation"]), (x, count), xytext=(4, 10),
-                    textcoords="offset points", ha="left", va="bottom",
-                    fontsize=8, color="#dcdcdc", rotation=45,
+                    str(r["mutation"]), (x, count),
+                    xytext=(base_x, base_y + label_offsets.get(i, 0.0)),
+                    textcoords="offset points", ha="center", va="bottom",
+                    fontsize=self._MUT_LABEL_FONTSIZE, color="#dcdcdc", rotation=90,
                 )
 
     _DOMAIN_LABEL_FONTSIZE = 7
@@ -669,11 +740,14 @@ class VisualizationTabMixin:
             t.remove()
         return widths
 
+    _DOMAIN_ARROW_FAN_PX = 6  # min horizontal separation between fanned-out arrow tips
+
     def _layout_domain_labels(self, entries: list[dict], length: float,
-                               width_in: float) -> tuple[list[tuple[dict, int]], int]:
+                               width_in: float) -> tuple[list[tuple[dict, int, float]], int]:
         """Assign each label to the lowest row where it doesn't overlap a
         neighbor's text or arrow anchor (never shifts a label sideways).
-        Returns (assignments, n_rows_used).
+        Returns (assignments, n_rows_used); each assignment is
+        (entry, row, arrow_x_offset).
         """
         if not entries:
             return [], 0
@@ -710,6 +784,33 @@ class VisualizationTabMixin:
                     break
                 row += 1
 
+        # Entries whose box positions are so close together that their
+        # (otherwise perfectly vertical) arrows would land on top of each
+        # other -- stacking them across rows already keeps their *text* from
+        # overlapping, but the arrow lines themselves still converge on
+        # nearly the same point, making it impossible to tell which arrow
+        # belongs to which label. Fan each cluster's arrow tips out by a
+        # small, fixed pixel step so every arrow traces a visually distinct
+        # path; chained via nearest-neighbor distance, same threshold used
+        # above to decide these arrows were too close in the first place.
+        fan_step = self._DOMAIN_ARROW_FAN_PX * data_units_per_px
+        by_center = sorted(assignments, key=lambda a: a[0]["start"] + (a[0]["end"] - a[0]["start"]) / 2)
+        offsets: dict[int, float] = {}
+        cluster: list[int] = []
+        prev_center = None
+        for i, (e, _row) in enumerate(by_center):
+            center_x = e["start"] + (e["end"] - e["start"]) / 2
+            if prev_center is not None and center_x - prev_center >= min_arrow_gap and cluster:
+                for k, j in enumerate(cluster):
+                    offsets[j] = (k - (len(cluster) - 1) / 2) * fan_step
+                cluster = []
+            cluster.append(i)
+            prev_center = center_x
+        if cluster:
+            for k, j in enumerate(cluster):
+                offsets[j] = (k - (len(cluster) - 1) / 2) * fan_step
+
+        assignments = [(e, row, offsets.get(i, 0.0)) for i, (e, row) in enumerate(by_center)]
         return assignments, len(row_occupied)
 
     def _domain_strip_height_in(self, n_label_rows: int) -> float:
@@ -721,7 +822,7 @@ class VisualizationTabMixin:
                 + self._DOMAIN_LABEL_TOP_PADDING_IN + max(n_label_rows, 1) * self._DOMAIN_LABEL_ROW_INCHES)
 
     def _draw_domain_strip(self, ax, entries: list[dict], length: float, ptm_pos: int,
-                            domain_layout: tuple[list[tuple[dict, int]], int]) -> None:
+                            domain_layout: tuple[list[tuple[dict, int, float]], int]) -> None:
         """Draw a linear domain-map strip on *ax*: backbone, InterPro boxes
         by lane, labels with vertical arrows, and a marker at *ptm_pos*.
         Y-axis is inches (see _domain_strip_height_in). *domain_layout* is
@@ -752,13 +853,16 @@ class VisualizationTabMixin:
                 facecolor=color, edgecolor="black", linewidth=0.4, alpha=0.85, zorder=2,
             ))
 
-        for e, row in assignments:
+        for e, row, arrow_x_offset in assignments:
             _y0, box_top_y, box_center_x = _box_position(e)
             label_y = lanes_top_y + self._DOMAIN_LABEL_TOP_PADDING_IN + row * self._DOMAIN_LABEL_ROW_INCHES
-            # xytext's x matches xy's x so the arrow is always vertical;
-            # row collisions are resolved by _layout_domain_labels, not here.
+            # The label itself stays centered on the true box position (text
+            # collisions are already resolved by row alone); only the arrow's
+            # tip is nudged by arrow_x_offset, so tightly-clustered arrows fan
+            # out into distinguishable paths instead of overlapping straight
+            # vertical lines.
             ax.annotate(
-                e["name"], xy=(box_center_x, box_top_y), xytext=(box_center_x, label_y),
+                e["name"], xy=(box_center_x + arrow_x_offset, box_top_y), xytext=(box_center_x, label_y),
                 fontsize=self._DOMAIN_LABEL_FONTSIZE, color="#dcdcdc", ha="center", va="bottom",
                 arrowprops=dict(arrowstyle="->", color="#888888", lw=0.7, shrinkA=0, shrinkB=2),
                 clip_on=False, zorder=3,
@@ -787,15 +891,19 @@ class VisualizationTabMixin:
 
     def _draw_lollipop_group(self, fig, subplotspec, gene: str, ptm_site: str, ptm_pos: int,
                               mut_df, local_window: float, domain_entries: list[dict],
-                              length: float, domain_layout: tuple[list[tuple[dict, int]], int],
-                              available_height_in: float):
+                              length: float, domain_layout: tuple[list[tuple[dict, int, float]], int],
+                              available_height_in: float, mutation_count: int, unique_count: int):
         """Draw one PTM site's domain strip + local/far lollipop panels into *fig*.
 
         *subplotspec*=None lays out on the whole figure (single-PTM view);
         otherwise nests via subgridspec (whole-protein view) -- nested
         gridspecs can't take margin kwargs. *domain_entries*/*length*/
         *domain_layout* are pre-computed once per protein. *available_height_in*
-        splits domain-strip vs. lollipop height. Returns (ax_local, domain_ax).
+        splits domain-strip vs. lollipop height. *mutation_count*/*unique_count*
+        are the pre-collapse totals for this cluster (mut_df itself may already
+        be collapsed to one row per position by the "Unique per position" view
+        mode, so they can't be re-derived from mut_df here). Returns
+        (ax_local, domain_ax).
         """
         local_df = mut_df[(mut_df["mutation_position"] - ptm_pos).abs() <= local_window] \
             .sort_values("mutation_position")
@@ -884,6 +992,26 @@ class VisualizationTabMixin:
             ax_far.set_xticklabels(far_df["mutation"], rotation=45, ha="right", fontsize=8)
             ax_far.set_title(f"> {local_window:g} aa away", fontsize=9, color="gray")
 
+        # Quick-reference counts, anchored to the figure (not an axes) in the
+        # left margin, vertically centered on the domain strip specifically
+        # (not the whole domain+lollipop row). domain_ax has no y-ticks/ylabel
+        # of its own and a guaranteed minimum height regardless of window
+        # size, so this placement can't collide with anything -- unlike
+        # centering over the full row, which put it in ax_local's territory
+        # on short/sparse-domain renders, where ax_local's "Patient count"
+        # ylabel (a fixed-length rotated string) overflows past its own tiny
+        # axes bounds and collides with it.
+        domain_pos = domain_ax.get_position()
+        left_x = domain_pos.x0
+        center_y = (domain_pos.y0 + domain_pos.y1) / 2
+        fig.text(
+            left_x - 0.01, center_y,
+            f"{mutation_count} mutation{'s' if mutation_count != 1 else ''}\n"
+            f"{unique_count} unique",
+            transform=fig.transFigure, ha="right", va="center",
+            fontsize=8, color="#dcdcdc", linespacing=1.7,
+        )
+
         return ax_local, domain_ax
 
     def _domain_map_legend_handles(self):
@@ -910,7 +1038,7 @@ class VisualizationTabMixin:
         ]
 
     def _draw_lollipop(self, gene: str, ptm_site: str, ptm_pos: int, mut_df, local_window: float,
-                        uid: str) -> None:
+                        uid: str, mutation_count: int, unique_count: int) -> None:
         fig = self._viz_fig
         fig.clf()
         fig.patch.set_facecolor("#2b2b2b")
@@ -926,6 +1054,7 @@ class VisualizationTabMixin:
         ax_local, domain_ax = self._draw_lollipop_group(
             fig, None, gene, ptm_site, ptm_pos, mut_df, local_window,
             domain_entries, length, domain_layout, available_height_in,
+            mutation_count, unique_count,
         )
 
         ax_local.legend(
@@ -988,6 +1117,9 @@ class VisualizationTabMixin:
             )
             return
 
+        mutation_count = len(mut_df)
+        unique_count = mut_df["mutation_position"].nunique()
+
         unique_only = self._viz_mode_var.get() == "Unique per position"
         if unique_only:
             mut_df = self._collapse_to_unique_positions(mut_df)
@@ -997,7 +1129,8 @@ class VisualizationTabMixin:
         except ValueError:
             local_window = 15.0
 
-        self._draw_lollipop(gene, ptm_site, ptm_pos, mut_df, local_window, uid)
+        self._draw_lollipop(gene, ptm_site, ptm_pos, mut_df, local_window, uid,
+                             mutation_count, unique_count)
 
         kind = "unique position(s)" if unique_only else "nearby mutation(s)"
         status = f"{len(mut_df)} {kind} for {gene} {ptm_site}"
@@ -1084,9 +1217,11 @@ class VisualizationTabMixin:
             )
             if mut_df.empty:
                 continue
+            mutation_count = len(mut_df)
+            unique_count = mut_df["mutation_position"].nunique()
             if unique_only:
                 mut_df = self._collapse_to_unique_positions(mut_df)
-            ptm_entries.append((ptm_site, ptm_pos, mut_df))
+            ptm_entries.append((ptm_site, ptm_pos, mut_df, mutation_count, unique_count))
 
         kind_label = "anchor mutation(s)" if cluster else "PTM site(s)"
         if not ptm_entries:
@@ -1133,7 +1268,7 @@ class VisualizationTabMixin:
         n = len(ptm_entries)
         width_in = self._current_viz_stack_width_in()
 
-        max_ptm_pos = max((pos for _, pos, _ in ptm_entries), default=0)
+        max_ptm_pos = max((pos for _, pos, _, _, _ in ptm_entries), default=0)
         max_end = max((e["end"] for e in domain_entries), default=0)
         length = max(protein_length or 0, max_end, max_ptm_pos, 1)
         domain_layout = self._layout_domain_labels(domain_entries, length, width_in)
@@ -1160,10 +1295,11 @@ class VisualizationTabMixin:
                 return  # superseded by a newer render (protein/mode changed mid-build)
             end = min(start + batch_size, n)
             for i in range(start, end):
-                ptm_site, ptm_pos, mut_df = ptm_entries[i]
+                ptm_site, ptm_pos, mut_df, mutation_count, unique_count = ptm_entries[i]
                 ax_local, _domain_ax = self._draw_lollipop_group(
                     fig, outer_gs[i, 0], gene, ptm_site, ptm_pos, mut_df, local_window,
                     domain_entries, length, domain_layout, row_height_in,
+                    mutation_count, unique_count,
                 )
                 ax_local.set_title(str(ptm_site), fontsize=10, color="#dcdcdc")
             if end < n:
