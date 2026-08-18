@@ -18,27 +18,29 @@ scripts (skipped, with a warning, for multi-fragment proteins):
                           the cartoon by it (a sequential "Reds" palette,
                           auto-scaled to the attribute's true min/max, or
                           log1p-scaled if requested)
-  plddt_view.cxc        — opens the CIF and colors the cartoon by AlphaFold's
-                          own per-residue confidence (pLDDT), using
-                          ChimeraX's built-in "alphafold" palette
-  ptm_markers_view.cxc  — opens the CIF with a plain (uncolored) cartoon;
-                          only produced when mark_ptm_sites is on and
-                          neither heatmap is
+  plddt_view.cxc     — opens the CIF and colors the cartoon by AlphaFold's
+                       own per-residue confidence (pLDDT), using ChimeraX's
+                       built-in "alphafold" palette
+  markers_view.cxc   — opens the CIF with a plain (uncolored) cartoon; only
+                       produced when mark_ptm_sites/mark_mutations are on
+                       and neither heatmap is
 
 Each heatmap is independently opt-in (mutation_heatmap/plddt_heatmap); open
 either .cxc file directly in ChimeraX to see that heatmap with no manual steps.
 
-mark_ptm_sites additionally marks each known PTM site with a small sphere at
-its CA coordinate -- an independent marker model, not a recoloring, so it's
-layered into whichever .cxc file(s) above get written without overwriting
-that heatmap's own color at the PTM residue.
+mark_ptm_sites additionally marks each known PTM site with a small green
+sphere at its CA coordinate -- an independent marker model, not a
+recoloring. mark_mutations similarly shows each COSMIC mutation position's
+side chain as an orange stick. Both are layered into whichever .cxc file(s)
+above get written without overwriting that heatmap's own color at the
+marked residue.
 
 Usage:
     uv run scripts/export_ca_coordinates.py P04637
     uv run scripts/export_ca_coordinates.py P04637 --gene TP53
     uv run scripts/export_ca_coordinates.py P04637 --cosmic path/to/COSMIC.tsv
     uv run scripts/export_ca_coordinates.py P04637 --plddt-heatmap --no-mutation-heatmap
-    uv run scripts/export_ca_coordinates.py P04637 --mark-ptm-sites
+    uv run scripts/export_ca_coordinates.py P04637 --mark-ptm-sites --mark-mutations
 """
 from __future__ import annotations
 
@@ -58,7 +60,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
-    find_canonical_cifs, load_first_chain,
+    find_canonical_cifs, load_first_chain, get_plddt_map,
     input_dir, resolve_input_file, COSMIC_INPUT_DIR,
     hotspots_tsv_path,
 )
@@ -338,7 +340,7 @@ def load_ptm_positions(uniprot: str) -> list[tuple[int, str]]:
 
 def build_ptm_marker_lines(
     ca_df: pd.DataFrame, ptm_positions: list[tuple[int, str]],
-    radius: float = 1.2, color: str = "purple",
+    radius: float = 1.2, color: str = "green",
 ) -> list[str]:
     """Build one ChimeraX `shape sphere` command per PTM position, marking its
     CA coordinate with an independent sphere model rather than recoloring the
@@ -357,6 +359,49 @@ def build_ptm_marker_lines(
         x, y, z = coord
         name = re.sub(r"[^\w]+", "_", token).strip("_") or f"ptm_{pos}"
         lines.append(f"shape sphere radius {radius:g} center {x:g},{y:g},{z:g} color {color} name {name}")
+    return lines
+
+
+def build_mutation_marker_lines(
+    positions: list[int], chain_id: str = "A", color: str = "orange",
+) -> list[str]:
+    """Build ChimeraX commands that show each mutation position's side chain
+    as a colored stick.
+
+    Unlike PTM markers (independent `shape sphere` models with no connection
+    to the real structure), this reveals and restyles the residue's actual
+    side-chain atoms -- simpler since ChimeraX resolves the geometry itself
+    from the residue spec, no CA-coordinate math needed. `target ab`
+    restricts the coloring to atoms/bonds only ("c"/"r" would be cartoons),
+    so it never overwrites a heatmap's own cartoon color at that residue.
+    "sidechain" (not "sideonly") is used specifically because it includes the
+    CA atom, which keeps the stick visually connected to the backbone.
+    """
+    lines = []
+    for pos in sorted(set(int(p) for p in positions)):
+        spec = f"/{chain_id}:{pos} & sidechain"
+        lines.append(f"show {spec} atoms")
+        lines.append(f"style {spec} stick")
+        lines.append(f"color {spec} {color} target ab")
+    return lines
+
+
+def build_confidence_dim_lines(plddt_map: dict[int, float], chain_id: str = "A") -> list[str]:
+    """Build ChimeraX `transparency` commands that dim each residue's cartoon
+    in proportion to how low its pLDDT confidence is: transparency percent =
+    100 - pLDDT, so a low-confidence hotspot still shows its mutation-heatmap
+    color (still "how much"), but fades toward invisible rather than being
+    trusted at face value the way a fully-opaque residue would be.
+
+    There's no ChimeraX "transparency byattribute" command (unlike `color
+    byattribute`), so this sets it explicitly per residue. `target c`
+    restricts it to the cartoon only, leaving any atom-level markers (PTM
+    spheres, mutation sticks) fully opaque and unaffected.
+    """
+    lines = []
+    for pos, plddt in sorted(plddt_map.items()):
+        pct = max(0, min(100, round(100 - plddt)))
+        lines.append(f"transparency /{chain_id}:{pos} {pct} target c")
     return lines
 
 
@@ -387,6 +432,7 @@ def write_chimerax_script(
     value_range: tuple[float, float] | None = None,
     palette: str = "Reds",
     extra_lines: list[str] = (),
+    lighting: str = "soft",
 ) -> Path:
     """Write a ChimeraX command script (.cxc) that opens *cif_path*, loads the
     attribute data from *defattr_path*, and colors the cartoon by it as a
@@ -404,6 +450,16 @@ def write_chimerax_script(
     *extra_lines*, if given, are inserted after the coloring command and
     before the final lighting command -- used to layer independent
     (non-recoloring) markers like PTM-site spheres on top of the heatmap.
+
+    *lighting* defaults to "soft" (ambient-only, depends entirely on 64-way
+    ambient shadowing for depth/edge definition), but callers that also apply
+    per-residue transparency (see build_confidence_dim_lines) should pass
+    "simple" instead: ChimeraX's ambient shadow computation doesn't handle
+    transparent geometry correctly, and once any part of the model is
+    transparent the *whole* model's shadows can break, leaving even opaque
+    residues flatly lit at full ambient intensity with no edge definition
+    ("blinding" and hard to read). "simple" uses real directional key/fill
+    lights instead, which don't have this failure mode.
     """
     range_clause = f" range {value_range[0]:g},{value_range[1]:g}" if value_range else ""
     lines = [
@@ -413,7 +469,7 @@ def write_chimerax_script(
         "cartoon",
         f"color byattribute r:{attr_name} #1 palette {palette} target c noValueColor gray{range_clause}",
         *extra_lines,
-        "lighting soft",
+        f"lighting {lighting}",
     ]
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return out_path
@@ -467,7 +523,9 @@ def run_export(
     mutation_heatmap: bool = True,
     plddt_heatmap: bool = False,
     mark_ptm_sites: bool = False,
+    mark_mutations: bool = False,
     log_scale: bool = False,
+    dim_low_confidence: bool = False,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
@@ -484,11 +542,20 @@ def run_export(
     right-skewed patient counts.
 
     *mark_ptm_sites*, if True, marks each known PTM site (from the pipeline's
-    intermediate PTM/mutation-hotspot TSV) with a small sphere at its CA
+    intermediate PTM/mutation-hotspot TSV) with a small green sphere at its CA
     coordinate in whichever heatmap script(s) get written -- or its own plain
     (uncolored) script if neither heatmap is requested. See
     build_ptm_marker_lines's docstring for why this is a separate marker
     rather than a recoloring.
+
+    *mark_mutations*, if True, similarly shows each COSMIC mutation position's
+    side chain as an orange stick -- see build_mutation_marker_lines's
+    docstring. Independent of *mark_ptm_sites*; both can be on at once.
+
+    *dim_low_confidence*, if True, dims each residue's mutation-heatmap color
+    in proportion to how low its pLDDT confidence is -- see
+    build_confidence_dim_lines's docstring. Only affects the mutation
+    heatmap; has no effect if *mutation_heatmap* is False.
 
     Raises ValueError if neither uniprot nor gene is given, if a gene-only
     lookup can't be resolved to a UniProt accession, or if no AlphaFold
@@ -608,7 +675,7 @@ def run_export(
     # ── 8. ChimeraX heatmap/marker files (single-fragment proteins only) ──────
     mutation_defattr_out = mutation_chimerax_script_out = None
     plddt_chimerax_script_out = plain_chimerax_script_out = None
-    if not (mutation_heatmap or plddt_heatmap or mark_ptm_sites):
+    if not (mutation_heatmap or plddt_heatmap or mark_ptm_sites or mark_mutations):
         log_cb("  No heatmaps or markers selected, skipping ChimeraX files.")
     elif len(cif_files) > 1:
         log_cb(
@@ -618,15 +685,24 @@ def run_export(
     else:
         cif_path = cif_files[0].resolve()
 
-        ptm_marker_lines: list[str] = []
+        marker_lines: list[str] = []
         if mark_ptm_sites:
             ptm_positions = load_ptm_positions(uid)
             if ptm_positions:
                 ptm_marker_lines = build_ptm_marker_lines(all_ca_df, ptm_positions)
-                log_cb(f"  Marking {len(ptm_marker_lines)} PTM site(s) as spheres")
+                marker_lines += ptm_marker_lines
+                log_cb(f"  Marking {len(ptm_marker_lines)} PTM site(s) as green spheres")
             else:
                 log_cb(f"  No PTM site data found for {uid} in the pipeline's "
                        f"intermediate data — nothing to mark.")
+
+        if mark_mutations:
+            if not mut_ca_df.empty:
+                mutation_marker_lines = build_mutation_marker_lines(mut_ca_df["position"].tolist())
+                marker_lines += mutation_marker_lines
+                log_cb(f"  Marking {len(mut_ca_df)} mutation position(s) as orange sticks")
+            else:
+                log_cb(f"  No COSMIC mutation positions found for {uid} — nothing to mark.")
 
         if mutation_heatmap:
             mutation_defattr_out = output_dir / "mutations.defattr"
@@ -643,23 +719,36 @@ def run_export(
                 heatmap_df[heatmap_attr] = np.log1p(heatmap_df["patients_within_10A"])
                 log_cb("  Log-scaling mutation heatmap (log1p of patients_within_10A)")
 
+            dim_lines: list[str] = []
+            if dim_low_confidence:
+                chain = load_first_chain(cif_path)
+                if chain is not None:
+                    dim_lines = build_confidence_dim_lines(get_plddt_map(chain))
+                    log_cb(f"  Dimming {len(dim_lines)} residue(s) by confidence on the mutation heatmap")
+
             write_defattr_file(heatmap_df, mutation_defattr_out, attr_name=heatmap_attr)
             write_chimerax_script(
                 cif_path, mutation_defattr_out.resolve(), mutation_chimerax_script_out,
-                attr_name=heatmap_attr, extra_lines=ptm_marker_lines,
+                attr_name=heatmap_attr, extra_lines=dim_lines + marker_lines,
+                # "soft" lighting's depth cues come entirely from ambient
+                # shadowing, which breaks once any part of the model is
+                # transparent (see write_chimerax_script's docstring) --
+                # only switch away from it when dim_lines actually added
+                # per-residue transparency.
+                lighting="simple" if dim_lines else "soft",
             )
             log_cb(f"  Mutation heatmap attribute file : {mutation_defattr_out}")
             log_cb(f"  Mutation heatmap script (open this in ChimeraX) : {mutation_chimerax_script_out}")
 
         if plddt_heatmap:
             plddt_chimerax_script_out = output_dir / "plddt_view.cxc"
-            write_plddt_chimerax_script(cif_path, plddt_chimerax_script_out, extra_lines=ptm_marker_lines)
+            write_plddt_chimerax_script(cif_path, plddt_chimerax_script_out, extra_lines=marker_lines)
             log_cb(f"  pLDDT heatmap script (open this in ChimeraX) : {plddt_chimerax_script_out}")
 
-        if mark_ptm_sites and not mutation_heatmap and not plddt_heatmap:
-            plain_chimerax_script_out = output_dir / "ptm_markers_view.cxc"
-            write_plain_chimerax_script(cif_path, plain_chimerax_script_out, extra_lines=ptm_marker_lines)
-            log_cb(f"  PTM marker script (open this in ChimeraX) : {plain_chimerax_script_out}")
+        if (mark_ptm_sites or mark_mutations) and not mutation_heatmap and not plddt_heatmap:
+            plain_chimerax_script_out = output_dir / "markers_view.cxc"
+            write_plain_chimerax_script(cif_path, plain_chimerax_script_out, extra_lines=marker_lines)
+            log_cb(f"  Marker script (open this in ChimeraX) : {plain_chimerax_script_out}")
 
     return ExportResult(
         uid=uid, gene=resolved_gene,
@@ -715,9 +804,24 @@ def main() -> None:
     )
     parser.add_argument(
         "--mark-ptm-sites", action="store_true",
-        help="Mark each known PTM site with a small sphere at its CA "
+        help="Mark each known PTM site with a small green sphere at its CA "
              "coordinate, layered on top of whichever heatmap(s) are "
              "generated (or a plain cartoon if neither is).",
+    )
+    parser.add_argument(
+        "--mark-mutations", action="store_true",
+        help="Show each COSMIC mutation position's side chain as an orange "
+             "stick, layered on top of whichever heatmap(s) are generated "
+             "(or a plain cartoon if neither is). Independent of "
+             "--mark-ptm-sites; both can be used together.",
+    )
+    parser.add_argument(
+        "--dim-low-confidence", action="store_true",
+        help="Dim each residue's mutation-heatmap color in proportion to how "
+             "low its pLDDT confidence is (100 - pLDDT percent transparent). "
+             "Only affects the mutation heatmap, and switches its lighting "
+             "from 'soft' to 'simple' (ChimeraX's ambient shadows don't "
+             "render correctly with transparent geometry present).",
     )
     args = parser.parse_args()
 
@@ -729,7 +833,9 @@ def main() -> None:
             mutation_heatmap=args.mutation_heatmap,
             plddt_heatmap=args.plddt_heatmap,
             mark_ptm_sites=args.mark_ptm_sites,
+            mark_mutations=args.mark_mutations,
             log_scale=args.log_scale,
+            dim_low_confidence=args.dim_low_confidence,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")

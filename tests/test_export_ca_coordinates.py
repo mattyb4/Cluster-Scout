@@ -8,7 +8,8 @@ from conftest import import_script, FakeResponse
 mod = import_script("export_ca_coordinates.py")
 
 
-def _write_synthetic_cif(path, res_ids, res_names, atom_names, coords, chain_ids=None):
+def _write_synthetic_cif(path, res_ids, res_names, atom_names, coords,
+                          b_factors=None, chain_ids=None):
     """Same biotite-round-trip technique as test_pipeline_utils.py's fixture --
     export_ca_coordinates.py's _load_ca_from_cif uses pipeline_utils.load_first_chain
     (biotite-based), not Bio.PDB, so this mirrors that file's helper rather than
@@ -25,7 +26,9 @@ def _write_synthetic_cif(path, res_ids, res_names, atom_names, coords, chain_ids
     arr.res_name = np.asarray(res_names)
     arr.atom_name = np.asarray(atom_names)
     arr.element = np.asarray(["C"] * n)
-    arr.set_annotation("b_factor", np.asarray([80.0] * n, dtype=float))
+    arr.set_annotation("b_factor", np.asarray(
+        b_factors if b_factors is not None else [80.0] * n, dtype=float,
+    ))
 
     cif = pdbx.CIFFile()
     pdbx.set_structure(cif, arr, data_block="test")
@@ -337,8 +340,8 @@ class TestBuildPtmMarkerLines:
             ca_df, [(15, "S15:Phosphorylation"), (18, "T18:Phosphorylation")],
         )
         assert lines == [
-            "shape sphere radius 1.2 center 1,2,3 color purple name S15_Phosphorylation",
-            "shape sphere radius 1.2 center 4,5,6 color purple name T18_Phosphorylation",
+            "shape sphere radius 1.2 center 1,2,3 color green name S15_Phosphorylation",
+            "shape sphere radius 1.2 center 4,5,6 color green name T18_Phosphorylation",
         ], f"unexpected marker command(s): {lines}"
 
     def test_skips_positions_missing_from_ca_df(self):
@@ -356,6 +359,88 @@ class TestBuildPtmMarkerLines:
         assert lines == ["shape sphere radius 2.5 center 0,0,0 color magenta name S15_Phosphorylation"], (
             f"custom radius/color should be reflected in the command, got {lines}"
         )
+
+
+class TestBuildMutationMarkerLines:
+    def test_builds_show_style_color_triplet_per_position(self):
+        lines = mod.build_mutation_marker_lines([592])
+        assert lines == [
+            "show /A:592 & sidechain atoms",
+            "style /A:592 & sidechain stick",
+            "color /A:592 & sidechain orange target ab",
+        ], f"unexpected marker command(s): {lines}"
+
+    def test_color_targets_atoms_bonds_only_not_cartoon(self):
+        # "target ab" (atoms/bonds) is critical: "c"/"r" would be cartoons,
+        # which would silently overwrite a heatmap's own color at that residue.
+        lines = mod.build_mutation_marker_lines([592])
+        color_line = next(l for l in lines if l.startswith("color"))
+        assert "target ab" in color_line, (
+            f"the color command must restrict its target to atoms/bonds only, got {color_line!r}"
+        )
+
+    def test_sorts_and_deduplicates_positions(self):
+        lines = mod.build_mutation_marker_lines([18, 5, 18, 5])
+        specs = [l.split()[1] for l in lines if l.startswith("show")]
+        assert specs == ["/A:5", "/A:18"], (
+            f"duplicate positions should be collapsed and positions sorted for stable, "
+            f"predictable script output, got {specs}"
+        )
+
+    def test_respects_custom_chain_and_color(self):
+        lines = mod.build_mutation_marker_lines([10], chain_id="B", color="yellow")
+        assert lines == [
+            "show /B:10 & sidechain atoms",
+            "style /B:10 & sidechain stick",
+            "color /B:10 & sidechain yellow target ab",
+        ], f"custom chain_id/color should be reflected in the commands, got {lines}"
+
+    def test_empty_positions_returns_empty_list(self):
+        assert mod.build_mutation_marker_lines([]) == []
+
+
+class TestBuildConfidenceDimLines:
+    def test_transparency_is_100_minus_plddt(self):
+        lines = mod.build_confidence_dim_lines({15: 90.0, 18: 40.0})
+        assert lines == [
+            "transparency /A:15 10 target c",
+            "transparency /A:18 60 target c",
+        ], f"unexpected dim command(s): {lines}"
+
+    def test_target_c_restricts_to_cartoon_only(self):
+        # "target c" is critical: an unscoped transparency command would also
+        # fade any atom-level markers (PTM spheres, mutation sticks) layered
+        # into the same script, not just the cartoon this feature targets.
+        lines = mod.build_confidence_dim_lines({15: 50.0})
+        assert lines == ["transparency /A:15 50 target c"]
+
+    def test_full_confidence_is_fully_opaque(self):
+        lines = mod.build_confidence_dim_lines({15: 100.0})
+        assert lines == ["transparency /A:15 0 target c"], (
+            "pLDDT 100 (maximum confidence) should map to 0% transparent -- fully opaque"
+        )
+
+    def test_values_are_clamped_to_0_100(self):
+        # pLDDT is always 0-100 in practice, but clamp defensively so a
+        # slightly-out-of-range value can never produce an invalid ChimeraX
+        # transparency percentage.
+        lines = mod.build_confidence_dim_lines({1: -5.0, 2: 150.0})
+        assert lines == [
+            "transparency /A:1 100 target c",
+            "transparency /A:2 0 target c",
+        ], f"unexpected dim command(s): {lines}"
+
+    def test_positions_are_sorted(self):
+        lines = mod.build_confidence_dim_lines({30: 80.0, 5: 80.0, 15: 80.0})
+        specs = [l.split()[1] for l in lines]
+        assert specs == ["/A:5", "/A:15", "/A:30"]
+
+    def test_respects_custom_chain_id(self):
+        lines = mod.build_confidence_dim_lines({10: 70.0}, chain_id="B")
+        assert lines == ["transparency /B:10 30 target c"]
+
+    def test_empty_map_returns_empty_list(self):
+        assert mod.build_confidence_dim_lines({}) == []
 
 
 class TestWriteDefattrFile:
@@ -408,6 +493,22 @@ class TestWriteChimeraxScript:
         assert lines.index("shape sphere radius 1.2 center 1,2,3 color purple name ptm1") == lines.index("lighting soft") - 1, (
             f"extra_lines (e.g. PTM marker spheres) should be layered in right after the "
             f"coloring command and before the final lighting command, got {lines}"
+        )
+
+    def test_lighting_defaults_to_soft(self, tmp_path):
+        out_path = mod.write_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "mutations.defattr", tmp_path / "view.cxc",
+        )
+        assert "lighting soft" in out_path.read_text(encoding="utf-8").splitlines()
+
+    def test_lighting_can_be_overridden(self, tmp_path):
+        out_path = mod.write_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "mutations.defattr", tmp_path / "view.cxc",
+            lighting="simple",
+        )
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert "lighting simple" in lines and "lighting soft" not in lines, (
+            f"an explicit lighting override should replace 'soft', not add to it, got {lines}"
         )
 
 
@@ -758,3 +859,160 @@ class TestRunExport:
             "markers), not raise"
         )
         assert "shape sphere" not in result.mutation_chimerax_script_out.read_text()
+
+    def _export_kwargs_with_mutations(self, tmp_path, monkeypatch):
+        """Single-fragment CIF + COSMIC setup with a real mutation position
+        (592), for the mark_mutations tests below.
+        """
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 592], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S592A", "S1", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+                    output_dir=tmp_path / "out", log_cb=lambda *_: None)
+
+    def test_mark_mutations_adds_sticks_to_mutation_script(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_mutations(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, mark_mutations=True, **kwargs)
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "/A:592 & sidechain" in text and "orange" in text, (
+            f"a mutation marker stick should be layered into the mutation heatmap script, "
+            f"got:\n{text}"
+        )
+
+    def test_mark_mutations_false_produces_no_sticks(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_mutations(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, mark_mutations=False, **kwargs)
+        assert "sidechain" not in result.mutation_chimerax_script_out.read_text(), (
+            "with mark_mutations=False (the default), no sticks should appear even though "
+            "COSMIC mutation data exists"
+        )
+
+    def test_mark_mutations_with_no_heatmap_produces_plain_script(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_mutations(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=False, plddt_heatmap=False, mark_mutations=True, **kwargs,
+        )
+        assert result.plain_chimerax_script_out is not None and result.plain_chimerax_script_out.exists(), (
+            "mark_mutations=True with both heatmaps off should still produce a plain "
+            "(uncolored) script carrying the mutation markers"
+        )
+        text = result.plain_chimerax_script_out.read_text()
+        assert "/A:592 & sidechain" in text
+        assert "color byattribute" not in text and "color bfactor" not in text, (
+            f"the plain script must have no heatmap color command, got:\n{text}"
+        )
+
+    def test_mark_mutations_with_no_cosmic_data_does_not_crash(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)  # empty COSMIC
+        result = mod.run_export(mutation_heatmap=True, mark_mutations=True, **kwargs)
+        assert result.mutation_chimerax_script_out is not None and result.mutation_chimerax_script_out.exists(), (
+            "no COSMIC mutations for this protein should degrade gracefully (heatmap still "
+            "produced, just no sticks), not raise"
+        )
+        assert "sidechain" not in result.mutation_chimerax_script_out.read_text()
+
+    def test_mark_ptm_sites_and_mark_mutations_coexist(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_mutations(tmp_path, monkeypatch)
+        self._write_ptm_tsv(tmp_path, monkeypatch)  # PTM at position 1, present in this CIF
+
+        result = mod.run_export(
+            mutation_heatmap=True, mark_ptm_sites=True, mark_mutations=True, **kwargs,
+        )
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "shape sphere" in text and "sidechain" in text, (
+            f"both marker types should be able to coexist in the same script, got:\n{text}"
+        )
+
+    def _export_kwargs_with_varied_confidence(self, tmp_path, monkeypatch):
+        """Single-fragment CIF with two residues at different pLDDT (b_factor)
+        values, for the dim_low_confidence tests below.
+        """
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 2], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            b_factors=[95.0, 30.0],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame(columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+                    output_dir=tmp_path / "out", log_cb=lambda *_: None)
+
+    def test_dim_low_confidence_adds_transparency_lines(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, dim_low_confidence=True, **kwargs)
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "transparency /A:1 5 target c" in text, (
+            f"residue 1 (pLDDT 95) should be dimmed 5% (100-95), got:\n{text}"
+        )
+        assert "transparency /A:2 70 target c" in text, (
+            f"residue 2 (pLDDT 30) should be dimmed 70% (100-30), got:\n{text}"
+        )
+
+    def test_dim_low_confidence_false_produces_no_transparency_lines(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, dim_low_confidence=False, **kwargs)
+        assert "transparency" not in result.mutation_chimerax_script_out.read_text(), (
+            "with dim_low_confidence=False (the default), no transparency commands should "
+            "appear"
+        )
+
+    def test_dim_low_confidence_has_no_effect_without_mutation_heatmap(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=False, plddt_heatmap=True, dim_low_confidence=True, **kwargs,
+        )
+        assert "transparency" not in result.plddt_chimerax_script_out.read_text(), (
+            "dim_low_confidence is scoped to the mutation heatmap only -- it should have no "
+            "effect on the pLDDT heatmap"
+        )
+
+    def test_dim_low_confidence_coexists_with_markers(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        self._write_ptm_tsv(tmp_path, monkeypatch)  # PTM at position 1
+
+        result = mod.run_export(
+            mutation_heatmap=True, mark_ptm_sites=True, dim_low_confidence=True, **kwargs,
+        )
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "transparency /A:1 5 target c" in text and "shape sphere" in text, (
+            f"dimming and PTM markers should coexist in the same script, got:\n{text}"
+        )
+
+    def test_dim_low_confidence_switches_to_simple_lighting(self, tmp_path, monkeypatch):
+        # "soft" lighting's depth cues come entirely from ambient shadowing,
+        # which ChimeraX doesn't compute correctly once any part of the
+        # model is transparent -- opaque residues end up flatly lit at full
+        # ambient intensity too, not just the dimmed ones. "simple" uses
+        # real directional lights instead, which don't have that failure mode.
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, dim_low_confidence=True, **kwargs)
+        lines = result.mutation_chimerax_script_out.read_text().splitlines()
+        assert "lighting simple" in lines and "lighting soft" not in lines, (
+            f"dim_low_confidence=True must switch away from 'soft' lighting, got {lines}"
+        )
+
+    def test_lighting_stays_soft_without_dim_low_confidence(self, tmp_path, monkeypatch):
+        kwargs = self._export_kwargs_with_varied_confidence(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, dim_low_confidence=False, **kwargs)
+        lines = result.mutation_chimerax_script_out.read_text().splitlines()
+        assert "lighting soft" in lines and "lighting simple" not in lines, (
+            f"without dimming there's no transparency to conflict with 'soft' lighting, so "
+            f"it should stay the default, got {lines}"
+        )

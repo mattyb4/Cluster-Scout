@@ -949,7 +949,9 @@ class PipelineRunnerMixin:
                 mutation_heatmap=self._ca_mutation_heatmap_var.get(),
                 plddt_heatmap=self._ca_plddt_heatmap_var.get(),
                 mark_ptm_sites=self._ca_mark_ptm_var.get(),
+                mark_mutations=self._ca_mark_mutations_var.get(),
                 log_scale=self._ca_log_scale_var.get(),
+                dim_low_confidence=self._ca_dim_confidence_var.get(),
                 log_cb=lambda line: self._q("log", line),
             )
         except ImportError as exc:
