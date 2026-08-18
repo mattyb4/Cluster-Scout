@@ -12,12 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, MUT_RE, SITE_RE,
     find_canonical_cif, load_first_chain, load_pae_matrix, get_plddt_map,
+    hotspots_tsv_path,
 )
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
-PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+# Set from args.mode at the top of main() -- ptm-proximity's default here only
+# matters for tests/direct calls that skip main() and monkeypatch this directly.
+PTM_TSV_PATH = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 
 _PTM_ROWS: list[dict[str, Any]] | None = None
 
@@ -320,7 +323,7 @@ def parse_ptm_known_disruptions(uniprot):
 
 def main():
     """Main entry point: parse CLI args and run the PTM-proximity or mutation-clustering pipeline."""
-    global DISTANCE_CUTOFF
+    global DISTANCE_CUTOFF, PTM_TSV_PATH
 
     parser = argparse.ArgumentParser(description="Scan AFDB models for nearby mutations.")
     parser.add_argument("--uniprot", help="Limit processing to a single UniProt ID.")
@@ -361,6 +364,9 @@ def main():
     DISTANCE_CUTOFF = args.cutoff
     MIN_PLDDT = args.min_plddt or 0
     MAX_PAE = args.max_pae
+    # Each mode reads its own Step-1 output file -- must be set before any
+    # parsing helper (which all read PTM_TSV_PATH via get_ptm_rows()) runs.
+    PTM_TSV_PATH = hotspots_tsv_path(PROJECT_ROOT, args.mode)
     if MIN_PLDDT > 0:
         print(f"pLDDT filter: excluding positions below {MIN_PLDDT}")
     if MAX_PAE is not None:

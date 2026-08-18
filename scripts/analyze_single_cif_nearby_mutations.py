@@ -10,13 +10,15 @@ import csv
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import AA3TO1, load_pae_matrix  # noqa: E402
+from pipeline_utils import AA3TO1, load_pae_matrix, hotspots_tsv_path  # noqa: E402
 
 parser = MMCIFParser(QUIET=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-DEFAULT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+# This tool is inherently PTM-proximity-only (it iterates PTM sites), so it
+# always needs that mode's file specifically.
+DEFAULT_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 DEFAULT_OUTPUT_DB = PROJECT_ROOT / "Output" / "ptm_mutation_proximity_db.tsv"
 
 OUTPUT_COLUMNS_STEP3 = [

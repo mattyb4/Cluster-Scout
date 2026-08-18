@@ -584,3 +584,34 @@ class TestBenjaminiHochberg:
         assert np.all((q >= 0) & (q <= 1)), (
             f"q-values must stay within [0, 1] even for large p-values close to 1, got {q.tolist()}"
         )
+
+
+class TestHotspotsTsvPath:
+    def test_mutation_clustering_gets_its_own_filename(self, mod, tmp_path):
+        path = mod.hotspots_tsv_path(tmp_path, "mutation-clustering")
+        assert path == tmp_path / "data" / "steps" / "COSMIC_hotspots_by_protein.tsv", (
+            f"mutation-clustering mode should resolve to its own distinct filename "
+            f"(no PTMD prefix, since it has no PTM data), got {path}"
+        )
+
+    def test_ptm_proximity_keeps_the_original_filename(self, mod, tmp_path):
+        path = mod.hotspots_tsv_path(tmp_path, "ptm-proximity")
+        assert path == tmp_path / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv", (
+            f"ptm-proximity mode should keep the original filename, so existing data/tooling "
+            f"for this (more heavily used) mode isn't invalidated by the split, got {path}"
+        )
+
+    def test_unrecognized_mode_defaults_to_ptm_proximity(self, mod, tmp_path):
+        # Matches the --mode argparse convention elsewhere in the pipeline,
+        # where "ptm-proximity" is always the default.
+        path = mod.hotspots_tsv_path(tmp_path, "something-else")
+        assert path == tmp_path / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+
+    def test_the_two_modes_never_collide(self, mod, tmp_path):
+        assert mod.hotspots_tsv_path(tmp_path, "ptm-proximity") != mod.hotspots_tsv_path(
+            tmp_path, "mutation-clustering",
+        ), (
+            "the whole point of this helper is that the two modes must never resolve to the "
+            "same path -- that's the bug (one mode's Step 1 silently overwriting the other's "
+            "data) this function exists to fix"
+        )

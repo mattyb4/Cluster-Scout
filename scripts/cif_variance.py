@@ -31,12 +31,17 @@ import requests
 from Bio.PDB import MMCIFParser, Superimposer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import project_root, AA3TO1, extract_uniprot_from_cif  # noqa: E402
+from pipeline_utils import (  # noqa: E402
+    project_root, AA3TO1, extract_uniprot_from_cif, hotspots_tsv_path,
+)
 
 PROJECT_ROOT = project_root(__file__)
 DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "cif_comparison"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output" / "cif_variance"
-PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+# PTM/mutation cross-referencing always needs the ptm-proximity file
+# specifically (its ptms_on_protein column) -- this tool has no --mode of
+# its own to select between the two.
+PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 
 _parser = MMCIFParser(QUIET=True)
 

@@ -31,11 +31,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, find_canonical_cif, find_canonical_cifs, load_first_chain,
     COSMIC_SOMATIC_STATUSES, input_dir, resolve_input_file, COSMIC_INPUT_DIR,
+    hotspots_tsv_path,
 )
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-PTM_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+# Radius Sweep measures distance from PTM sites, so it always needs the
+# ptm-proximity file specifically (its ptms_on_protein column) -- unlike
+# the mode-aware scripts, this tool has no --mode of its own.
+PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 
 DEFAULT_GENES = ["EGFR", "TP53", "VHL", "CANT1", "DDR2", "PTPN11", "LZTR1", "CDK12"]
 DEFAULT_MIN_CASES = 3

@@ -41,6 +41,29 @@ def input_dir(root: Path, subfolder: str) -> Path:
     return d
 
 
+# ── Step-1 filtered hotspot TSVs (mode-specific outputs) ───────────────────────
+# Each pipeline mode gets its own file rather than sharing one path: their
+# schemas differ (only ptm-proximity's carries PTM columns like
+# ptms_on_protein), and sharing a path meant running one mode's Step 1 would
+# silently overwrite the other mode's data with a different schema.
+PTM_PROXIMITY_HOTSPOTS_FILENAME = "PTMD_COSMIC_hotspots_by_protein.tsv"
+MUTATION_CLUSTERING_HOTSPOTS_FILENAME = "COSMIC_hotspots_by_protein.tsv"
+
+
+def hotspots_tsv_path(root: Path, mode: str) -> Path:
+    """Path to the mode-specific Step-1 filtered hotspot TSV under *root*.
+
+    *mode* is "mutation-clustering" or (anything else, including the default)
+    "ptm-proximity" -- matching the --mode convention used throughout the
+    pipeline scripts.
+    """
+    filename = (
+        MUTATION_CLUSTERING_HOTSPOTS_FILENAME if mode == "mutation-clustering"
+        else PTM_PROXIMITY_HOTSPOTS_FILENAME
+    )
+    return root / "data" / "steps" / filename
+
+
 def resolve_input_file(
     folder: Path,
     extensions: tuple[str, ...] = (".tsv", ".csv", ".xlsx", ".xls"),

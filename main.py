@@ -7,11 +7,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS  # noqa: E402
+from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS, hotspots_tsv_path  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
-INPUT_TSV = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
 MODELS_DIR = PROJECT_ROOT / "cif_models"
 
 RUN_ONLY_UNIPROT: str | None = None
@@ -58,6 +57,7 @@ def main() -> None:
     mode = args.mode
 
     STEPS = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
+    INPUT_TSV = hotspots_tsv_path(PROJECT_ROOT, mode)
 
     print()
     print(_bar("═"))

@@ -34,11 +34,12 @@ from pipeline_utils import (  # noqa: E402
     project_root,
     find_canonical_cif, load_first_chain,
     sample_permutation_indices, permutation_pvalue, benjamini_hochberg,
+    hotspots_tsv_path,
 )
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
-PTM_TSV_PATH = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+PTM_TSV_PATH = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 DISTANCE_CUTOFF = 10.0
 
 MUT_RE = re.compile(r"([A-Z])(\d+)([A-Z*])")

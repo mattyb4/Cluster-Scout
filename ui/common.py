@@ -25,7 +25,7 @@ from pipeline_utils import (  # noqa: E402
     COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES, fmt_time as _fmt_time,
     validate_cosmic_file, validate_ptmd_file, validate_1433_file,
-    get_protein_length,
+    get_protein_length, hotspots_tsv_path,
 )
 
 # 14-3-3 confirmed-interactors file isn't listed here: it's bundled with the app
