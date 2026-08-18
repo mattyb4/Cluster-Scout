@@ -8,6 +8,8 @@ set. `_style_dark_figure` calls `self._style_lollipop_axis` (VisualizationTabMix
 """
 from __future__ import annotations
 
+import queue
+import threading
 from pathlib import Path
 from tkinter import filedialog
 
@@ -471,7 +473,83 @@ class AnalysisToolsTabMixin:
         ctk.CTkEntry(
             self._at_params_frame, textvariable=self._variance_gene_var, width=150,
             placeholder_text="optional, for UniProt lookup",
-        ).grid(row=6, column=1, padx=6, pady=(6, 10), sticky="w")
+        ).grid(row=6, column=1, padx=6, pady=(6, 6), sticky="w")
+
+        # AlphaFold Server seed-JSON export
+        seed_json_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        seed_json_frame.grid(row=7, column=0, columnspan=3, padx=12, pady=(4, 2), sticky="w")
+        self._variance_seed_json_btn = ctk.CTkButton(
+            seed_json_frame, text="⬇  Generate AlphaFold Seeds JSON", width=230, height=28,
+            font=ctk.CTkFont(size=12),
+            command=self._generate_alphafold_seed_json,
+        )
+        self._variance_seed_json_btn.pack(side="left")
+        help_icon(seed_json_frame, _CIF_VARIANCE_HELP["seed_json"]).pack(side="left", padx=(6, 0))
+
+        self._variance_seed_json_status = ctk.CTkLabel(
+            self._at_params_frame, text="", anchor="w", font=ctk.CTkFont(size=11),
+        )
+        self._variance_seed_json_status.grid(row=8, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="w")
+
+    def _generate_alphafold_seed_json(self) -> None:
+        """Resolve the CIF Variance tool's target protein and write an
+        AlphaFold Server batch JSON of 10 separate jobs, one per seed (1-10),
+        so the researcher can upload it at alphafoldserver.com and drop the
+        resulting CIFs straight into the input folder above for comparison.
+
+        The UniProt-sequence fetch is network I/O, so it runs off the main
+        thread like the app's other network lookups (e.g. CA-coordinate
+        export). Tkinter itself isn't thread-safe -- the worker thread must
+        never touch a Tk widget or call self.after() directly, so it only
+        puts its result on a plain queue.Queue; a self.after()-scheduled poll
+        (always running on the main thread) drains it and does the actual
+        widget updates.
+        """
+        input_dir = Path(self._variance_input_dir_var.get().strip())
+        uniprot = self._variance_uniprot_var.get().strip() or None
+        gene = self._variance_gene_var.get().strip() or None
+        output_dir = self._output_dir / "cif_variance"
+
+        self._variance_seed_json_btn.configure(state="disabled")
+        self._variance_seed_json_status.configure(
+            text="Resolving protein and fetching its sequence from UniProt…", text_color=_GRAY,
+        )
+
+        result_q: queue.Queue = queue.Queue()
+
+        def _worker():
+            from cif_variance import generate_alphafold_seed_json
+            try:
+                path = generate_alphafold_seed_json(
+                    input_dir=input_dir, output_dir=output_dir, uniprot=uniprot, gene=gene,
+                )
+            except Exception as exc:
+                result_q.put(("error", str(exc)))
+            else:
+                result_q.put(("ok", path))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.after(100, lambda: self._poll_seed_json_result(result_q))
+
+    def _poll_seed_json_result(self, result_q: "queue.Queue") -> None:
+        try:
+            kind, value = result_q.get_nowait()
+        except queue.Empty:
+            self.after(100, lambda: self._poll_seed_json_result(result_q))
+            return
+        if kind == "error":
+            self._finish_seed_json(error=value)
+        else:
+            self._finish_seed_json(path=value)
+
+    def _finish_seed_json(self, path: Path | None = None, error: str | None = None) -> None:
+        self._variance_seed_json_btn.configure(state="normal")
+        if error:
+            self._variance_seed_json_status.configure(text=f"⚠  {error}", text_color=_RED)
+        else:
+            self._variance_seed_json_status.configure(
+                text=f"✓  Wrote {path.name} to {path.parent}", text_color=_GREEN,
+            )
 
     def _browse_variance_input_dir(self):
         """Open a folder dialog for selecting the CIF-comparison input directory."""

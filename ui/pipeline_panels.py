@@ -514,19 +514,92 @@ class PipelineTabMixin:
             placeholder_text="e.g. TP53",
         ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
 
+        # Heatmaps section
+        ctk.CTkLabel(
+            self._steps_outer, text="Heatmaps:", font=ctk.CTkFont(weight="bold"),
+        ).grid(row=3, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
+
+        # Mutation heatmap
+        if not hasattr(self, "_ca_mutation_heatmap_var"):
+            self._ca_mutation_heatmap_var = ctk.BooleanVar(value=True)
+        mut_heatmap_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        mut_heatmap_frame.grid(row=4, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        ctk.CTkCheckBox(
+            mut_heatmap_frame, text="Mutation heatmap (patients within 10 Å)",
+            variable=self._ca_mutation_heatmap_var,
+            checkbox_width=18, checkbox_height=18,
+            command=self._on_ca_mutation_heatmap_toggle,
+        ).pack(side="left")
+        help_icon(
+            mut_heatmap_frame,
+            "Colors the ChimeraX cartoon by COSMIC patient count summed "
+            "within 10 Å of each residue - a mutation-hotspot heatmap, "
+            "using a sequential red palette. Single-fragment proteins only.",
+        ).pack(side="left", padx=(4, 0))
+
+        # Log-scale (mutation heatmap only)
+        if not hasattr(self, "_ca_log_scale_var"):
+            self._ca_log_scale_var = ctk.BooleanVar(value=False)
+        log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        log_scale_frame.grid(row=5, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        self._ca_log_scale_checkbox = ctk.CTkCheckBox(
+            log_scale_frame, text="Log-scale",
+            variable=self._ca_log_scale_var,
+            checkbox_width=18, checkbox_height=18,
+        )
+        self._ca_log_scale_checkbox.pack(side="left")
+        help_icon(
+            log_scale_frame,
+            "Only applies to the mutation heatmap above. COSMIC patient "
+            "counts are often heavily right-skewed - a few hotspot residues "
+            "can have counts far higher than the rest, so a linear color "
+            "scale crushes nearly the whole protein into one flat color. "
+            "Log-scaling compresses that range so variation among "
+            "lower-count residues becomes visible too.",
+        ).pack(side="left", padx=(4, 0))
+        self._on_ca_mutation_heatmap_toggle()  # sync initial enabled/disabled state
+
+        # pLDDT heatmap
+        if not hasattr(self, "_ca_plddt_heatmap_var"):
+            self._ca_plddt_heatmap_var = ctk.BooleanVar(value=False)
+        plddt_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        plddt_frame.grid(row=6, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        ctk.CTkCheckBox(
+            plddt_frame, text="pLDDT heatmap",
+            variable=self._ca_plddt_heatmap_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left")
+        help_icon(
+            plddt_frame,
+            "Colors the ChimeraX cartoon by AlphaFold's per-residue "
+            "confidence score (pLDDT), using ChimeraX's built-in AlphaFold "
+            "color scheme (blue = very high confidence, down to orange = "
+            "very low). Useful for judging how reliable the modeled "
+            "structure is in a region, independent of mutation data. "
+            "Single-fragment proteins only.",
+        ).pack(side="left", padx=(4, 0))
+
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=3, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=7, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=3, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=7, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
+
+    def _on_ca_mutation_heatmap_toggle(self) -> None:
+        """Keep the log-scale checkbox in sync with the mutation-heatmap
+        toggle it modifies -- disabled (and visually grayed) when there's no
+        mutation heatmap left for it to affect.
+        """
+        state = "normal" if self._ca_mutation_heatmap_var.get() else "disabled"
+        self._ca_log_scale_checkbox.configure(state=state)
 
     # ── File-status bar ──────────────────────────────────────────────────────
 

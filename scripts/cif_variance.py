@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from typing import Callable
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 from Bio.PDB import MMCIFParser, Superimposer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -223,6 +225,99 @@ def load_ptm_and_mutation_positions(uniprot: str) -> tuple[set[int], set[int]]:
     return ptm_positions, mutation_positions
 
 
+def resolve_uniprot(cif_files: list[Path], uniprot: str | None = None,
+                     gene: str | None = None) -> str | None:
+    """Resolve a UniProt ID: explicit arg > CIF metadata > gene lookup against
+    the pipeline's intermediate TSV. Returns None if none of those resolve.
+    """
+    resolved = uniprot or ""
+    if not resolved and cif_files:
+        resolved = extract_uniprot_from_cif(cif_files[0]) or ""
+
+    if not resolved and gene and PTM_TSV.exists():
+        df_lookup = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
+        gene_rows = df_lookup[df_lookup["gene"].str.upper() == gene.upper()]
+        if not gene_rows.empty:
+            resolved = gene_rows.iloc[0]["uniprot_id"]
+
+    return resolved or None
+
+
+def fetch_uniprot_sequence(accession: str) -> str | None:
+    """Fetch a UniProt entry's canonical sequence as a plain string via the REST API."""
+    resp = requests.get(f"https://rest.uniprot.org/uniprotkb/{accession}.fasta", timeout=15)
+    if resp.status_code != 200:
+        return None
+    lines = resp.text.strip().split("\n")
+    return "".join(lines[1:])
+
+
+DEFAULT_SEEDS = list(range(1, 11))
+
+
+def build_alphafold_seed_json(sequence: str, base_name: str, seeds: list[int] = DEFAULT_SEEDS) -> list[dict]:
+    """Build an AlphaFold Server (alphafoldserver.com) batch-upload JSON: one
+    SEPARATE job per entry in *seeds*, each requesting a single prediction of
+    *sequence* with its own seed -- uploading it produces one job (and one
+    CIF) per seed, ready to drop straight into this tool's input folder for a
+    same-protein variance comparison.
+    """
+    return [
+        {
+            "name": f"{base_name}_seed{seed}",
+            "modelSeeds": [seed],
+            "sequences": [
+                {"proteinChain": {"sequence": sequence, "count": 1}},
+            ],
+        }
+        for seed in seeds
+    ]
+
+
+def generate_alphafold_seed_json(
+    input_dir: Path,
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    uniprot: str | None = None,
+    gene: str | None = None,
+    seeds: list[int] = DEFAULT_SEEDS,
+    log_cb: Callable[[str], None] = print,
+) -> Path:
+    """Resolve a UniProt ID (same rules as run_variance_analysis), fetch its
+    canonical sequence from UniProt, and write an AlphaFold Server batch JSON
+    of one job per seed.
+
+    Raises ValueError if no UniProt ID can be resolved, or its sequence can't
+    be fetched.
+    """
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    cif_files = sorted(input_dir.glob("*.cif")) if input_dir.is_dir() else []
+    resolved_uniprot = resolve_uniprot(cif_files, uniprot, gene)
+    if not resolved_uniprot:
+        raise ValueError(
+            "Could not resolve a UniProt ID -- provide a UniProt override, a gene "
+            "override matching the pipeline's data, or point the input folder at a "
+            "CIF file with embedded UniProt metadata."
+        )
+    log_cb(f"UniProt ID: {resolved_uniprot}")
+
+    log_cb("Fetching canonical sequence from UniProt...")
+    sequence = fetch_uniprot_sequence(resolved_uniprot)
+    if not sequence:
+        raise ValueError(f"Could not fetch a sequence for UniProt ID {resolved_uniprot}.")
+    log_cb(f"Sequence: {len(sequence)} residues")
+
+    base_name = re.sub(r"[^\w-]+", "_", gene or resolved_uniprot).strip("_")
+    payload = build_alphafold_seed_json(sequence, base_name, seeds)
+
+    out_path = output_dir / f"{base_name}_seeds{seeds[0]}-{seeds[-1]}.json"
+    out_path.write_text(json.dumps(payload, indent=2))
+    log_cb(f"Wrote {len(payload)} AlphaFold Server jobs to {out_path}")
+    return out_path
+
+
 def run_variance_analysis(
     input_dir: Path,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -247,17 +342,7 @@ def run_variance_analysis(
 
     log_cb(f"Found {len(cif_files)} CIF files in {input_dir}")
 
-    # Determine UniProt ID: explicit arg > CIF metadata > gene lookup
-    resolved_uniprot = uniprot or ""
-    if not resolved_uniprot:
-        resolved_uniprot = extract_uniprot_from_cif(cif_files[0]) or ""
-
-    if not resolved_uniprot and gene and PTM_TSV.exists():
-        df_lookup = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
-        gene_rows = df_lookup[df_lookup["gene"].str.upper() == gene.upper()]
-        if not gene_rows.empty:
-            resolved_uniprot = gene_rows.iloc[0]["uniprot_id"]
-
+    resolved_uniprot = resolve_uniprot(cif_files, uniprot, gene) or ""
     if resolved_uniprot:
         log_cb(f"UniProt ID: {resolved_uniprot}")
     else:
@@ -494,7 +579,25 @@ def main():
         "--gene", default=None,
         help="Gene symbol — used to look up UniProt ID from the pipeline's intermediate data",
     )
+    parser.add_argument(
+        "--generate-seed-json", action="store_true",
+        help="Instead of running variance analysis, resolve the protein (same "
+             "--uniprot/--gene/--input-dir rules) and write an AlphaFold Server "
+             "batch JSON of 10 separate jobs, one per seed (seeds 1-10), for "
+             "later variance comparison once the resulting CIFs are downloaded.",
+    )
     args = parser.parse_args()
+
+    if args.generate_seed_json:
+        try:
+            path = generate_alphafold_seed_json(
+                input_dir=Path(args.input_dir), output_dir=Path(args.output_dir),
+                uniprot=args.uniprot, gene=args.gene,
+            )
+        except ValueError as exc:
+            sys.exit(f"Error: {exc}")
+        print(f"Wrote {path}")
+        return
 
     try:
         result = run_variance_analysis(

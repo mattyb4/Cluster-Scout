@@ -231,6 +231,13 @@ _CIF_VARIANCE_HELP: dict[str, str] = {
     "gene_override": "Gene symbol used to look up the UniProt ID from the "
                      "pipeline's intermediate data, if the UniProt override "
                      "above is left blank.",
+    "seed_json": "Writes an AlphaFold Server (alphafoldserver.com) batch "
+                 "JSON containing 10 separate jobs - one per seed, 1 through "
+                 "10 - each predicting this protein's canonical sequence, "
+                 "using the same UniProt/gene resolution as the fields "
+                 "above. Upload it at alphafoldserver.com, then drop the "
+                 "resulting CIFs into the input folder above to compare "
+                 "their variance.",
 }
 
 

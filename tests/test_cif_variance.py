@@ -1,9 +1,11 @@
 """Unit tests for scripts/cif_variance.py."""
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from conftest import import_script
+from conftest import FakeResponse, import_script
 
 mod = import_script("cif_variance.py")
 
@@ -277,3 +279,152 @@ class TestBuildVarianceFigure:
             "when a Figure is injected (the GUI-embedding path), build_variance_figure "
             "must draw onto that SAME object rather than silently creating a new one"
         )
+
+
+class TestResolveUniprot:
+    def test_explicit_uniprot_wins(self, tmp_path):
+        cif = tmp_path / "model.cif"
+        cif.write_text("_ma_target_ref_db_details.db_accession   Q00000\n")
+        result = mod.resolve_uniprot([cif], uniprot="P00001", gene="IGNORED")
+        assert result == "P00001", (
+            "an explicit uniprot arg must win outright, without even reading the CIF metadata"
+        )
+
+    def test_falls_back_to_cif_metadata(self, tmp_path):
+        cif = tmp_path / "model.cif"
+        cif.write_text("_ma_target_ref_db_details.db_accession   P04637\n")
+        result = mod.resolve_uniprot([cif], uniprot=None, gene=None)
+        assert result == "P04637", (
+            "with no explicit uniprot, the accession embedded in the first CIF file's "
+            "metadata should be used"
+        )
+
+    def test_falls_back_to_gene_lookup(self, tmp_path, monkeypatch):
+        tsv = tmp_path / "hotspots.tsv"
+        pd.DataFrame([{"gene": "TP53", "uniprot_id": "P04637"}]).to_csv(tsv, sep="\t", index=False)
+        monkeypatch.setattr(mod, "PTM_TSV", tsv)
+
+        cif = tmp_path / "model.cif"
+        cif.write_text("no matching metadata line\n")
+        result = mod.resolve_uniprot([cif], uniprot=None, gene="tp53")
+        assert result == "P04637", (
+            "with no explicit uniprot and no CIF metadata, the gene override should be "
+            "looked up (case-insensitively) against the pipeline's intermediate TSV"
+        )
+
+    def test_returns_none_when_nothing_resolves(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
+        result = mod.resolve_uniprot([], uniprot=None, gene=None)
+        assert result is None, (
+            "with no uniprot, no CIF files, and no gene match, resolution must return "
+            "None rather than an empty string or raising"
+        )
+
+
+class TestFetchUniprotSequence:
+    def test_returns_sequence_string_on_200(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: FakeResponse(">sp|P04637|P53_HUMAN\nMEEPQSDPSV\nCNTSSPQP\n"),
+        )
+        result = mod.fetch_uniprot_sequence("P04637")
+        assert result == "MEEPQSDPSVCNTSSPQP", (
+            f"the FASTA header line must be dropped and the remaining lines joined with no "
+            f"newlines, got {result!r}"
+        )
+
+    def test_returns_none_on_non_200(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: FakeResponse("Not Found", status_code=404),
+        )
+        result = mod.fetch_uniprot_sequence("DELETED1")
+        assert result is None, (
+            f"a non-200 response (e.g. a withdrawn UniProt entry) must return None, got {result!r}"
+        )
+
+
+class TestBuildAlphafoldSeedJson:
+    def test_builds_one_separate_job_per_seed(self):
+        payload = mod.build_alphafold_seed_json("MEEPQSDPSV", "TP53", [1, 2, 3])
+        assert payload == [
+            {
+                "name": "TP53_seed1",
+                "modelSeeds": [1],
+                "sequences": [{"proteinChain": {"sequence": "MEEPQSDPSV", "count": 1}}],
+            },
+            {
+                "name": "TP53_seed2",
+                "modelSeeds": [2],
+                "sequences": [{"proteinChain": {"sequence": "MEEPQSDPSV", "count": 1}}],
+            },
+            {
+                "name": "TP53_seed3",
+                "modelSeeds": [3],
+                "sequences": [{"proteinChain": {"sequence": "MEEPQSDPSV", "count": 1}}],
+            },
+        ], f"unexpected AlphaFold Server batch payload shape: {payload}"
+
+    def test_top_level_is_a_list(self):
+        # AlphaFold Server's own JSON dialect is detected by the top-level
+        # value being a list (as opposed to alphafold3's own dict-based format).
+        payload = mod.build_alphafold_seed_json("MEEPQSDPSV", "job", [1])
+        assert isinstance(payload, list), (
+            "the top-level payload must be a JSON list -- alphafoldserver.com detects its "
+            "own dialect by this, and a dict here would be misread as the alphafold3 dialect"
+        )
+
+
+class TestGenerateAlphafoldSeedJson:
+    def test_writes_json_file_using_explicit_uniprot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: FakeResponse(">sp|P04637|P53_HUMAN\nMEEPQSDPSV\n"),
+        )
+        input_dir = tmp_path / "cifs"
+        input_dir.mkdir()
+        out_dir = tmp_path / "out"
+
+        path = mod.generate_alphafold_seed_json(
+            input_dir=input_dir, output_dir=out_dir, uniprot="P04637", gene="TP53",
+            log_cb=lambda *_: None,
+        )
+
+        assert path.parent == out_dir, f"the JSON should be written inside output_dir, got {path}"
+        payload = json.loads(path.read_text())
+        assert len(payload) == 10, f"default seeds 1-10 must produce 10 separate jobs, got {len(payload)}"
+        assert payload[0]["sequences"][0]["proteinChain"]["sequence"] == "MEEPQSDPSV", (
+            "each written job should embed the sequence fetched from UniProt"
+        )
+        assert [job["modelSeeds"] for job in payload] == [[s] for s in mod.DEFAULT_SEEDS] == [[s] for s in range(1, 11)], (
+            f"each job must carry exactly one seed, covering 1-10 across the 10 jobs, "
+            f"got {[job['modelSeeds'] for job in payload]}"
+        )
+        assert [job["name"] for job in payload] == [f"TP53_seed{s}" for s in range(1, 11)], (
+            f"job names should be derived from the gene override with a per-seed suffix, "
+            f"got {[job['name'] for job in payload]}"
+        )
+
+    def test_raises_when_uniprot_cannot_be_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
+        input_dir = tmp_path / "cifs"
+        input_dir.mkdir()
+
+        with pytest.raises(ValueError):
+            mod.generate_alphafold_seed_json(
+                input_dir=input_dir, output_dir=tmp_path / "out", log_cb=lambda *_: None,
+            )
+
+    def test_raises_when_sequence_fetch_fails(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: FakeResponse("Not Found", status_code=404),
+        )
+        input_dir = tmp_path / "cifs"
+        input_dir.mkdir()
+
+        with pytest.raises(ValueError):
+            mod.generate_alphafold_seed_json(
+                input_dir=input_dir, output_dir=tmp_path / "out", uniprot="Q99999",
+                log_cb=lambda *_: None,
+            )
