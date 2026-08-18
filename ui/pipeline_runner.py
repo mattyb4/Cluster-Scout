@@ -32,6 +32,7 @@ from ui.common import (
     COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
     validate_cosmic_file, validate_ptmd_file, validate_1433_file,
+    hotspots_tsv_path,
 )
 
 
@@ -287,12 +288,13 @@ class PipelineRunnerMixin:
                     "Invalid input", "Min samples must be a whole number of 1 or more.",
                 )
                 return
-            ptm_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+            ptm_tsv = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
             if not ptm_tsv.exists():
                 messagebox.showerror(
                     "Missing data",
                     f"Required file not found:\n{ptm_tsv}\n\n"
-                    f"Run the PTM Proximity or Mutation Clustering pipeline (step 1) first.",
+                    f"Radius Sweep needs PTM site data, which only the PTM Proximity "
+                    f"pipeline (step 1) produces -- run that mode first.",
                 )
                 return
         else:  # "cif-variance"
@@ -452,7 +454,7 @@ class PipelineRunnerMixin:
         self._q("log", "Initializing pipeline...")
         self._q("log", "")
 
-        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode)
         cache_dir = PROJECT_ROOT / "data" / "cache"
         models_dir = PROJECT_ROOT / "cif_models"
 
@@ -621,7 +623,7 @@ class PipelineRunnerMixin:
             return
 
         python = [sys.executable, "-u"]
-        input_tsv = PROJECT_ROOT / "data" / "steps" / "PTMD_COSMIC_hotspots_by_protein.tsv"
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode)
         models_dir = PROJECT_ROOT / "cif_models"
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
@@ -946,6 +948,7 @@ class PipelineRunnerMixin:
                 output_dir=self._output_dir / "coordinates",
                 mutation_heatmap=self._ca_mutation_heatmap_var.get(),
                 plddt_heatmap=self._ca_plddt_heatmap_var.get(),
+                mark_ptm_sites=self._ca_mark_ptm_var.get(),
                 log_scale=self._ca_log_scale_var.get(),
                 log_cb=lambda line: self._q("log", line),
             )

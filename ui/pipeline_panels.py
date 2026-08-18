@@ -579,17 +579,37 @@ class PipelineTabMixin:
             "Single-fragment proteins only.",
         ).pack(side="left", padx=(4, 0))
 
+        # Mark PTM sites (independent marker, not a heatmap)
+        if not hasattr(self, "_ca_mark_ptm_var"):
+            self._ca_mark_ptm_var = ctk.BooleanVar(value=False)
+        ptm_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        ptm_frame.grid(row=7, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        ctk.CTkCheckBox(
+            ptm_frame, text="Mark PTM sites",
+            variable=self._ca_mark_ptm_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left")
+        help_icon(
+            ptm_frame,
+            "Marks each known PTM site (from the pipeline's PTM/mutation "
+            "data) with a small sphere at its CA coordinate, layered on top "
+            "of whichever heatmap(s) above are selected (or a plain cartoon "
+            "if neither is). This is a separate marker, not a recoloring, "
+            "so it never overwrites a heatmap's own color at that residue. "
+            "Single-fragment proteins only.",
+        ).pack(side="left", padx=(4, 0))
+
         # Status label + progress bar (reuse the step status pattern)
         status = ctk.CTkLabel(
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=7, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=8, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=7, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=8, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 

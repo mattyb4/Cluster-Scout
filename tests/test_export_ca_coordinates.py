@@ -1,4 +1,4 @@
-"""Unit tests for scripts/export_ca_coordinates.py."""
+﻿"""Unit tests for scripts/export_ca_coordinates.py."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -294,6 +294,70 @@ class TestComputePatientsWithinRadius:
         )
 
 
+class TestLoadPtmPositions:
+    def test_parses_positions_and_keeps_raw_token(self, tmp_path, monkeypatch):
+        tsv = tmp_path / "hotspots.tsv"
+        pd.DataFrame([{
+            "uniprot_id": "P04637",
+            "ptms_on_protein": "S15:Phosphorylation; T18:Phosphorylation",
+        }]).to_csv(tsv, sep="\t", index=False)
+        monkeypatch.setattr(mod, "PTM_TSV", tsv)
+
+        result = mod.load_ptm_positions("P04637")
+        assert result == [(15, "S15:Phosphorylation"), (18, "T18:Phosphorylation")], (
+            f"should parse each ';'-separated token into (position, raw token), got {result}"
+        )
+
+    def test_missing_file_returns_empty_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
+        assert mod.load_ptm_positions("P04637") == [], (
+            "with no intermediate TSV available yet, this should return an empty list, "
+            "not raise FileNotFoundError"
+        )
+
+    def test_unknown_protein_returns_empty_list(self, tmp_path, monkeypatch):
+        tsv = tmp_path / "hotspots.tsv"
+        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "S15:Phosphorylation"}]).to_csv(
+            tsv, sep="\t", index=False,
+        )
+        monkeypatch.setattr(mod, "PTM_TSV", tsv)
+        assert mod.load_ptm_positions("Q99999") == [], (
+            "a UniProt ID not present in the TSV has no PTM row to read -- expected an "
+            "empty list"
+        )
+
+
+class TestBuildPtmMarkerLines:
+    def test_builds_one_sphere_command_per_position(self):
+        ca_df = pd.DataFrame([
+            {"position": 15, "x": 1.0, "y": 2.0, "z": 3.0},
+            {"position": 18, "x": 4.0, "y": 5.0, "z": 6.0},
+        ])
+        lines = mod.build_ptm_marker_lines(
+            ca_df, [(15, "S15:Phosphorylation"), (18, "T18:Phosphorylation")],
+        )
+        assert lines == [
+            "shape sphere radius 1.2 center 1,2,3 color purple name S15_Phosphorylation",
+            "shape sphere radius 1.2 center 4,5,6 color purple name T18_Phosphorylation",
+        ], f"unexpected marker command(s): {lines}"
+
+    def test_skips_positions_missing_from_ca_df(self):
+        ca_df = pd.DataFrame([{"position": 15, "x": 1.0, "y": 2.0, "z": 3.0}])
+        lines = mod.build_ptm_marker_lines(ca_df, [(15, "S15:Phosphorylation"), (999, "X999:Unknown")])
+        assert len(lines) == 1, (
+            f"a PTM position with no matching CA coordinate (e.g. outside the exported "
+            f"fragment) should be silently skipped, not raise or produce a bad command, "
+            f"got {lines}"
+        )
+
+    def test_respects_custom_radius_and_color(self):
+        ca_df = pd.DataFrame([{"position": 15, "x": 0.0, "y": 0.0, "z": 0.0}])
+        lines = mod.build_ptm_marker_lines(ca_df, [(15, "S15:Phosphorylation")], radius=2.5, color="magenta")
+        assert lines == ["shape sphere radius 2.5 center 0,0,0 color magenta name S15_Phosphorylation"], (
+            f"custom radius/color should be reflected in the command, got {lines}"
+        )
+
+
 class TestWriteDefattrFile:
     def test_format_matches_chimerax_spec(self, tmp_path):
         ca_df = pd.DataFrame([
@@ -334,6 +398,68 @@ class TestWriteChimeraxScript:
             f"'noValueColor gray' with no trailing range clause (ChimeraX auto-scales), "
             f"got {color_line!r}"
         )
+
+    def test_extra_lines_inserted_before_lighting(self, tmp_path):
+        out_path = mod.write_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "mutations.defattr", tmp_path / "view.cxc",
+            extra_lines=["shape sphere radius 1.2 center 1,2,3 color purple name ptm1"],
+        )
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert lines.index("shape sphere radius 1.2 center 1,2,3 color purple name ptm1") == lines.index("lighting soft") - 1, (
+            f"extra_lines (e.g. PTM marker spheres) should be layered in right after the "
+            f"coloring command and before the final lighting command, got {lines}"
+        )
+
+
+class TestWritePlddtChimeraxScript:
+    def test_colors_by_bfactor_with_alphafold_palette(self, tmp_path):
+        out_path = mod.write_plddt_chimerax_script(tmp_path / "model.cif", tmp_path / "plddt_view.cxc")
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert 'open "' in lines[0] and "model.cif" in lines[0], (
+            f"the script should open the given CIF path, got {lines[0]!r}"
+        )
+        assert "color bfactor #1 palette alphafold" in lines, (
+            f"the pLDDT heatmap should use ChimeraX's own bfactor coloring with its "
+            f"built-in alphafold palette -- no defattr file needed since AlphaFold CIFs "
+            f"already carry pLDDT in the B-factor field. Got lines: {lines}"
+        )
+
+    def test_no_defattr_open_command(self, tmp_path):
+        # Unlike write_chimerax_script (mutation heatmap), this script must not
+        # reference any .defattr file -- pLDDT comes straight from the CIF's own
+        # B-factor column via ChimeraX's `color bfactor`. Checking for the ".defattr"
+        # extension specifically (not just "defattr") avoids a false positive from
+        # pytest's own tmp_path directory name possibly containing that substring.
+        out_path = mod.write_plddt_chimerax_script(tmp_path / "model.cif", tmp_path / "plddt_view.cxc")
+        text = out_path.read_text(encoding="utf-8")
+        assert ".defattr" not in text, f"the pLDDT script should not reference a defattr file, got:\n{text}"
+
+    def test_extra_lines_inserted_before_lighting(self, tmp_path):
+        out_path = mod.write_plddt_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "plddt_view.cxc",
+            extra_lines=["shape sphere radius 1.2 center 1,2,3 color purple name ptm1"],
+        )
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert lines.index("shape sphere radius 1.2 center 1,2,3 color purple name ptm1") == lines.index("lighting soft") - 1
+
+
+class TestWritePlainChimeraxScript:
+    def test_opens_cif_and_shows_plain_cartoon(self, tmp_path):
+        out_path = mod.write_plain_chimerax_script(tmp_path / "model.cif", tmp_path / "ptm_markers_view.cxc")
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert 'open "' in lines[0] and "model.cif" in lines[0]
+        assert "cartoon" in lines
+        assert not any(l.startswith("color") for l in lines), (
+            f"a plain script (no heatmap) must not include any color command, got {lines}"
+        )
+
+    def test_extra_lines_inserted_before_lighting(self, tmp_path):
+        out_path = mod.write_plain_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "ptm_markers_view.cxc",
+            extra_lines=["shape sphere radius 1.2 center 1,2,3 color purple name ptm1"],
+        )
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert lines.index("shape sphere radius 1.2 center 1,2,3 color purple name ptm1") == lines.index("lighting soft") - 1
 
 
 class TestRunExport:
@@ -390,8 +516,13 @@ class TestRunExport:
             f"the mutation row's total_patients should reflect the 2 distinct COSMIC "
             f"samples, got {result.mut_ca_df.iloc[0]['total_patients']}"
         )
-        assert result.defattr_out is not None and result.defattr_out.exists(), (
-            "a single-fragment protein should also produce ChimeraX files"
+        assert result.mutation_defattr_out is not None and result.mutation_defattr_out.exists(), (
+            "a single-fragment protein should also produce ChimeraX files (mutation heatmap "
+            "is on by default)"
+        )
+        assert result.plddt_chimerax_script_out is None, (
+            "pLDDT heatmap defaults to off, so no pLDDT script should be produced unless "
+            "explicitly requested"
         )
 
     def test_multi_fragment_protein_skips_chimerax_files(self, tmp_path, monkeypatch):
@@ -415,9 +546,215 @@ class TestRunExport:
 
         result = mod.run_export(
             uniprot="P04637", gene="TP53", cosmic_file=cosmic,
-            output_dir=tmp_path / "out", log_cb=lambda *_: None,
+            output_dir=tmp_path / "out", plddt_heatmap=True, log_cb=lambda *_: None,
         )
-        assert result.defattr_out is None and result.chimerax_script_out is None, (
-            "a multi-fragment protein (2 CIF files) should skip ChimeraX file "
+        assert (
+            result.mutation_defattr_out is None
+            and result.mutation_chimerax_script_out is None
+            and result.plddt_chimerax_script_out is None
+        ), (
+            "a multi-fragment protein (2 CIF files) should skip ALL ChimeraX heatmap "
             "generation entirely, since only fragment 1 was exported"
         )
+
+    def _defattr_values(self, path) -> dict[int, float]:
+        lines = path.read_text().splitlines()
+        values = {}
+        for line in lines:
+            if not line.startswith("\t/"):
+                continue
+            _, spec, value = line.split("\t")
+            values[int(spec.split(":")[1])] = float(value)
+        return values
+
+    def test_log_scale_writes_log1p_values_under_separate_attribute(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 2, 3], res_names=["ALA", "SER", "GLY"], atom_names=["CA", "CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S2A", "S1", "Confirmed somatic variant"),
+            ("TP53", "p.S2A", "S2", "Confirmed somatic variant"),
+            ("TP53", "p.S2A", "S3", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+
+        result = mod.run_export(
+            uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+            output_dir=tmp_path / "out", log_scale=True, log_cb=lambda *_: None,
+        )
+
+        lines = result.mutation_defattr_out.read_text().splitlines()
+        assert lines[0] == "attribute: patients_within_10A_log", (
+            f"log-scaled export should write under a distinct attribute name, so it isn't "
+            f"confused with the raw count, got {lines[0]!r}"
+        )
+        values = self._defattr_values(result.mutation_defattr_out)
+        # All 3 residues are within 10A of position 2 (the only mutation, 3 patients),
+        # so every residue's raw patients_within_10A is 3.
+        assert values[2] == pytest.approx(np.log1p(3)), (
+            f"the defattr value should be log1p of the raw patient count (log1p(3) "
+            f"~= {np.log1p(3):.6f}), got {values[2]}"
+        )
+        assert "patients_within_10A_log" not in result.all_ca_df.columns, (
+            "the log-scaled column exists only for the ChimeraX heatmap and must not leak "
+            "into the returned all_ca_df (or, by extension, the already-written all_ca.tsv)"
+        )
+
+    def test_log_scale_false_uses_raw_attribute_and_values(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 2], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S2A", "S1", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+
+        result = mod.run_export(
+            uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+            output_dir=tmp_path / "out", log_scale=False, log_cb=lambda *_: None,
+        )
+        lines = result.mutation_defattr_out.read_text().splitlines()
+        assert lines[0] == "attribute: patients_within_10A", (
+            f"with log_scale=False (the default), the attribute name must stay the plain "
+            f"'patients_within_10A', got {lines[0]!r}"
+        )
+        values = self._defattr_values(result.mutation_defattr_out)
+        assert values[2] == 1.0, (
+            f"with log_scale=False the defattr value should be the raw (unscaled) patient "
+            f"count, got {values[2]}"
+        )
+
+    def _single_fragment_export_kwargs(self, tmp_path, monkeypatch):
+        """Shared single-fragment CIF + empty COSMIC setup for the heatmap-toggle tests
+        below, which only care about which files get produced, not their content.
+        """
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1], res_names=["ALA"], atom_names=["CA"], coords=[[0.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame(columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+                    output_dir=tmp_path / "out", log_cb=lambda *_: None)
+
+    def test_mutation_heatmap_false_skips_mutation_files_only(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=False, plddt_heatmap=True, **kwargs)
+        assert result.mutation_defattr_out is None and result.mutation_chimerax_script_out is None, (
+            "with mutation_heatmap=False, no mutation-heatmap files should be produced"
+        )
+        assert result.plddt_chimerax_script_out is not None and result.plddt_chimerax_script_out.exists(), (
+            "plddt_heatmap=True should still produce the pLDDT script even with the "
+            "mutation heatmap turned off -- the two are independent"
+        )
+
+    def test_plddt_heatmap_true_produces_script_with_no_mutation_files(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=False, plddt_heatmap=True, **kwargs)
+        assert "color bfactor #1 palette alphafold" in result.plddt_chimerax_script_out.read_text(), (
+            "the produced pLDDT script should color by bfactor with the alphafold palette"
+        )
+
+    def test_both_heatmaps_true_produces_all_three_files(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, plddt_heatmap=True, **kwargs)
+        assert result.mutation_defattr_out is not None and result.mutation_defattr_out.exists()
+        assert result.mutation_chimerax_script_out is not None and result.mutation_chimerax_script_out.exists()
+        assert result.plddt_chimerax_script_out is not None and result.plddt_chimerax_script_out.exists()
+        assert result.mutation_chimerax_script_out != result.plddt_chimerax_script_out, (
+            "the two heatmaps must be written as separate .cxc scripts, not one combined "
+            "script -- ChimeraX's color command replaces the previous coloring rather than "
+            "layering, so a single script could only ever show the last color applied"
+        )
+
+    def test_both_heatmaps_false_skips_all_chimerax_files(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=False, plddt_heatmap=False, **kwargs)
+        assert (
+            result.mutation_defattr_out is None
+            and result.mutation_chimerax_script_out is None
+            and result.plddt_chimerax_script_out is None
+        ), "with both heatmaps off, no ChimeraX files at all should be produced"
+
+    def test_default_kwargs_enable_only_mutation_heatmap(self, tmp_path, monkeypatch):
+        # Backward-compatible default: mutation_heatmap=True, plddt_heatmap=False,
+        # matching this tool's original always-on mutation-heatmap behavior.
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(**kwargs)
+        assert result.mutation_defattr_out is not None and result.mutation_defattr_out.exists()
+        assert result.plddt_chimerax_script_out is None
+
+    def _write_ptm_tsv(self, tmp_path, monkeypatch):
+        ptm_tsv = tmp_path / "hotspots.tsv"
+        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}]).to_csv(
+            ptm_tsv, sep="\t", index=False,
+        )
+        monkeypatch.setattr(mod, "PTM_TSV", ptm_tsv)
+
+    def test_mark_ptm_sites_adds_sphere_to_mutation_script(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        self._write_ptm_tsv(tmp_path, monkeypatch)
+
+        result = mod.run_export(mutation_heatmap=True, plddt_heatmap=False, mark_ptm_sites=True, **kwargs)
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "shape sphere" in text, (
+            f"a PTM marker sphere should be layered into the mutation heatmap script, got:\n{text}"
+        )
+        assert result.plain_chimerax_script_out is None, (
+            "a heatmap was requested, so no separate 'plain' PTM-only script should be produced"
+        )
+
+    def test_mark_ptm_sites_with_no_heatmap_produces_plain_script(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        self._write_ptm_tsv(tmp_path, monkeypatch)
+
+        result = mod.run_export(mutation_heatmap=False, plddt_heatmap=False, mark_ptm_sites=True, **kwargs)
+        assert result.plain_chimerax_script_out is not None and result.plain_chimerax_script_out.exists(), (
+            "mark_ptm_sites=True with both heatmaps off should still produce a plain "
+            "(uncolored) script carrying the PTM markers"
+        )
+        text = result.plain_chimerax_script_out.read_text()
+        assert "shape sphere" in text
+        assert not any(l.startswith("color") for l in text.splitlines()), (
+            f"the plain script must have no color command, got:\n{text}"
+        )
+
+    def test_mark_ptm_sites_false_produces_no_spheres(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        self._write_ptm_tsv(tmp_path, monkeypatch)
+
+        result = mod.run_export(mutation_heatmap=True, mark_ptm_sites=False, **kwargs)
+        assert "shape sphere" not in result.mutation_chimerax_script_out.read_text(), (
+            "with mark_ptm_sites=False (the default), no spheres should appear even though "
+            "matching PTM data exists"
+        )
+
+    def test_mark_ptm_sites_with_no_ptm_data_does_not_crash(self, tmp_path, monkeypatch):
+        kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
+
+        result = mod.run_export(mutation_heatmap=True, mark_ptm_sites=True, **kwargs)
+        assert result.mutation_chimerax_script_out is not None and result.mutation_chimerax_script_out.exists(), (
+            "missing PTM data should degrade gracefully (heatmap still produced, just no "
+            "markers), not raise"
+        )
+        assert "shape sphere" not in result.mutation_chimerax_script_out.read_text()

@@ -9,21 +9,36 @@ Angstroms:
   all_ca.tsv       — CA coordinates for every residue
   mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
 
-For single-fragment proteins, also produces a ChimeraX-ready pair (skipped,
-with a warning, for multi-fragment proteins — see write_chimerax_files):
+For single-fragment proteins, also optionally produces ChimeraX-ready heatmap
+scripts (skipped, with a warning, for multi-fragment proteins):
 
-  mutations.defattr — per-residue patients_within_10A value as a ChimeraX
-                       attribute-assignment file
-  view.cxc           — a ChimeraX command script that opens the CIF, loads
-                        the attribute file, and colors the cartoon by it as
-                        a heatmap (a sequential "Reds" palette, auto-scaled
-                        to the attribute's true min/max). Open this file
-                        directly in ChimeraX to see the result.
+  mutations.defattr    — per-residue patients_within_10A value as a ChimeraX
+                          attribute-assignment file (mutation heatmap only)
+  mutations_view.cxc   — opens the CIF, loads the attribute file, and colors
+                          the cartoon by it (a sequential "Reds" palette,
+                          auto-scaled to the attribute's true min/max, or
+                          log1p-scaled if requested)
+  plddt_view.cxc        — opens the CIF and colors the cartoon by AlphaFold's
+                          own per-residue confidence (pLDDT), using
+                          ChimeraX's built-in "alphafold" palette
+  ptm_markers_view.cxc  — opens the CIF with a plain (uncolored) cartoon;
+                          only produced when mark_ptm_sites is on and
+                          neither heatmap is
+
+Each heatmap is independently opt-in (mutation_heatmap/plddt_heatmap); open
+either .cxc file directly in ChimeraX to see that heatmap with no manual steps.
+
+mark_ptm_sites additionally marks each known PTM site with a small sphere at
+its CA coordinate -- an independent marker model, not a recoloring, so it's
+layered into whichever .cxc file(s) above get written without overwriting
+that heatmap's own color at the PTM residue.
 
 Usage:
     uv run scripts/export_ca_coordinates.py P04637
     uv run scripts/export_ca_coordinates.py P04637 --gene TP53
     uv run scripts/export_ca_coordinates.py P04637 --cosmic path/to/COSMIC.tsv
+    uv run scripts/export_ca_coordinates.py P04637 --plddt-heatmap --no-mutation-heatmap
+    uv run scripts/export_ca_coordinates.py P04637 --mark-ptm-sites
 """
 from __future__ import annotations
 
@@ -45,12 +60,16 @@ from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
     find_canonical_cifs, load_first_chain,
     input_dir, resolve_input_file, COSMIC_INPUT_DIR,
+    hotspots_tsv_path,
 )
 
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
 OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
+# PTM-site marking always needs the ptm-proximity file specifically (its
+# ptms_on_protein column) -- this tool has no --mode of its own.
+PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
 NEARBY_PATIENT_RADIUS_A = 10.0
@@ -65,8 +84,10 @@ class ExportResult:
     mut_ca_df: pd.DataFrame
     all_out: Path
     mut_out: Path
-    defattr_out: Path | None = None
-    chimerax_script_out: Path | None = None
+    mutation_defattr_out: Path | None = None
+    mutation_chimerax_script_out: Path | None = None
+    plddt_chimerax_script_out: Path | None = None
+    plain_chimerax_script_out: Path | None = None
 
 
 def _download_cif(uid: str, log_cb: Callable[[str], None] = print) -> list[Path]:
@@ -291,6 +312,54 @@ def _compute_patients_within_radius(
     return {int(pos): int(total) for pos, total in zip(ca_df["position"], totals)}
 
 
+def load_ptm_positions(uniprot: str) -> list[tuple[int, str]]:
+    """Load (position, raw PTM token) pairs from the pipeline's intermediate
+    PTM/mutation-hotspot TSV for *uniprot*, e.g. [(15, "S15:Phosphorylation"), ...].
+
+    Returns an empty list if the TSV doesn't exist yet (pipeline step 1 hasn't
+    been run) or has no row for this protein.
+    """
+    if not PTM_TSV.exists():
+        return []
+    df = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
+    rows = df[df["uniprot_id"] == uniprot]
+    if rows.empty:
+        return []
+
+    row = rows.iloc[0]
+    positions: list[tuple[int, str]] = []
+    for token in str(row.get("ptms_on_protein", "")).split(";"):
+        token = token.strip()
+        m = re.search(r"[A-Z](\d+)", token)
+        if m:
+            positions.append((int(m.group(1)), token))
+    return positions
+
+
+def build_ptm_marker_lines(
+    ca_df: pd.DataFrame, ptm_positions: list[tuple[int, str]],
+    radius: float = 1.2, color: str = "purple",
+) -> list[str]:
+    """Build one ChimeraX `shape sphere` command per PTM position, marking its
+    CA coordinate with an independent sphere model rather than recoloring the
+    residue -- so it can be layered on top of any heatmap (or a plain
+    cartoon) without overwriting that heatmap's own color at that residue.
+
+    PTM positions with no matching CA coordinate in *ca_df* (e.g. outside the
+    exported fragment) are silently skipped.
+    """
+    coords = {int(row["position"]): (row["x"], row["y"], row["z"]) for _, row in ca_df.iterrows()}
+    lines = []
+    for pos, token in ptm_positions:
+        coord = coords.get(pos)
+        if coord is None:
+            continue
+        x, y, z = coord
+        name = re.sub(r"[^\w]+", "_", token).strip("_") or f"ptm_{pos}"
+        lines.append(f"shape sphere radius {radius:g} center {x:g},{y:g},{z:g} color {color} name {name}")
+    return lines
+
+
 def write_defattr_file(
     ca_df: pd.DataFrame, out_path: Path, chain_id: str = "A",
     attr_name: str = "patients_within_10A",
@@ -317,6 +386,7 @@ def write_chimerax_script(
     attr_name: str = "patients_within_10A",
     value_range: tuple[float, float] | None = None,
     palette: str = "Reds",
+    extra_lines: list[str] = (),
 ) -> Path:
     """Write a ChimeraX command script (.cxc) that opens *cif_path*, loads the
     attribute data from *defattr_path*, and colors the cartoon by it as a
@@ -330,6 +400,10 @@ def write_chimerax_script(
     to the true min/max: COSMIC patient counts are heavily right-skewed, so an
     unclamped range lets one hotspot outlier crush every other residue into
     the lightest color.
+
+    *extra_lines*, if given, are inserted after the coloring command and
+    before the final lighting command -- used to layer independent
+    (non-recoloring) markers like PTM-site spheres on top of the heatmap.
     """
     range_clause = f" range {value_range[0]:g},{value_range[1]:g}" if value_range else ""
     lines = [
@@ -338,6 +412,47 @@ def write_chimerax_script(
         "hide atoms",
         "cartoon",
         f"color byattribute r:{attr_name} #1 palette {palette} target c noValueColor gray{range_clause}",
+        *extra_lines,
+        "lighting soft",
+    ]
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return out_path
+
+
+def write_plddt_chimerax_script(cif_path: Path, out_path: Path, extra_lines: list[str] = ()) -> Path:
+    """Write a ChimeraX command script (.cxc) that opens *cif_path* and colors
+    the cartoon by pLDDT confidence.
+
+    No defattr file is needed: AlphaFold CIFs already carry the per-residue
+    pLDDT score in the standard B-factor field, and ChimeraX's own built-in
+    "alphafold" palette (the same scheme the AlphaFold DB itself uses) reads
+    it directly via `color bfactor`.
+
+    *extra_lines*, if given, are inserted after the coloring command and
+    before the final lighting command -- see write_chimerax_script.
+    """
+    lines = [
+        f'open "{cif_path}"',
+        "hide atoms",
+        "cartoon",
+        "color bfactor #1 palette alphafold",
+        *extra_lines,
+        "lighting soft",
+    ]
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    return out_path
+
+
+def write_plain_chimerax_script(cif_path: Path, out_path: Path, extra_lines: list[str] = ()) -> Path:
+    """Write a ChimeraX command script (.cxc) that opens *cif_path* and shows
+    a plain cartoon with no heatmap coloring -- used when PTM-site markers
+    are requested but neither heatmap is.
+    """
+    lines = [
+        f'open "{cif_path}"',
+        "hide atoms",
+        "cartoon",
+        *extra_lines,
         "lighting soft",
     ]
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
@@ -349,12 +464,31 @@ def run_export(
     gene: str | None = None,
     cosmic_file: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
+    mutation_heatmap: bool = True,
+    plddt_heatmap: bool = False,
+    mark_ptm_sites: bool = False,
+    log_scale: bool = False,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
 
     Either *uniprot* or *gene* must be given; if *uniprot* is omitted, the
     UniProt accession is resolved from *gene* via a live UniProt API lookup.
+
+    *mutation_heatmap*/*plddt_heatmap* independently control which ChimeraX
+    heatmap script(s) get written (single-fragment proteins only -- see step
+    8 below). *log_scale* only affects the mutation heatmap: if True, it's
+    colored by log1p(patients_within_10A) instead of the raw count, under a
+    separate "patients_within_10A_log" attribute name -- see
+    write_chimerax_script's docstring for why this can help with heavily
+    right-skewed patient counts.
+
+    *mark_ptm_sites*, if True, marks each known PTM site (from the pipeline's
+    intermediate PTM/mutation-hotspot TSV) with a small sphere at its CA
+    coordinate in whichever heatmap script(s) get written -- or its own plain
+    (uncolored) script if neither heatmap is requested. See
+    build_ptm_marker_lines's docstring for why this is a separate marker
+    rather than a recoloring.
 
     Raises ValueError if neither uniprot nor gene is given, if a gene-only
     lookup can't be resolved to a UniProt accession, or if no AlphaFold
@@ -471,30 +605,70 @@ def run_export(
     log_cb(f"  All CA coordinates : {all_out}  ({len(all_ca_df)} rows)")
     log_cb(f"  Mutation CA coords : {mut_out}  ({len(mut_ca_df)} rows)")
 
-    # ── 8. ChimeraX heatmap files (single-fragment proteins only) ─────────────
-    defattr_out = chimerax_script_out = None
-    if len(cif_files) > 1:
+    # ── 8. ChimeraX heatmap/marker files (single-fragment proteins only) ──────
+    mutation_defattr_out = mutation_chimerax_script_out = None
+    plddt_chimerax_script_out = plain_chimerax_script_out = None
+    if not (mutation_heatmap or plddt_heatmap or mark_ptm_sites):
+        log_cb("  No heatmaps or markers selected, skipping ChimeraX files.")
+    elif len(cif_files) > 1:
         log_cb(
             f"  Skipping ChimeraX files: {uid} spans {len(cif_files)} AlphaFold "
             f"fragments, and only fragment 1's residues were exported above."
         )
     else:
-        defattr_out = output_dir / "mutations.defattr"
-        chimerax_script_out = output_dir / "view.cxc"
+        cif_path = cif_files[0].resolve()
 
-        write_defattr_file(all_ca_df, defattr_out, attr_name="patients_within_10A")
-        write_chimerax_script(
-            cif_files[0].resolve(), defattr_out.resolve(), chimerax_script_out,
-            attr_name="patients_within_10A",
-        )
-        log_cb(f"  ChimeraX attribute file : {defattr_out}")
-        log_cb(f"  ChimeraX script (open this in ChimeraX) : {chimerax_script_out}")
+        ptm_marker_lines: list[str] = []
+        if mark_ptm_sites:
+            ptm_positions = load_ptm_positions(uid)
+            if ptm_positions:
+                ptm_marker_lines = build_ptm_marker_lines(all_ca_df, ptm_positions)
+                log_cb(f"  Marking {len(ptm_marker_lines)} PTM site(s) as spheres")
+            else:
+                log_cb(f"  No PTM site data found for {uid} in the pipeline's "
+                       f"intermediate data — nothing to mark.")
+
+        if mutation_heatmap:
+            mutation_defattr_out = output_dir / "mutations.defattr"
+            mutation_chimerax_script_out = output_dir / "mutations_view.cxc"
+
+            # A separate copy (not all_ca_df itself) so the log-scaled column
+            # never leaks into the returned ExportResult or the TSVs already
+            # written above -- it exists only for this heatmap.
+            heatmap_attr = "patients_within_10A"
+            heatmap_df = all_ca_df
+            if log_scale:
+                heatmap_attr = "patients_within_10A_log"
+                heatmap_df = all_ca_df.copy()
+                heatmap_df[heatmap_attr] = np.log1p(heatmap_df["patients_within_10A"])
+                log_cb("  Log-scaling mutation heatmap (log1p of patients_within_10A)")
+
+            write_defattr_file(heatmap_df, mutation_defattr_out, attr_name=heatmap_attr)
+            write_chimerax_script(
+                cif_path, mutation_defattr_out.resolve(), mutation_chimerax_script_out,
+                attr_name=heatmap_attr, extra_lines=ptm_marker_lines,
+            )
+            log_cb(f"  Mutation heatmap attribute file : {mutation_defattr_out}")
+            log_cb(f"  Mutation heatmap script (open this in ChimeraX) : {mutation_chimerax_script_out}")
+
+        if plddt_heatmap:
+            plddt_chimerax_script_out = output_dir / "plddt_view.cxc"
+            write_plddt_chimerax_script(cif_path, plddt_chimerax_script_out, extra_lines=ptm_marker_lines)
+            log_cb(f"  pLDDT heatmap script (open this in ChimeraX) : {plddt_chimerax_script_out}")
+
+        if mark_ptm_sites and not mutation_heatmap and not plddt_heatmap:
+            plain_chimerax_script_out = output_dir / "ptm_markers_view.cxc"
+            write_plain_chimerax_script(cif_path, plain_chimerax_script_out, extra_lines=ptm_marker_lines)
+            log_cb(f"  PTM marker script (open this in ChimeraX) : {plain_chimerax_script_out}")
 
     return ExportResult(
         uid=uid, gene=resolved_gene,
         all_ca_df=all_ca_df, mut_ca_df=mut_ca_df,
         all_out=all_out, mut_out=mut_out,
-        defattr_out=defattr_out, chimerax_script_out=chimerax_script_out,
+        mutation_defattr_out=mutation_defattr_out,
+        mutation_chimerax_script_out=mutation_chimerax_script_out,
+        plddt_chimerax_script_out=plddt_chimerax_script_out,
+        plain_chimerax_script_out=plain_chimerax_script_out,
     )
 
 
@@ -521,6 +695,30 @@ def main() -> None:
         default=None,
         help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
     )
+    parser.add_argument(
+        "--mutation-heatmap", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate the mutation (patients-within-10A) ChimeraX heatmap. "
+             "Enabled by default; use --no-mutation-heatmap to skip it.",
+    )
+    parser.add_argument(
+        "--plddt-heatmap", action="store_true",
+        help="Also generate a ChimeraX heatmap script colored by AlphaFold's "
+             "per-residue pLDDT confidence, using ChimeraX's built-in "
+             "AlphaFold palette.",
+    )
+    parser.add_argument(
+        "--log-scale", action="store_true",
+        help="Color the mutation heatmap by log1p(patients_within_10A) instead "
+             "of the raw count -- helps when patient counts are heavily "
+             "right-skewed and a linear scale would crush most residues into "
+             "one flat color. Has no effect on the pLDDT heatmap.",
+    )
+    parser.add_argument(
+        "--mark-ptm-sites", action="store_true",
+        help="Mark each known PTM site with a small sphere at its CA "
+             "coordinate, layered on top of whichever heatmap(s) are "
+             "generated (or a plain cartoon if neither is).",
+    )
     args = parser.parse_args()
 
     try:
@@ -528,6 +726,10 @@ def main() -> None:
             args.uniprot,
             gene=args.gene,
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
+            mutation_heatmap=args.mutation_heatmap,
+            plddt_heatmap=args.plddt_heatmap,
+            mark_ptm_sites=args.mark_ptm_sites,
+            log_scale=args.log_scale,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")
