@@ -256,6 +256,48 @@ class TestLoadCosmicMutations:
         )
 
 
+class TestLoadCosmicDataframe:
+    def test_caches_by_resolved_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_cosmic_df_cache", {})
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame(
+            [("TP53", "p.R175H", "S1", "Confirmed somatic variant")],
+            columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"],
+        ).to_csv(cosmic, sep="\t", index=False)
+
+        df1 = mod._load_cosmic_dataframe(cosmic)
+        # Rewrite the same path with different content -- a second call must
+        # still return the first read (proving it came from cache, not disk).
+        pd.DataFrame(
+            [("EGFR", "p.L858R", "S2", "Confirmed somatic variant")],
+            columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"],
+        ).to_csv(cosmic, sep="\t", index=False)
+        df2 = mod._load_cosmic_dataframe(cosmic)
+
+        assert df1["GENE_SYMBOL"].tolist() == df2["GENE_SYMBOL"].tolist() == ["TP53"], (
+            "a batch scanning many genes must only read this (potentially huge) file from "
+            "disk once -- the second call should return the cached frame, not the rewritten "
+            "file's new content"
+        )
+
+    def test_different_paths_are_not_conflated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "_cosmic_df_cache", {})
+        cosmic_a = tmp_path / "a.tsv"
+        cosmic_b = tmp_path / "b.tsv"
+        cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
+        pd.DataFrame([("TP53", "p.R175H", "S1", "Confirmed somatic variant")], columns=cols).to_csv(
+            cosmic_a, sep="\t", index=False,
+        )
+        pd.DataFrame([("EGFR", "p.L858R", "S2", "Confirmed somatic variant")], columns=cols).to_csv(
+            cosmic_b, sep="\t", index=False,
+        )
+
+        assert mod._load_cosmic_dataframe(cosmic_a)["GENE_SYMBOL"].tolist() == ["TP53"]
+        assert mod._load_cosmic_dataframe(cosmic_b)["GENE_SYMBOL"].tolist() == ["EGFR"], (
+            "different COSMIC file paths must be cached independently, not share one entry"
+        )
+
+
 class TestComputePatientsWithinRadius:
     def _ca_df(self):
         return pd.DataFrame([
@@ -1016,3 +1058,102 @@ class TestRunExport:
             f"without dimming there's no transparency to conflict with 'soft' lighting, so "
             f"it should stay the default, got {lines}"
         )
+
+
+class TestRunBatchExport:
+    def _setup_two_proteins(self, tmp_path, monkeypatch):
+        """Two single-fragment proteins (P04637/TP53, P00533/EGFR) with a
+        gene cache so neither needs a live network call to resolve.
+        """
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        for uid in ("P04637", "P00533"):
+            uid_dir = tmp_path / "cif_models" / uid
+            uid_dir.mkdir(parents=True)
+            _write_synthetic_cif(
+                uid_dir / f"AF-{uid}-F1-model_v4.cif",
+                res_ids=[1], res_names=["ALA"], atom_names=["CA"], coords=[[0.0, 0.0, 0.0]],
+            )
+        gene_cache = tmp_path / "gene_cache.tsv"
+        pd.DataFrame([
+            {"UniProt": "P04637", "gene": "TP53"},
+            {"UniProt": "P00533", "gene": "EGFR"},
+        ]).to_csv(gene_cache, sep="\t", index=False)
+        monkeypatch.setattr(mod, "GENE_CACHE", gene_cache)
+
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame(columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return cosmic
+
+    def test_runs_one_export_per_token_into_separate_folders(self, tmp_path, monkeypatch):
+        cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
+        items = mod.run_batch_export(
+            ["P04637", "P00533"], cosmic_file=cosmic, output_dir=tmp_path / "out",
+            log_cb=lambda *_: None,
+        )
+        assert [item.token for item in items] == ["P04637", "P00533"], (
+            "results should be returned in the same order as the input tokens"
+        )
+        assert all(item.result is not None and item.error is None for item in items), (
+            f"both proteins should export successfully, got "
+            f"{[(i.token, i.error) for i in items]}"
+        )
+        assert {item.result.uid for item in items} == {"P04637", "P00533"}
+        assert items[0].result.all_out.parent.name == "P04637"
+        assert items[1].result.all_out.parent.name == "P00533", (
+            "each protein's outputs must land in their own {uid} subfolder so a batch never "
+            "mixes proteins' files together"
+        )
+
+    def test_classifies_uniprot_vs_gene_tokens(self, tmp_path, monkeypatch):
+        cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
+        calls = []
+        real_run_export = mod.run_export
+
+        def spy_run_export(uniprot=None, gene=None, **kwargs):
+            calls.append((uniprot, gene))
+            return real_run_export(uniprot=uniprot, gene=gene, **kwargs)
+
+        monkeypatch.setattr(mod, "run_export", spy_run_export)
+        mod.run_batch_export(
+            ["P04637", "EGFR"], cosmic_file=cosmic, output_dir=tmp_path / "out",
+            log_cb=lambda *_: None,
+        )
+        assert calls == [("P04637", None), (None, "EGFR")], (
+            f"a token matching the UniProt accession format should be routed to uniprot=, "
+            f"and a token that doesn't should be routed to gene=, got {calls}"
+        )
+
+    def test_one_failure_does_not_abort_the_batch(self, tmp_path, monkeypatch):
+        cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
+        # NOTFOUND1 has no AlphaFold CIF and isn't in the gene cache, so its
+        # export should fail cleanly -- P00533 (after it) must still run.
+        items = mod.run_batch_export(
+            ["NOTFOUND1", "P00533"], cosmic_file=cosmic, output_dir=tmp_path / "out",
+            log_cb=lambda *_: None,
+        )
+        assert items[0].result is None and items[0].error, (
+            f"the unresolvable token should fail with an error message, not raise out of "
+            f"run_batch_export, got {items[0]}"
+        )
+        assert items[1].result is not None and items[1].error is None, (
+            "a failure on the first protein must not prevent the second from running"
+        )
+
+    def test_progress_cb_called_with_index_total_token(self, tmp_path, monkeypatch):
+        cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
+        calls = []
+        mod.run_batch_export(
+            ["P04637", "P00533"], cosmic_file=cosmic, output_dir=tmp_path / "out",
+            progress_cb=lambda i, total, token: calls.append((i, total, token)),
+            log_cb=lambda *_: None,
+        )
+        assert calls == [(1, 2, "P04637"), (2, 2, "P00533")], (
+            f"progress_cb should fire once per protein with a 1-based index, the batch "
+            f"total, and that protein's own token, got {calls}"
+        )
+
+    def test_empty_token_list_returns_empty_list(self, tmp_path, monkeypatch):
+        cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
+        assert mod.run_batch_export([], cosmic_file=cosmic, output_dir=tmp_path / "out", log_cb=lambda *_: None) == []

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     project_root, find_canonical_cif, find_canonical_cifs, load_first_chain,
     COSMIC_SOMATIC_STATUSES, input_dir, resolve_input_file, COSMIC_INPUT_DIR,
-    hotspots_tsv_path,
+    hotspots_tsv_path, looks_like_uniprot_id,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -43,19 +43,6 @@ PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 
 DEFAULT_GENES = ["EGFR", "TP53", "VHL", "CANT1", "DDR2", "PTPN11", "LZTR1", "CDK12"]
 DEFAULT_MIN_CASES = 3
-
-# Standard UniProt accession formats: 6-char (e.g. P04637) and 10-char
-# (e.g. A0A099Z4Y8), per UniProt's own published pattern.
-_UNIPROT_RE = re.compile(
-    r"^([A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2}|[OPQ][0-9][A-Z0-9]{3}[0-9])$",
-    re.IGNORECASE,
-)
-
-
-def looks_like_uniprot_id(token: str) -> bool:
-    """Heuristic: does *token* look like a UniProt accession (e.g. P04637)
-    rather than a gene symbol (e.g. TP53)?"""
-    return bool(_UNIPROT_RE.match(token.strip()))
 
 
 _ptm_tsv_index_cache: pd.DataFrame | None = None

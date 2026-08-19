@@ -167,6 +167,19 @@ AA3TO1 = {
 MUT_RE = re.compile(r"([A-Z])(\d+)([A-Z*])")
 SITE_RE = re.compile(r"^([A-Z])(\d+)$")
 
+# Standard UniProt accession formats: 6-char (e.g. P04637) and 10-char
+# (e.g. A0A099Z4Y8), per UniProt's own published pattern.
+UNIPROT_RE = re.compile(
+    r"^([A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2}|[OPQ][0-9][A-Z0-9]{3}[0-9])$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_uniprot_id(token: str) -> bool:
+    """Heuristic: does *token* look like a UniProt accession (e.g. P04637)
+    rather than a gene symbol (e.g. TP53)?"""
+    return bool(UNIPROT_RE.match(token.strip()))
+
 COSMIC_SOMATIC_STATUSES = {
     "Confirmed somatic variant",
     "Reported in another cancer sample as somatic",

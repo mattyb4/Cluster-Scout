@@ -481,49 +481,60 @@ class PipelineTabMixin:
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
 
-        # UniProt ID
-        uniprot_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        uniprot_label_frame.grid(row=1, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(uniprot_label_frame, text="UniProt ID:", anchor="w").pack(side="left")
+        # Proteins list (gene symbols and/or UniProt accessions, run as a batch)
+        proteins_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        proteins_label_frame.grid(row=1, column=0, padx=(12, 6), pady=6, sticky="nw")
+        ctk.CTkLabel(proteins_label_frame, text="Proteins:", anchor="w").pack(side="left")
         help_icon(
-            uniprot_label_frame,
-            "Leave blank if you provide a Gene symbol below — the UniProt "
-            "accession will be resolved automatically.",
+            proteins_label_frame,
+            "Add one or more gene symbols and/or UniProt accessions - each "
+            "is exported in turn (its own Output/coordinates/{UniProt}/ "
+            "folder), with the same options below applied to every one. A "
+            "gene's UniProt accession, or a UniProt accession's gene "
+            "symbol, is resolved automatically as needed. One protein "
+            "failing (e.g. no AlphaFold model) doesn't stop the rest.",
         ).pack(side="left", padx=(4, 0))
-        if not hasattr(self, "_ca_uniprot_var"):
-            self._ca_uniprot_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            self._steps_outer, textvariable=self._ca_uniprot_var, width=200,
-            placeholder_text="e.g. P04637",
-        ).grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        if not hasattr(self, "_ca_proteins"):
+            self._ca_proteins: list[str] = []
 
-        # Gene
-        gene_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        gene_label_frame.grid(row=2, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(gene_label_frame, text="Gene:", anchor="w").pack(side="left")
-        help_icon(
-            gene_label_frame,
-            "Can be used on its own (the UniProt accession is looked up "
-            "automatically), or alongside UniProt ID above to skip that "
-            "lookup, since the gene symbol is then already known.",
-        ).pack(side="left", padx=(4, 0))
-        if not hasattr(self, "_ca_gene_var"):
-            self._ca_gene_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            self._steps_outer, textvariable=self._ca_gene_var, width=200,
-            placeholder_text="e.g. TP53",
-        ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        protein_input_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        protein_input_frame.grid(row=1, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+
+        self._ca_protein_input_var = ctk.StringVar(value="")
+        protein_entry = ctk.CTkEntry(
+            protein_input_frame, textvariable=self._ca_protein_input_var, width=180,
+            placeholder_text="e.g. P04637 or TP53",
+        )
+        protein_entry.pack(side="left", padx=(0, 6))
+        protein_entry.bind("<Return>", lambda _e: self._add_ca_protein())
+
+        ctk.CTkButton(
+            protein_input_frame, text="+ Add", width=70, height=28,
+            command=self._add_ca_protein,
+        ).pack(side="left")
+
+        # Feedback for _add_ca_protein — hidden until there's something to say
+        self._ca_protein_error_label = ctk.CTkLabel(
+            self._steps_outer, text="", text_color=_RED,
+            font=ctk.CTkFont(size=11), anchor="w",
+        )
+        self._ca_protein_error_label.grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 4), sticky="w")
+        self._ca_protein_error_label.grid_remove()
+
+        self._ca_proteins_list_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        self._ca_proteins_list_frame.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="ew")
+        self._refresh_ca_protein_chips()
 
         # Heatmaps section
         ctk.CTkLabel(
             self._steps_outer, text="Heatmaps:", font=ctk.CTkFont(weight="bold"),
-        ).grid(row=3, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
+        ).grid(row=4, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
 
         # Mutation heatmap
         if not hasattr(self, "_ca_mutation_heatmap_var"):
             self._ca_mutation_heatmap_var = ctk.BooleanVar(value=True)
         mut_heatmap_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_heatmap_frame.grid(row=4, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        mut_heatmap_frame.grid(row=5, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             mut_heatmap_frame, text="Mutation heatmap (patients within 10 Å)",
             variable=self._ca_mutation_heatmap_var,
@@ -541,7 +552,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_log_scale_var"):
             self._ca_log_scale_var = ctk.BooleanVar(value=False)
         log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        log_scale_frame.grid(row=5, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        log_scale_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
         self._ca_log_scale_checkbox = ctk.CTkCheckBox(
             log_scale_frame, text="Log-scale",
             variable=self._ca_log_scale_var,
@@ -562,7 +573,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_dim_confidence_var"):
             self._ca_dim_confidence_var = ctk.BooleanVar(value=False)
         dim_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        dim_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
+        dim_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
         self._ca_dim_confidence_checkbox = ctk.CTkCheckBox(
             dim_frame, text="Dim low-confidence residues",
             variable=self._ca_dim_confidence_var,
@@ -586,7 +597,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_plddt_heatmap_var"):
             self._ca_plddt_heatmap_var = ctk.BooleanVar(value=False)
         plddt_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_frame.grid(row=7, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        plddt_frame.grid(row=8, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
         ctk.CTkCheckBox(
             plddt_frame, text="pLDDT heatmap",
             variable=self._ca_plddt_heatmap_var,
@@ -606,7 +617,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_mark_ptm_var"):
             self._ca_mark_ptm_var = ctk.BooleanVar(value=False)
         ptm_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        ptm_frame.grid(row=8, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        ptm_frame.grid(row=9, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             ptm_frame, text="Mark PTM sites",
             variable=self._ca_mark_ptm_var,
@@ -626,7 +637,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_mark_mutations_var"):
             self._ca_mark_mutations_var = ctk.BooleanVar(value=False)
         mut_marker_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_marker_frame.grid(row=9, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        mut_marker_frame.grid(row=10, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
         ctk.CTkCheckBox(
             mut_marker_frame, text="Show mutation markers",
             variable=self._ca_mark_mutations_var,
@@ -647,12 +658,12 @@ class PipelineTabMixin:
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=10, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=11, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=10, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=11, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 
@@ -664,6 +675,66 @@ class PipelineTabMixin:
         state = "normal" if self._ca_mutation_heatmap_var.get() else "disabled"
         self._ca_log_scale_checkbox.configure(state=state)
         self._ca_dim_confidence_checkbox.configure(state=state)
+
+    def _add_ca_protein(self) -> None:
+        """Add a protein token (gene symbol or UniProt accession) to the
+        batch list. Unlike Radius Sweep's gene picker, this doesn't validate
+        against local pipeline data or resolve it up front -- CA Coordinates
+        works from raw COSMIC + a live UniProt lookup, not the pipeline's own
+        intermediate TSVs, so there's nothing to check locally, and a live
+        network call on every "Add" click would make the button feel slow.
+        Any token that fails to resolve is instead reported per-protein when
+        the batch actually runs.
+        """
+        token = self._ca_protein_input_var.get().strip().upper()
+        if not token:
+            return
+
+        if token in self._ca_proteins:
+            self._ca_protein_error_label.configure(
+                text=f"⚠  {token} is already in the list.", text_color=_YELLOW,
+            )
+            self._ca_protein_error_label.grid()
+            self._ca_protein_input_var.set("")
+            return
+
+        self._ca_protein_error_label.grid_remove()
+        self._ca_proteins.append(token)
+        self._refresh_ca_protein_chips()
+        self._ca_protein_input_var.set("")
+
+    def _remove_ca_protein(self, token: str) -> None:
+        if token in self._ca_proteins:
+            self._ca_proteins.remove(token)
+            self._refresh_ca_protein_chips()
+
+    def _refresh_ca_protein_chips(self) -> None:
+        """Redraw the added-proteins chip list, each removable via its own ✕ button."""
+        for w in self._ca_proteins_list_frame.winfo_children():
+            w.destroy()
+
+        if not self._ca_proteins:
+            ctk.CTkLabel(
+                self._ca_proteins_list_frame, text="None added yet.",
+                text_color=_GRAY, font=ctk.CTkFont(size=11),
+            ).pack(anchor="w")
+            return
+
+        row = None
+        for i, token in enumerate(self._ca_proteins):
+            if i % 6 == 0:
+                row = ctk.CTkFrame(self._ca_proteins_list_frame, fg_color="transparent")
+                row.pack(anchor="w", pady=(0, 4))
+            chip = ctk.CTkFrame(row, fg_color="#3a3a3a", corner_radius=6)
+            chip.pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(chip, text=token, font=ctk.CTkFont(size=12)).pack(
+                side="left", padx=(8, 4), pady=4,
+            )
+            ctk.CTkButton(
+                chip, text="✕", width=20, height=20, fg_color="transparent",
+                hover_color="#4a4a4a", font=ctk.CTkFont(size=11),
+                command=lambda t=token: self._remove_ca_protein(t),
+            ).pack(side="left", padx=(0, 6), pady=4)
 
     # ── File-status bar ──────────────────────────────────────────────────────
 

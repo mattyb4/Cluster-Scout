@@ -220,9 +220,11 @@ class PipelineRunnerMixin:
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
                 return
         elif mode == "ca-coordinates":
-            from tkinter import messagebox
-            if not self._ca_uniprot_var.get().strip() and not self._ca_gene_var.get().strip():
-                messagebox.showwarning("Missing input", "Enter a UniProt accession or a gene symbol.")
+            if not self._ca_proteins:
+                from tkinter import messagebox
+                messagebox.showwarning(
+                    "Missing input", "Add at least one gene symbol or UniProt accession.",
+                )
                 return
 
         self._running = True
@@ -929,22 +931,31 @@ class PipelineRunnerMixin:
         self._q("finished")
 
     def _run_ca_coordinates(self):
-        """Run the CA-coordinate export in-process, in the background thread."""
-        uniprot = self._ca_uniprot_var.get().strip()
-        gene = self._ca_gene_var.get().strip() or None
+        """Run the CA-coordinate export in-process, in the background thread.
+
+        Batches over every protein added to the list, sharing one progress
+        bar/status label across the whole batch (this tool has no fixed
+        multi-step layout to give each protein its own row, unlike the main
+        pipeline) -- see export_ca_coordinates.run_batch_export for how a
+        single protein's failure is contained rather than aborting the rest.
+        """
+        tokens = list(self._ca_proteins)
 
         self._q("pipeline_start", 1, "ca-coordinates", "warm")
         self._q("show_log")
         self._q("status", 0, "▶  Exporting…", _BLUE)
         self._q("show_progress", 0)
-        self._q("log", f"Exporting CA coordinates for {uniprot or gene}")
+        self._q("log", f"Exporting CA coordinates for {len(tokens)} protein(s): {', '.join(tokens)}")
         self._q("log", "")
+
+        def _progress(i: int, total: int, token: str) -> None:
+            self._q("progress", 0, i / total, f"▶  Exporting {i}/{total}: {token}…")
 
         t0 = time.time()
         try:
-            from export_ca_coordinates import run_export
-            run_export(
-                uniprot, gene=gene,
+            from export_ca_coordinates import run_batch_export
+            items = run_batch_export(
+                tokens,
                 output_dir=self._output_dir / "coordinates",
                 mutation_heatmap=self._ca_mutation_heatmap_var.get(),
                 plddt_heatmap=self._ca_plddt_heatmap_var.get(),
@@ -952,6 +963,7 @@ class PipelineRunnerMixin:
                 mark_mutations=self._ca_mark_mutations_var.get(),
                 log_scale=self._ca_log_scale_var.get(),
                 dim_low_confidence=self._ca_dim_confidence_var.get(),
+                progress_cb=_progress,
                 log_cb=lambda line: self._q("log", line),
             )
         except ImportError as exc:
@@ -974,8 +986,15 @@ class PipelineRunnerMixin:
             return
 
         elapsed = time.time() - t0
+        n_ok = sum(1 for item in items if item.result is not None)
+        n_total = len(items)
         self._q("hide_progress", 0)
-        self._q("status", 0, f"✓  {_fmt_time(elapsed)}", _GREEN)
+        if n_ok == n_total:
+            self._q("status", 0, f"✓  {n_ok}/{n_total} in {_fmt_time(elapsed)}", _GREEN)
+        elif n_ok > 0:
+            self._q("status", 0, f"⚠  {n_ok}/{n_total} succeeded", _YELLOW)
+        else:
+            self._q("status", 0, "✗  Failed (0 succeeded)", _RED)
         self._q("enable_open")
         self._q("finished")
 

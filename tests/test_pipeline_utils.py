@@ -586,6 +586,22 @@ class TestBenjaminiHochberg:
         )
 
 
+class TestLooksLikeUniprotId:
+    @pytest.mark.parametrize("token,expected", [
+        ("P04637", True),
+        ("A0A099Z4Y8", True),
+        ("TP53", False),
+        ("EGFR", False),
+        ("", False),
+    ])
+    def test_matches_expected(self, mod, token, expected):
+        result = mod.looks_like_uniprot_id(token)
+        assert result is expected, (
+            f"looks_like_uniprot_id({token!r}) should be {expected} based on UniProt's "
+            f"accession format, got {result}"
+        )
+
+
 class TestHotspotsTsvPath:
     def test_mutation_clustering_gets_its_own_filename(self, mod, tmp_path):
         path = mod.hotspots_tsv_path(tmp_path, "mutation-clustering")

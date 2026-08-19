@@ -35,9 +35,15 @@ side chain as an orange stick. Both are layered into whichever .cxc file(s)
 above get written without overwriting that heatmap's own color at the
 marked residue.
 
+Accepts multiple proteins in one run -- run_batch_export() (used for both the
+positional CLI arguments below and the app's batch UI) runs run_export() once
+per protein, in the same output folder, applying the same options to each.
+COSMIC is read and cached once for the whole batch (see
+_load_cosmic_dataframe) rather than re-scanned per protein.
+
 Usage:
     uv run scripts/export_ca_coordinates.py P04637
-    uv run scripts/export_ca_coordinates.py P04637 --gene TP53
+    uv run scripts/export_ca_coordinates.py TP53 EGFR P04637
     uv run scripts/export_ca_coordinates.py P04637 --cosmic path/to/COSMIC.tsv
     uv run scripts/export_ca_coordinates.py P04637 --plddt-heatmap --no-mutation-heatmap
     uv run scripts/export_ca_coordinates.py P04637 --mark-ptm-sites --mark-mutations
@@ -62,7 +68,7 @@ from pipeline_utils import (  # noqa: E402
     project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
     find_canonical_cifs, load_first_chain, get_plddt_map,
     input_dir, resolve_input_file, COSMIC_INPUT_DIR,
-    hotspots_tsv_path,
+    hotspots_tsv_path, looks_like_uniprot_id,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -252,6 +258,23 @@ def _lookup_uniprot_from_gene(gene: str, log_cb: Callable[[str], None] = print) 
     return None
 
 
+_cosmic_df_cache: dict[str, pd.DataFrame] = {}
+
+
+def _load_cosmic_dataframe(cosmic_file: Path) -> pd.DataFrame:
+    """Load COSMIC's relevant columns, cached by resolved path.
+
+    COSMIC's Mutant Census file is huge (hundreds of MB); a batch export
+    scanning many genes should only pay that read-and-parse cost once,
+    rather than once per protein.
+    """
+    key = str(Path(cosmic_file).resolve())
+    if key not in _cosmic_df_cache:
+        cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
+        _cosmic_df_cache[key] = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
+    return _cosmic_df_cache[key]
+
+
 def _load_cosmic_mutations(
     gene: str, cosmic_file: Path, log_cb: Callable[[str], None] = print,
 ) -> tuple[dict[int, list[str]], dict[int, int]]:
@@ -259,9 +282,8 @@ def _load_cosmic_mutations(
 
     Returns position-level dicts: {pos: [mutations]} and {pos: patient_count}.
     """
-    cols = ["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]
     log_cb(f"Scanning COSMIC for gene {gene} ...")
-    df = pd.read_csv(cosmic_file, sep="\t", usecols=cols, low_memory=False)
+    df = _load_cosmic_dataframe(cosmic_file)
     df = df[df["GENE_SYMBOL"] == gene].copy()
     df = df[df["MUTATION_SOMATIC_STATUS"].isin(COSMIC_SOMATIC_STATUSES)].copy()
     df["aa_change"] = df["MUTATION_AA"].str.replace(r"^p\.", "", regex=True)
@@ -761,6 +783,83 @@ def run_export(
     )
 
 
+@dataclass
+class BatchExportItem:
+    """One protein's outcome within a run_batch_export() batch."""
+    token: str
+    result: ExportResult | None = None
+    error: str | None = None
+
+
+def run_batch_export(
+    tokens: list[str],
+    cosmic_file: Path | None = None,
+    output_dir: Path = OUTPUT_DIR,
+    mutation_heatmap: bool = True,
+    plddt_heatmap: bool = False,
+    mark_ptm_sites: bool = False,
+    mark_mutations: bool = False,
+    log_scale: bool = False,
+    dim_low_confidence: bool = False,
+    progress_cb: Callable[[int, int, str], None] | None = None,
+    log_cb: Callable[[str], None] = print,
+) -> list[BatchExportItem]:
+    """Run run_export() once per entry in *tokens* (each a gene symbol or a
+    UniProt accession, auto-detected via looks_like_uniprot_id), applying the
+    same heatmap/marker options to every protein.
+
+    Each protein's own outputs land in their own Output/coordinates/{uid}/
+    subfolder (run_export's own design), so a batch never mixes proteins'
+    files together. A failure on one protein (bad token, no AlphaFold model,
+    no gene symbol resolvable, etc.) is logged and skipped rather than
+    aborting the rest of the batch -- check each BatchExportItem.error to see
+    which, if any, failed.
+
+    *progress_cb*, if given, is called as progress_cb(index, total, token)
+    (1-based index) right before each protein starts, for a caller that wants
+    to show "N/total" progress independent of the log stream.
+
+    COSMIC is read once and cached across the whole batch (see
+    _load_cosmic_dataframe) -- without that, scanning it fresh per protein
+    would make a large batch prohibitively slow.
+    """
+    if cosmic_file is None:
+        cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    cosmic_file = Path(cosmic_file)
+
+    total = len(tokens)
+    items: list[BatchExportItem] = []
+    for i, raw_token in enumerate(tokens, 1):
+        token = raw_token.strip()
+        if progress_cb is not None:
+            progress_cb(i, total, token)
+        log_cb("")
+        log_cb(f"── [{i}/{total}] {token} " + "─" * max(0, 40 - len(token)))
+
+        kwargs = dict(
+            cosmic_file=cosmic_file, output_dir=output_dir,
+            mutation_heatmap=mutation_heatmap, plddt_heatmap=plddt_heatmap,
+            mark_ptm_sites=mark_ptm_sites, mark_mutations=mark_mutations,
+            log_scale=log_scale, dim_low_confidence=dim_low_confidence,
+            log_cb=log_cb,
+        )
+        try:
+            if looks_like_uniprot_id(token):
+                result = run_export(uniprot=token, **kwargs)
+            else:
+                result = run_export(gene=token, **kwargs)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            log_cb(f"  Error: {exc}")
+            items.append(BatchExportItem(token=token, error=str(exc)))
+        else:
+            items.append(BatchExportItem(token=token, result=result))
+
+    n_ok = sum(1 for item in items if item.result is not None)
+    log_cb("")
+    log_cb(f"Batch complete: {n_ok}/{total} succeeded.")
+    return items
+
+
 def main() -> None:
     """Export all alpha-carbon coordinates and mutation-site coordinates for a given UniProt protein."""
     parser = argparse.ArgumentParser(
@@ -769,15 +868,16 @@ def main() -> None:
         )
     )
     parser.add_argument(
-        "uniprot", nargs="?", default=None,
-        help="UniProt accession (e.g. P04637 for TP53) — optional if --gene is given; "
-             "the accession will be resolved from the gene symbol automatically",
+        "proteins", nargs="*", default=[],
+        help="One or more gene symbols and/or UniProt accessions (e.g. "
+             "TP53 P04637 EGFR), auto-detected and each exported in turn. "
+             "A UniProt accession's gene symbol, or a gene symbol's UniProt "
+             "accession, is resolved automatically as needed.",
     )
     parser.add_argument(
         "--gene",
-        help="Gene symbol — resolves the UniProt accession automatically if the "
-             "positional uniprot argument is omitted, or just skips the UniProt API "
-             "gene-symbol lookup if both are given",
+        help="Deprecated alias for a single positional token -- kept for "
+             "backward compatibility. Added to the proteins list above if given.",
     )
     parser.add_argument(
         "--cosmic",
@@ -825,10 +925,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    tokens = list(args.proteins)
+    if args.gene:
+        tokens.append(args.gene)
+    if not tokens:
+        sys.exit("Error: Provide at least one gene symbol or UniProt accession.")
+
     try:
-        run_export(
-            args.uniprot,
-            gene=args.gene,
+        items = run_batch_export(
+            tokens,
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
             mutation_heatmap=args.mutation_heatmap,
             plddt_heatmap=args.plddt_heatmap,
@@ -839,6 +944,9 @@ def main() -> None:
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")
+
+    if not any(item.result is not None for item in items):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
