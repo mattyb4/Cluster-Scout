@@ -11,6 +11,7 @@ import re
 import sys
 import tkinter as tk
 from pathlib import Path
+from tkinter import colorchooser
 
 import customtkinter as ctk
 
@@ -115,6 +116,32 @@ def help_icon(parent, text: str) -> ctk.CTkLabel:
     return badge
 
 
+def color_swatch_button(parent, color_var: ctk.StringVar, *, width: int = 26, height: int = 22) -> ctk.CTkButton:
+    """A small button whose fill shows *color_var*'s current color; clicking
+    opens the OS color-chooser dialog seeded with that color, and updates
+    both the button's own fill and *color_var* on selection (a no-op if the
+    dialog is cancelled).
+
+    *color_var* is the caller's persistent StringVar (survives widget
+    rebuilds, e.g. switching Pipeline-tab modes and back) -- this only builds
+    the button that displays/edits it, not the variable itself.
+    """
+    def _pick() -> None:
+        _rgb, hex_color = colorchooser.askcolor(color=color_var.get(), title="Choose a color")
+        if hex_color is None:
+            return
+        color_var.set(hex_color)
+        btn.configure(fg_color=hex_color, hover_color=hex_color)
+
+    btn = ctk.CTkButton(
+        parent, text="", width=width, height=height, corner_radius=4,
+        fg_color=color_var.get(), hover_color=color_var.get(),
+        border_width=1, border_color="gray50",
+        command=_pick,
+    )
+    return btn
+
+
 def add_resize_grip(widget, min_height: int = 60, max_height: int = 800) -> ctk.CTkFrame:
     """A thin draggable handle that resizes *widget* vertically, the same way
     an OS window's edge can be dragged.
@@ -190,10 +217,10 @@ _MODE_HELP: dict[str, str] = {
     "single-protein": "Run proximity analysis on one CIF structure file you "
                       "provide directly, without running the full pipeline "
                       "- useful for a quick, one-off look at a single protein.",
-    "ca-coordinates": "Export alpha-carbon coordinates for every residue of "
-                      "one protein (by UniProt ID or gene), along with its "
-                      "COSMIC missense mutation positions, for use in "
-                      "external visualization tools.",
+    "ca-coordinates": "Generate ChimeraX heatmap and marker scripts for a "
+                      "protein's 3D structure - colored by nearby COSMIC "
+                      "mutation density or AlphaFold confidence - along "
+                      "with the underlying alpha-carbon coordinate tables.",
 }
 
 # Analysis Tools tab hover help, keyed by field name.

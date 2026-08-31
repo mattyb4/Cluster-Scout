@@ -64,7 +64,7 @@ uv run app.py
 
 This opens Cluster-Scout, a five-tab desktop application:
 
-- **Pipeline** — select input files, choose a mode (PTM Proximity, Mutation Clustering, Single Protein, or CA Coordinates), configure settings (distance cutoff, minimum samples, PolyPhen filters, etc.), and run the analysis with live progress, pause/resume, and cache management.
+- **Pipeline** — select input files, choose a mode (PTM Proximity, Mutation Clustering, Single Protein, or Structure Heatmaps), configure settings (distance cutoff, minimum samples, PolyPhen filters, etc.), and run the analysis with live progress, pause/resume, and cache management.
 - **Results** — browse every PTM site found, with sortable columns (mutation counts, unique mutated positions, patient counts, 14-3-3/PolyPhen/disruption flags). Selecting a PTM shows its individual nearby mutations in a detail table below. A **PTM Proximity / Mutation Clusters** toggle switches between that output and the Mutation Clustering mode's own Anchor/Nearby Mutations tables. The Mutation Details table can be exported to its own TSV.
 - **Visualization** — generate a lollipop (needle) plot for any PTM site and its nearby mutations directly from the Results tab (via the **📈 Visualize** button or double-clicking a row) or by picking one from the search/dropdown on the tab itself. Mutations are colored by PolyPhen-2 classification and sized by patient count; a broken axis splits mutations within the local sequence window from ones that are spatially close but sequence-distant. Above the lollipop, a domain map draws that protein's InterPro functional domains/families/sites (color-coded by type, in lanes to keep overlapping entries readable) with an arrow marking the PTM site or anchor mutation's own position. A **View: Single PTM / Whole protein** toggle switches between one site's plot and a scrollable stack of every PTM site/anchor mutation on that protein, each with its own domain map. A **Show: All mutations / Unique per position** toggle switches between listing every substitution individually or collapsing same-residue substitutions into one merged lollipop, and each plotted cluster shows its total and unique mutation counts for quick reference. Plots can be exported as PNG.
 - **Analysis Tools** — two standalone structural-analysis tools, independent of the main pipeline modes: **Radius Sweep** (test a range of distance cutoffs for one or more genes/proteins to see how the nearby-mutation set changes) and **CIF Variance** (compare multiple AlphaFold CIF predictions of the same protein for structural confidence, and generate an AlphaFold Server batch JSON to request new seeded predictions to compare). Both are also available as standalone CLI scripts — see below.
@@ -106,7 +106,7 @@ uv run main.py --mode mutation-clustering
 3. **Find mutation clusters** — computes pairwise 3D distances between all recurrent mutations on each protein; outputs mutations that cluster within 10 Å of at least one other mutation
 4. **Annotate results** — annotates each anchor mutation and its nearby mutations with PolyPhen-2 pathogenicity scores, AIUPred intrinsic disorder / binding-region scores, and InterPro functional domains
 
-Each mode's Step 1 writes its own intermediate file under `data/steps/PTMD_COSMIC_hotspots_by_protein.tsv` for PTM-proximity mode, `COSMIC_hotspots_by_protein.tsv` for mutation-clustering mode, so running one mode's Step 1 never overwrites the other's data. Tools that are inherently PTM-based (Radius Sweep, `analyze_single_cif_nearby_mutations.py`, the CA Coordinates "Mark PTM sites" option) always read the PTM-proximity file specifically, regardless of which mode you ran most recently.
+Each mode's Step 1 writes its own intermediate file under `data/steps/PTMD_COSMIC_hotspots_by_protein.tsv` for PTM-proximity mode, `COSMIC_hotspots_by_protein.tsv` for mutation-clustering mode, so running one mode's Step 1 never overwrites the other's data. Tools that are inherently PTM-based (Radius Sweep, `analyze_single_cif_nearby_mutations.py`, the Structure Heatmaps "Mark PTM sites" option) always read the PTM-proximity file specifically, regardless of which mode you ran most recently.
 
 The main output for PTM-proximity mode is **`Output/ptm_mutation_proximity_db.tsv`** — a table of PTM sites, their nearby COSMIC mutations, 3D distances, 14-3-3 binding predictions, kinase predictions, disorder scores, PolyPhen-2 pathogenicity scores, and InterPro functional domains.
 
@@ -186,9 +186,9 @@ Keep in mind that this will still be running analyses based on the input data fr
 
 Whichever protein you are running analysis on, in order for it to work, the UniProt ID in "PTMD_COSMIC_hotspots_by_protein.tsv needs to match the name of the folder the .cif file is put in (within the cif_models directory) exactly.
 
-## Exporting Alpha-Carbon Coordinates
+## Structure Heatmaps
 
-The **CA Coordinates** mode (Pipeline tab) exports the 3D coordinates of alpha-carbon atoms for one or more proteins at once, along with ready-to-open ChimeraX visualization scripts. It's also available as a standalone script for CLI/scripting use.
+The **Structure Heatmaps** mode (Pipeline tab) exports the 3D coordinates of alpha-carbon atoms for one or more proteins at once, along with ready-to-open ChimeraX visualization scripts. It's also available as a standalone script for CLI/scripting use.
 
 **Batch proteins:** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the batch. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
 
@@ -201,14 +201,18 @@ If a protein's CIF file hasn't been downloaded yet, it's fetched automatically f
 
 | Option | Output file(s) | Effect |
 |---|---|---|
-| Mutation heatmap (on by default) | `mutations.defattr`, `mutations_view.cxc` | Colors the cartoon by `patients_within_10A`, sequential red palette |
+| Mutation heatmap (on by default) | `mutations.defattr`, `mutations_view.cxc` | Colors the cartoon by `patients_within_10A`, sequential red palette by default |
 | &nbsp;&nbsp;↳ Log-scale | — | Colors by `log1p(patients_within_10A)` instead of the raw count, for heavily right-skewed data |
 | &nbsp;&nbsp;↳ Dim low-confidence residues | — | Fades each residue in proportion to how low its pLDDT is (`100 - pLDDT` percent transparent); switches that script's lighting from ChimeraX's `soft` preset to `simple`, since soft's ambient shadows render incorrectly once part of a model is transparent |
-| pLDDT heatmap | `plddt_view.cxc` | Colors the cartoon by AlphaFold's own per-residue confidence, using ChimeraX's built-in `alphafold` palette |
-| Mark PTM sites | — | Marks each known PTM site with a small green sphere at its CA coordinate (needs PTM Proximity mode's Step 1 to have been run, for the PTM position data) |
-| Show mutation markers | — | Shows each COSMIC mutation position's side chain as an orange stick |
+| pLDDT heatmap | `plddt_view.cxc` | Colors the cartoon by AlphaFold's own per-residue confidence, using ChimeraX's built-in `alphafold` palette by default |
+| Mark PTM sites | — | Marks each known PTM site with a small sphere (green by default) at its CA coordinate (needs PTM Proximity mode's Step 1 to have been run, for the PTM position data) |
+| Show mutation markers | — | Shows each COSMIC mutation position's side chain as a colored stick (orange by default) |
 
 The two heatmaps are independent and can both be on at once — since ChimeraX's `color` command replaces rather than layers, they're written as **separate** `.cxc` scripts rather than combined into one. Markers are layered into whichever script(s) get generated (or their own plain-cartoon script, `markers_view.cxc`, if no heatmap is selected) as independent geometry/atom-display commands, not a recoloring, so they never overwrite a heatmap's own color at that residue. Open any `.cxc` file directly in ChimeraX to reproduce that view with no manual steps.
+
+Each heatmap script also draws an on-screen color key (via ChimeraX's `key` command) with a title label, so a screenshot of the view is self-explanatory on its own. Only the two ends of the scale are labeled — `0` and the true maximum — with nothing in between; the key is always a simple two-color gradient between those two labels (a visual approximation of the default `Reds`/`alphafold` palette when colors haven't been customized), since naming a multi-color palette directly in a ChimeraX `key` command was found to render garbled, overlapping numbers instead of the intended blank stops. The mutation heatmap's high label is the protein's actual maximum `patients_within_10A` (converted back from the log scale, if enabled, so it always reads as a real count); the pLDDT heatmap's key always spans `0`-`100`.
+
+**Colors:** each heatmap's low/high color-scale endpoints, and each marker's flat color, can be customized independently. In the app, click a color swatch to open the OS color picker (the swatch itself always shows the current selection); a **↺** button next to each swatch group resets it back to the default shown in the table above (`Reds` red-scale for the mutation heatmap, AlphaFold's own orange-to-blue scale for pLDDT, green for PTM markers, orange for mutation markers). A heatmap only switches away from its default *named* ChimeraX palette once you actually change one of its two colors — until then, the generated script is byte-identical to before this option existed. On the CLI, the same six colors are set via `--mutation-low-color`/`--mutation-high-color`, `--plddt-low-color`/`--plddt-high-color`, `--ptm-marker-color`, and `--mutation-marker-color`, each accepting any ChimeraX-valid color name or `#RRGGBB` hex value.
 
 **CLI usage** (one or more positional tokens, each a gene symbol or UniProt accession):
 ```bash
@@ -216,7 +220,7 @@ uv run scripts/export_ca_coordinates.py P04637
 uv run scripts/export_ca_coordinates.py TP53 EGFR P04637
 ```
 
-**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--cosmic path/to/COSMIC.tsv`.
+**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--cosmic path/to/COSMIC.tsv`, `--mutation-low-color`, `--mutation-high-color`, `--plddt-low-color`, `--plddt-high-color`, `--ptm-marker-color`, `--mutation-marker-color`.
 
 ## Finding the Optimal Distance Cutoff
 

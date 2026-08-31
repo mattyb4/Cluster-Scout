@@ -18,7 +18,7 @@ from ui.common import (
     _GRAY, _RED, _GREEN, _YELLOW,
     PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
     resolve_input_file, extract_uniprot_from_cif, help_icon, add_resize_grip,
-    isolate_textbox_scroll, _MODE_HELP,
+    isolate_textbox_scroll, _MODE_HELP, color_swatch_button,
 )
 
 
@@ -97,7 +97,7 @@ class PipelineTabMixin:
             ("PTM Proximity", "ptm-proximity"),
             ("Mutation Clustering", "mutation-clustering"),
             ("Single Protein", "single-protein"),
-            ("CA Coordinates", "ca-coordinates"),
+            ("Structure Heatmaps", "ca-coordinates"),
         ]:
             ctk.CTkRadioButton(
                 mode_frame,
@@ -474,10 +474,10 @@ class PipelineTabMixin:
             self._single_uniprot_var.set(parent_name)
 
     def _build_ca_coordinates_panel(self):
-        """Build the input fields for CA-coordinate export mode."""
+        """Build the input fields for Structure Heatmaps mode (CA-coordinate export)."""
         ctk.CTkLabel(
             self._steps_outer,
-            text="Export Alpha-Carbon Coordinates",
+            text="Structure Heatmaps",
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
 
@@ -525,6 +525,24 @@ class PipelineTabMixin:
         self._ca_proteins_list_frame.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="ew")
         self._refresh_ca_protein_chips()
 
+        from export_ca_coordinates import (
+            MUTATION_DEFAULT_LOW_COLOR, MUTATION_DEFAULT_HIGH_COLOR,
+            PLDDT_DEFAULT_LOW_COLOR, PLDDT_DEFAULT_HIGH_COLOR,
+            PTM_MARKER_DEFAULT_COLOR, MUTATION_MARKER_DEFAULT_COLOR,
+        )
+        if not hasattr(self, "_ca_mutation_low_var"):
+            self._ca_mutation_low_var = ctk.StringVar(value=MUTATION_DEFAULT_LOW_COLOR)
+            self._ca_mutation_high_var = ctk.StringVar(value=MUTATION_DEFAULT_HIGH_COLOR)
+            self._ca_plddt_low_var = ctk.StringVar(value=PLDDT_DEFAULT_LOW_COLOR)
+            self._ca_plddt_high_var = ctk.StringVar(value=PLDDT_DEFAULT_HIGH_COLOR)
+            self._ca_ptm_marker_color_var = ctk.StringVar(value=PTM_MARKER_DEFAULT_COLOR)
+            self._ca_mutation_marker_color_var = ctk.StringVar(value=MUTATION_MARKER_DEFAULT_COLOR)
+
+        def _reset_colors(*pairs: tuple[ctk.StringVar, str]) -> None:
+            for var, default in pairs:
+                var.set(default)
+            self._rebuild_step_rows()
+
         # Heatmaps section
         ctk.CTkLabel(
             self._steps_outer, text="Heatmaps:", font=ctk.CTkFont(weight="bold"),
@@ -548,11 +566,33 @@ class PipelineTabMixin:
             "using a sequential red palette. Single-fragment proteins only.",
         ).pack(side="left", padx=(4, 0))
 
+        # Mutation heatmap colors (low/high swatches)
+        mut_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        mut_colors_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        ctk.CTkLabel(mut_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
+        color_swatch_button(mut_colors_frame, self._ca_mutation_low_var).pack(side="left")
+        ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
+        color_swatch_button(mut_colors_frame, self._ca_mutation_high_var).pack(side="left")
+        ctk.CTkButton(
+            mut_colors_frame, text="↺", width=24, height=22,
+            fg_color="gray30", hover_color="gray40",
+            command=lambda: _reset_colors(
+                (self._ca_mutation_low_var, MUTATION_DEFAULT_LOW_COLOR),
+                (self._ca_mutation_high_var, MUTATION_DEFAULT_HIGH_COLOR),
+            ),
+        ).pack(side="left", padx=(6, 0))
+        help_icon(
+            mut_colors_frame,
+            "Low/high ends of the mutation heatmap's color scale (few nearby "
+            "patients to many). Click a swatch to choose a color; ↺ resets "
+            "both back to the default red scale shown above.",
+        ).pack(side="left", padx=(4, 0))
+
         # Log-scale (mutation heatmap only)
         if not hasattr(self, "_ca_log_scale_var"):
             self._ca_log_scale_var = ctk.BooleanVar(value=False)
         log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        log_scale_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        log_scale_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
         self._ca_log_scale_checkbox = ctk.CTkCheckBox(
             log_scale_frame, text="Log-scale",
             variable=self._ca_log_scale_var,
@@ -573,7 +613,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_dim_confidence_var"):
             self._ca_dim_confidence_var = ctk.BooleanVar(value=False)
         dim_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        dim_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
+        dim_frame.grid(row=8, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
         self._ca_dim_confidence_checkbox = ctk.CTkCheckBox(
             dim_frame, text="Dim low-confidence residues",
             variable=self._ca_dim_confidence_var,
@@ -597,7 +637,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_plddt_heatmap_var"):
             self._ca_plddt_heatmap_var = ctk.BooleanVar(value=False)
         plddt_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_frame.grid(row=8, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        plddt_frame.grid(row=9, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             plddt_frame, text="pLDDT heatmap",
             variable=self._ca_plddt_heatmap_var,
@@ -613,11 +653,33 @@ class PipelineTabMixin:
             "Single-fragment proteins only.",
         ).pack(side="left", padx=(4, 0))
 
+        # pLDDT heatmap colors (low/high swatches)
+        plddt_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        plddt_colors_frame.grid(row=10, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
+        ctk.CTkLabel(plddt_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
+        color_swatch_button(plddt_colors_frame, self._ca_plddt_low_var).pack(side="left")
+        ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
+        color_swatch_button(plddt_colors_frame, self._ca_plddt_high_var).pack(side="left")
+        ctk.CTkButton(
+            plddt_colors_frame, text="↺", width=24, height=22,
+            fg_color="gray30", hover_color="gray40",
+            command=lambda: _reset_colors(
+                (self._ca_plddt_low_var, PLDDT_DEFAULT_LOW_COLOR),
+                (self._ca_plddt_high_var, PLDDT_DEFAULT_HIGH_COLOR),
+            ),
+        ).pack(side="left", padx=(6, 0))
+        help_icon(
+            plddt_colors_frame,
+            "Low/high ends of the pLDDT heatmap's color scale (low "
+            "confidence to high). Click a swatch to choose a color; ↺ "
+            "resets both back to AlphaFold's own color scheme shown above.",
+        ).pack(side="left", padx=(4, 0))
+
         # Mark PTM sites (independent marker, not a heatmap)
         if not hasattr(self, "_ca_mark_ptm_var"):
             self._ca_mark_ptm_var = ctk.BooleanVar(value=False)
         ptm_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        ptm_frame.grid(row=9, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        ptm_frame.grid(row=11, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             ptm_frame, text="Mark PTM sites",
             variable=self._ca_mark_ptm_var,
@@ -626,18 +688,24 @@ class PipelineTabMixin:
         help_icon(
             ptm_frame,
             "Marks each known PTM site (from the pipeline's PTM/mutation "
-            "data) with a small green sphere at its CA coordinate, layered on "
+            "data) with a small sphere at its CA coordinate, layered on "
             "top of whichever heatmap(s) above are selected (or a plain "
             "cartoon if neither is). This is a separate marker, not a "
             "recoloring, so it never overwrites a heatmap's own color at "
             "that residue. Single-fragment proteins only.",
+        ).pack(side="left", padx=(4, 0))
+        color_swatch_button(ptm_frame, self._ca_ptm_marker_color_var).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            ptm_frame, text="↺", width=24, height=22,
+            fg_color="gray30", hover_color="gray40",
+            command=lambda: _reset_colors((self._ca_ptm_marker_color_var, PTM_MARKER_DEFAULT_COLOR)),
         ).pack(side="left", padx=(4, 0))
 
         # Mark mutations (independent marker, not a heatmap)
         if not hasattr(self, "_ca_mark_mutations_var"):
             self._ca_mark_mutations_var = ctk.BooleanVar(value=False)
         mut_marker_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_marker_frame.grid(row=10, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        mut_marker_frame.grid(row=12, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
         ctk.CTkCheckBox(
             mut_marker_frame, text="Show mutation markers",
             variable=self._ca_mark_mutations_var,
@@ -645,12 +713,20 @@ class PipelineTabMixin:
         ).pack(side="left")
         help_icon(
             mut_marker_frame,
-            "Shows each COSMIC mutation position's side chain as an orange "
+            "Shows each COSMIC mutation position's side chain as a colored "
             "stick, layered on top of whichever heatmap(s) above are "
             "selected (or a plain cartoon if neither is). Like Mark PTM "
             "sites, this reveals real side-chain atoms rather than "
             "recoloring the cartoon, so it never overwrites a heatmap's own "
             "color at that residue. Single-fragment proteins only.",
+        ).pack(side="left", padx=(4, 0))
+        color_swatch_button(mut_marker_frame, self._ca_mutation_marker_color_var).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            mut_marker_frame, text="↺", width=24, height=22,
+            fg_color="gray30", hover_color="gray40",
+            command=lambda: _reset_colors(
+                (self._ca_mutation_marker_color_var, MUTATION_MARKER_DEFAULT_COLOR),
+            ),
         ).pack(side="left", padx=(4, 0))
 
         # Status label + progress bar (reuse the step status pattern)
@@ -658,12 +734,12 @@ class PipelineTabMixin:
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=11, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=13, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=11, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=13, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
 
@@ -679,8 +755,8 @@ class PipelineTabMixin:
     def _add_ca_protein(self) -> None:
         """Add a protein token (gene symbol or UniProt accession) to the
         batch list. Unlike Radius Sweep's gene picker, this doesn't validate
-        against local pipeline data or resolve it up front -- CA Coordinates
-        works from raw COSMIC + a live UniProt lookup, not the pipeline's own
+        against local pipeline data or resolve it up front -- Structure
+        Heatmaps works from raw COSMIC + a live UniProt lookup, not the pipeline's own
         intermediate TSVs, so there's nothing to check locally, and a live
         network call on every "Add" click would make the button feel slow.
         Any token that fails to resolve is instead reported per-protein when

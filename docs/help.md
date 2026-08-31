@@ -35,7 +35,7 @@ Analyze a single protein by selecting its CIF structure file. The UniProt ID is 
 
 Accepts the same **Cutoff**, **Min pLDDT**, and **Max PAE** settings as the main pipeline. **Min samples** is also available, but can only tighten the hotspot threshold already applied when the input TSV was built — mutations below that original threshold aren't in the data to filter in the first place. If you are planning on appending this data to the output database, it is recommended you do not change these variables so they are consistent with the rest of the database.
 
-### CA Coordinates
+### Structure Heatmaps
 
 Export alpha-carbon coordinates for every residue of one or more proteins — each added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the rest of the batch.
 
@@ -46,12 +46,14 @@ Each protein's output goes in its own `Output/coordinates/{UniProt}/` folder: `a
 - **Mutation heatmap** (on by default) — colors the structure by COSMIC patient count near each residue, a red heatmap. Two sub-options apply only to this heatmap: **Log-scale** (compresses heavily skewed patient counts so lower-count regions stay visible instead of being crushed toward one flat color) and **Dim low-confidence residues** (fades each residue in proportion to how low its AlphaFold confidence is, so a hotspot in a poorly-modeled region reads as less certain than an equally hot one in a well-modeled region).
 - **pLDDT heatmap** — colors the structure by AlphaFold's own per-residue confidence score, using the same color scheme AlphaFold DB itself uses.
 
-Both heatmaps can be on at once — they're written as separate scripts, since ChimeraX can only show one coloring at a time on a single open structure.
+Both heatmaps can be on at once — they're written as separate scripts, since ChimeraX can only show one coloring at a time on a single open structure. Each heatmap script also draws an on-screen color key with a title label, so a screenshot of the view is self-explanatory. Only the two ends of the scale are labeled — 0 and the true maximum — with nothing in between, as a simple two-color gradient (approximating the default red/AlphaFold scheme when colors haven't been customized): the mutation heatmap's high label is the protein's actual maximum patient count (already converted back from the log scale, if enabled), and the pLDDT heatmap's key always spans 0-100.
 
 **Markers** — layered on top of whichever heatmap(s) are generated (or a plain, uncolored structure if neither is), without overwriting the heatmap's own color at that residue:
 
-- **Mark PTM sites** — a small green sphere at each known PTM site's position. Requires PTM Proximity mode's Step 1 to have been run at least once, since that's where PTM position data comes from.
-- **Show mutation markers** — an orange stick at each COSMIC mutation position.
+- **Mark PTM sites** — a small sphere (green by default) at each known PTM site's position. Requires PTM Proximity mode's Step 1 to have been run at least once, since that's where PTM position data comes from.
+- **Show mutation markers** — a colored stick (orange by default) at each COSMIC mutation position.
+
+**Colors** — every heatmap's low/high scale and every marker's flat color can be changed. Click a color swatch (next to each option above) to open the OS color picker; the swatch always shows the current selection, and a **↺** button next to it resets that color (or color pair) back to its default. A heatmap keeps using ChimeraX's real named palette — exactly as before this option existed — until you actually change one of its two colors; only then does it switch to a custom scale built from your chosen endpoints.
 
 ---
 

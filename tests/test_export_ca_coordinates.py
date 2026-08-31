@@ -554,6 +554,78 @@ class TestWriteChimeraxScript:
         )
 
 
+class TestBuildMutationKeyLines:
+    def test_produces_a_two_stop_zero_to_max_key(self):
+        lines = mod.build_mutation_key_lines(40.0, log_scale=False, low_color="#111111", high_color="#eeeeee")
+        key_line = lines[0]
+        assert key_line == "key #111111:0 #eeeeee:40", (
+            f"the key should always be built from an explicit 2-color list, labeled 0 and "
+            f"the true max, got {key_line!r}"
+        )
+
+    def test_never_names_a_palette(self):
+        # A named-palette key with blank middle labels (e.g. "key Reds :0 : : : :40")
+        # was observed to render garbled overlapping digits on at least one real
+        # protein -- so the key must never reference a palette by name, even when
+        # the heatmap's real 3D coloring is using the default "Reds" unmodified.
+        lines = mod.build_mutation_key_lines(
+            40.0, log_scale=False,
+            low_color=mod.MUTATION_DEFAULT_LOW_COLOR, high_color=mod.MUTATION_DEFAULT_HIGH_COLOR,
+        )
+        assert "Reds" not in lines[0], f"the key must not name the 'Reds' palette, got {lines[0]!r}"
+
+    def test_includes_a_title_label(self):
+        lines = mod.build_mutation_key_lines(10.0, log_scale=False, low_color="white", high_color="red")
+        assert any(l.startswith("2dlabels text") and "Patients within 10" in l for l in lines), (
+            f"a title label should accompany the key so a screenshot is self-explanatory, got {lines}"
+        )
+
+    def test_log_scale_high_label_shows_real_patient_count_not_log_value(self):
+        # log1p(9) == log(10) ~= 2.302585 -- if the key were built from the raw
+        # (pre-transform) value, the high label would be 2.302585 instead of 9.
+        lines = mod.build_mutation_key_lines(np.log1p(9), log_scale=True, low_color="white", high_color="red")
+        key_line = lines[0]
+        assert key_line == "key white:0 red:9", (
+            f"the log-space max should be converted back to a real patient count via expm1 "
+            f"for display, not left as a log1p value, got {key_line!r}"
+        )
+
+    def test_log_scale_title_notes_the_log_scale(self):
+        lines = mod.build_mutation_key_lines(1.0, log_scale=True, low_color="white", high_color="red")
+        title_line = next(l for l in lines if l.startswith("2dlabels"))
+        assert "log scale" in title_line.lower(), (
+            f"the title should flag that the underlying scale is logarithmic, got {title_line!r}"
+        )
+
+    def test_zero_max_produces_a_valid_key(self):
+        # e.g. a protein with zero nearby mutations everywhere.
+        lines = mod.build_mutation_key_lines(0.0, log_scale=False, low_color="white", high_color="red")
+        assert lines[0] == "key white:0 red:0", f"got {lines[0]!r}"
+
+
+class TestBuildPlddtKeyLines:
+    def test_produces_a_two_stop_0_to_100_key(self):
+        lines = mod.build_plddt_key_lines(low_color="orange", high_color="blue")
+        assert lines[0] == "key orange:0 blue:100", (
+            f"the key should always be built from an explicit 2-color list, labeled 0 and "
+            f"100 (pLDDT's fixed full range), got {lines[0]!r}"
+        )
+
+    def test_never_names_a_palette(self):
+        # See TestBuildMutationKeyLines.test_never_names_a_palette -- same failure
+        # mode applies to a named "alphafold" palette key.
+        lines = mod.build_plddt_key_lines(
+            low_color=mod.PLDDT_DEFAULT_LOW_COLOR, high_color=mod.PLDDT_DEFAULT_HIGH_COLOR,
+        )
+        assert "alphafold" not in lines[0], f"the key must not name the 'alphafold' palette, got {lines[0]!r}"
+
+    def test_includes_a_title_label(self):
+        lines = mod.build_plddt_key_lines(low_color="orange", high_color="blue")
+        assert any("pLDDT" in l for l in lines if l.startswith("2dlabels")), (
+            f"a title label should accompany the key so a screenshot is self-explanatory, got {lines}"
+        )
+
+
 class TestWritePlddtChimeraxScript:
     def test_colors_by_bfactor_with_alphafold_palette(self, tmp_path):
         out_path = mod.write_plddt_chimerax_script(tmp_path / "model.cif", tmp_path / "plddt_view.cxc")
@@ -584,6 +656,15 @@ class TestWritePlddtChimeraxScript:
         )
         lines = out_path.read_text(encoding="utf-8").splitlines()
         assert lines.index("shape sphere radius 1.2 center 1,2,3 color purple name ptm1") == lines.index("lighting soft") - 1
+
+    def test_palette_can_be_overridden(self, tmp_path):
+        out_path = mod.write_plddt_chimerax_script(
+            tmp_path / "model.cif", tmp_path / "plddt_view.cxc", palette="orange:blue",
+        )
+        lines = out_path.read_text(encoding="utf-8").splitlines()
+        assert "color bfactor #1 palette orange:blue" in lines, (
+            f"a custom palette override should replace 'alphafold' in the color command, got {lines}"
+        )
 
 
 class TestWritePlainChimeraxScript:
@@ -666,6 +747,11 @@ class TestRunExport:
         assert result.plddt_chimerax_script_out is None, (
             "pLDDT heatmap defaults to off, so no pLDDT script should be produced unless "
             "explicitly requested"
+        )
+        mutation_script_text = result.mutation_chimerax_script_out.read_text()
+        assert "\nkey " in mutation_script_text, (
+            f"the generated mutation heatmap script should include a ChimeraX color key, "
+            f"got:\n{mutation_script_text}"
         )
 
     def test_multi_fragment_protein_skips_chimerax_files(self, tmp_path, monkeypatch):
@@ -813,8 +899,12 @@ class TestRunExport:
     def test_plddt_heatmap_true_produces_script_with_no_mutation_files(self, tmp_path, monkeypatch):
         kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
         result = mod.run_export(mutation_heatmap=False, plddt_heatmap=True, **kwargs)
-        assert "color bfactor #1 palette alphafold" in result.plddt_chimerax_script_out.read_text(), (
+        text = result.plddt_chimerax_script_out.read_text()
+        assert "color bfactor #1 palette alphafold" in text, (
             "the produced pLDDT script should color by bfactor with the alphafold palette"
+        )
+        assert "\nkey " in text, (
+            f"the produced pLDDT script should include a ChimeraX color key, got:\n{text}"
         )
 
     def test_both_heatmaps_true_produces_all_three_files(self, tmp_path, monkeypatch):
@@ -1057,6 +1147,129 @@ class TestRunExport:
         assert "lighting soft" in lines and "lighting simple" not in lines, (
             f"without dimming there's no transparency to conflict with 'soft' lighting, so "
             f"it should stay the default, got {lines}"
+        )
+
+
+class TestRunExportColors:
+    def _kwargs(self, tmp_path, monkeypatch):
+        """Single-fragment CIF + one COSMIC mutation (position 592), matching
+        the setup TestRunExport's marker tests use -- gives both heatmaps and
+        both marker types something real to color/mark.
+        """
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 592], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S592A", "S1", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        ptm_tsv = tmp_path / "hotspots.tsv"
+        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}]).to_csv(
+            ptm_tsv, sep="\t", index=False,
+        )
+        monkeypatch.setattr(mod, "PTM_TSV", ptm_tsv)
+        return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+                    output_dir=tmp_path / "out", log_cb=lambda *_: None)
+
+    def test_default_colors_still_use_named_palettes_for_the_3d_coloring(self, tmp_path, monkeypatch):
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, plddt_heatmap=True, **kwargs)
+        mut_text = result.mutation_chimerax_script_out.read_text()
+        plddt_text = result.plddt_chimerax_script_out.read_text()
+        assert "palette Reds" in mut_text, (
+            f"leaving colors untouched should still emit the real 'Reds' palette for the "
+            f"3D coloring, unchanged from before color customization existed, got:\n{mut_text}"
+        )
+        assert "palette alphafold" in plddt_text, (
+            f"leaving colors untouched should still emit the real 'alphafold' palette for "
+            f"the 3D coloring, got:\n{plddt_text}"
+        )
+
+    def test_default_colors_key_never_names_a_palette(self, tmp_path, monkeypatch):
+        # The key is always an explicit 2-color list (see build_mutation_key_lines's
+        # docstring) even when the 3D coloring above uses the real named palette --
+        # a named-palette key was observed to render garbled overlapping numbers.
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, plddt_heatmap=True, **kwargs)
+        mut_text = result.mutation_chimerax_script_out.read_text()
+        plddt_text = result.plddt_chimerax_script_out.read_text()
+        assert f"key {mod.MUTATION_DEFAULT_LOW_COLOR}:0 {mod.MUTATION_DEFAULT_HIGH_COLOR}:" in mut_text, (
+            f"got:\n{mut_text}"
+        )
+        assert f"key {mod.PLDDT_DEFAULT_LOW_COLOR}:0 {mod.PLDDT_DEFAULT_HIGH_COLOR}:100" in plddt_text, (
+            f"got:\n{plddt_text}"
+        )
+
+    def test_customized_mutation_colors_switch_to_custom_gradient(self, tmp_path, monkeypatch):
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=True, mutation_low_color="#000000", mutation_high_color="#ffff00", **kwargs,
+        )
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "palette #000000:#ffff00" in text, (
+            f"customized low/high colors should build a 'low:high' custom palette instead "
+            f"of 'Reds', got:\n{text}"
+        )
+        assert "key #000000:" in text and "#ffff00:" in text, (
+            f"the key should also switch to the same custom colors, got:\n{text}"
+        )
+        assert "palette Reds" not in text
+
+    def test_customized_plddt_colors_switch_to_custom_gradient(self, tmp_path, monkeypatch):
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=False, plddt_heatmap=True,
+            plddt_low_color="purple", plddt_high_color="cyan", **kwargs,
+        )
+        text = result.plddt_chimerax_script_out.read_text()
+        assert "palette purple:cyan" in text, (
+            f"customized pLDDT low/high colors should build a 'low:high' custom palette "
+            f"instead of 'alphafold', got:\n{text}"
+        )
+        assert "key purple:0 cyan:100" in text, (
+            f"the pLDDT key should switch to the same custom colors at the fixed 0/100 "
+            f"range, got:\n{text}"
+        )
+
+    def test_changing_only_one_color_still_activates_the_custom_gradient(self, tmp_path, monkeypatch):
+        # A swatch UI reports each color independently -- if the user has only
+        # touched one of the two (the other still sitting at its default-looking
+        # sentinel value), the custom gradient must still activate using BOTH
+        # current values, not silently keep rendering "Reds" while the swatch
+        # showing #123456 implies otherwise.
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=True, mutation_low_color="#123456", **kwargs,
+        )
+        text = result.mutation_chimerax_script_out.read_text()
+        assert f"palette #123456:{mod.MUTATION_DEFAULT_HIGH_COLOR}" in text, (
+            f"changing just the low color should still switch away from 'Reds', using the "
+            f"still-default high color as the other end of the gradient, got:\n{text}"
+        )
+        assert "palette Reds" not in text
+
+    def test_customized_marker_colors_appear_in_the_script(self, tmp_path, monkeypatch):
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(
+            mutation_heatmap=True, mark_ptm_sites=True, mark_mutations=True,
+            ptm_marker_color="magenta", mutation_marker_color="#00ffff", **kwargs,
+        )
+        text = result.mutation_chimerax_script_out.read_text()
+        assert "color magenta name" in text, (
+            f"a customized PTM marker color should appear on the sphere command, got:\n{text}"
+        )
+        assert "#00ffff target ab" in text, (
+            f"a customized mutation marker color should appear on the stick color command, got:\n{text}"
+        )
+        assert "color green name" not in text and "orange target ab" not in text, (
+            f"the old default marker colors should not appear once overridden, got:\n{text}"
         )
 
 

@@ -963,6 +963,12 @@ class PipelineRunnerMixin:
                 mark_mutations=self._ca_mark_mutations_var.get(),
                 log_scale=self._ca_log_scale_var.get(),
                 dim_low_confidence=self._ca_dim_confidence_var.get(),
+                mutation_low_color=self._ca_mutation_low_var.get(),
+                mutation_high_color=self._ca_mutation_high_var.get(),
+                plddt_low_color=self._ca_plddt_low_var.get(),
+                plddt_high_color=self._ca_plddt_high_var.get(),
+                ptm_marker_color=self._ca_ptm_marker_color_var.get(),
+                mutation_marker_color=self._ca_mutation_marker_color_var.get(),
                 progress_cb=_progress,
                 log_cb=lambda line: self._q("log", line),
             )
