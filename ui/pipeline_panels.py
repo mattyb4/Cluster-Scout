@@ -488,7 +488,7 @@ class PipelineTabMixin:
         help_icon(
             proteins_label_frame,
             "Add one or more gene symbols and/or UniProt accessions - each "
-            "is exported in turn (its own Output/coordinates/{UniProt}/ "
+            "is exported in turn (its own Output/coordinates/{gene}_{UniProt}/ "
             "folder), with the same options below applied to every one. A "
             "gene's UniProt accession, or a UniProt accession's gene "
             "symbol, is resolved automatically as needed. One protein "

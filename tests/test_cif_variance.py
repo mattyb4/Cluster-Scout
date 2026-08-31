@@ -405,6 +405,34 @@ class TestGenerateAlphafoldSeedJson:
             f"got {[job['name'] for job in payload]}"
         )
 
+    def test_custom_seed_count_produces_that_many_jobs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: FakeResponse(">sp|P04637|P53_HUMAN\nMEEPQSDPSV\n"),
+        )
+        input_dir = tmp_path / "cifs"
+        input_dir.mkdir()
+
+        path = mod.generate_alphafold_seed_json(
+            input_dir=input_dir, output_dir=tmp_path / "out", uniprot="P04637", gene="TP53",
+            seeds=list(range(1, 21)), log_cb=lambda *_: None,
+        )
+
+        payload = json.loads(path.read_text())
+        assert len(payload) == 20, f"a custom seed count should produce exactly that many jobs, got {len(payload)}"
+        assert "seeds1-20" in path.name, (
+            f"the output filename should reflect the actual seed range requested, got {path.name!r}"
+        )
+
+    def test_empty_seeds_raises_value_error(self, tmp_path, monkeypatch):
+        input_dir = tmp_path / "cifs"
+        input_dir.mkdir()
+        with pytest.raises(ValueError):
+            mod.generate_alphafold_seed_json(
+                input_dir=input_dir, output_dir=tmp_path / "out", uniprot="P04637",
+                seeds=[], log_cb=lambda *_: None,
+            )
+
     def test_raises_when_uniprot_cannot_be_resolved(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
         input_dir = tmp_path / "cifs"

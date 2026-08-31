@@ -39,7 +39,7 @@ Accepts the same **Cutoff**, **Min pLDDT**, and **Max PAE** settings as the main
 
 Export alpha-carbon coordinates for every residue of one or more proteins — each added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the rest of the batch.
 
-Each protein's output goes in its own `Output/coordinates/{UniProt}/` folder: `all_ca.tsv` (every residue's coordinates, plus a nearby-patient-count column) and `mutation_ca.tsv` (coordinates only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
+Each protein's output goes in its own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`): `all_ca.tsv` (every residue's coordinates, plus a nearby-patient-count column) and `mutation_ca.tsv` (coordinates only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
 
 **Heatmaps** — for single-fragment proteins, also produces ChimeraX scripts you can open directly to reproduce the view with no manual steps:
 
@@ -161,7 +161,7 @@ Output (written to `Output/cif_variance/`):
 - **`variance_data.tsv`** — per-residue variance, pLDDT stats, and PTM/mutation flags
 - **`pairwise_rmsd.tsv`** — RMSD matrix between every pair of input structures
 
-**Generate AlphaFold Seeds JSON** — writes a batch job file for [AlphaFold Server](https://alphafoldserver.com) requesting 10 separate predictions of a protein's sequence, one per seed (seeds 1 through 10), using the same UniProt/gene resolution as the fields above. Upload it at alphafoldserver.com, then drop the resulting CIFs into the input folder above to compare their variance with this tool.
+**Generate AlphaFold Seeds JSON** — writes a batch job file for [AlphaFold Server](https://alphafoldserver.com) requesting one separate prediction of a protein's sequence per seed (seeds 1 through the number in the **Seeds** field, 10 by default), using the same UniProt/gene resolution as the fields above. Upload it at alphafoldserver.com, then drop the resulting CIFs into the input folder above to compare their variance with this tool.
 
 ---
 

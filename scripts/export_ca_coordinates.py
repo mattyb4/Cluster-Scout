@@ -1,7 +1,8 @@
 """Export alpha-carbon coordinates for a protein from its AlphaFold CIF.
 
-Every run's output goes into its own Output/coordinates/{UniProt}/ folder, so
-files for different proteins never mix together. Produces two TSV files,
+Every run's output goes into its own Output/coordinates/{gene}_{UniProt}/
+folder, so files for different proteins never mix together and each folder is
+identifiable by gene name at a glance. Produces two TSV files,
 each with a patients_within_10A column giving the total COSMIC patient count
 summed across all missense mutations whose CA coordinate is within 10
 Angstroms:
@@ -784,9 +785,12 @@ def run_export(
     log_cb(f"CA atoms at mutation positions: {len(mut_ca_df)}")
 
     # ── 7. Write outputs ──────────────────────────────────────────────────────
-    # Everything for this protein goes in its own {uid} subfolder, so a
-    # second export (or a different protein) never mixes files together.
-    output_dir = Path(output_dir) / uid
+    # Everything for this protein goes in its own {gene}_{uid} subfolder, so a
+    # second export (or a different protein) never mixes files together, and the
+    # folder is identifiable by gene name at a glance rather than only by
+    # UniProt accession.
+    safe_gene = re.sub(r"[^\w-]+", "_", resolved_gene).strip("_") or "unknown_gene"
+    output_dir = Path(output_dir) / f"{safe_gene}_{uid}"
     output_dir.mkdir(parents=True, exist_ok=True)
     all_out = output_dir / "all_ca.tsv"
     mut_out = output_dir / "mutation_ca.tsv"
@@ -945,7 +949,7 @@ def run_batch_export(
     UniProt accession, auto-detected via looks_like_uniprot_id), applying the
     same heatmap/marker options to every protein.
 
-    Each protein's own outputs land in their own Output/coordinates/{uid}/
+    Each protein's own outputs land in their own Output/coordinates/{gene}_{uid}/
     subfolder (run_export's own design), so a batch never mixes proteins'
     files together. A failure on one protein (bad token, no AlphaFold model,
     no gene symbol resolvable, etc.) is logged and skipped rather than

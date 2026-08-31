@@ -476,8 +476,15 @@ class AnalysisToolsTabMixin:
         ).grid(row=6, column=1, padx=6, pady=(6, 6), sticky="w")
 
         # AlphaFold Server seed-JSON export
+        from cif_variance import DEFAULT_SEEDS
         seed_json_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
         seed_json_frame.grid(row=7, column=0, columnspan=3, padx=12, pady=(4, 2), sticky="w")
+        ctk.CTkLabel(seed_json_frame, text="Seeds:").pack(side="left", padx=(0, 4))
+        if not hasattr(self, "_variance_num_seeds_var"):
+            self._variance_num_seeds_var = ctk.StringVar(value=str(len(DEFAULT_SEEDS)))
+        ctk.CTkEntry(
+            seed_json_frame, textvariable=self._variance_num_seeds_var, width=40,
+        ).pack(side="left", padx=(0, 8))
         self._variance_seed_json_btn = ctk.CTkButton(
             seed_json_frame, text="⬇  Generate AlphaFold Seeds JSON", width=230, height=28,
             font=ctk.CTkFont(size=12),
@@ -493,9 +500,10 @@ class AnalysisToolsTabMixin:
 
     def _generate_alphafold_seed_json(self) -> None:
         """Resolve the CIF Variance tool's target protein and write an
-        AlphaFold Server batch JSON of 10 separate jobs, one per seed (1-10),
-        so the researcher can upload it at alphafoldserver.com and drop the
-        resulting CIFs straight into the input folder above for comparison.
+        AlphaFold Server batch JSON of one separate job per seed (1-N, see
+        the Seeds field), so the researcher can upload it at
+        alphafoldserver.com and drop the resulting CIFs straight into the
+        input folder above for comparison.
 
         The UniProt-sequence fetch is network I/O, so it runs off the main
         thread like the app's other network lookups (e.g. CA-coordinate
@@ -505,6 +513,14 @@ class AnalysisToolsTabMixin:
         (always running on the main thread) drains it and does the actual
         widget updates.
         """
+        num_seeds_text = self._variance_num_seeds_var.get().strip()
+        if not num_seeds_text.isdigit() or int(num_seeds_text) < 1:
+            self._variance_seed_json_status.configure(
+                text="⚠  Seeds must be a whole number of 1 or more.", text_color=_RED,
+            )
+            return
+        num_seeds = int(num_seeds_text)
+
         input_dir = Path(self._variance_input_dir_var.get().strip())
         uniprot = self._variance_uniprot_var.get().strip() or None
         gene = self._variance_gene_var.get().strip() or None
@@ -522,6 +538,7 @@ class AnalysisToolsTabMixin:
             try:
                 path = generate_alphafold_seed_json(
                     input_dir=input_dir, output_dir=output_dir, uniprot=uniprot, gene=gene,
+                    seeds=list(range(1, num_seeds + 1)),
                 )
             except Exception as exc:
                 result_q.put(("error", str(exc)))

@@ -731,6 +731,10 @@ class TestRunExport:
 
         assert result.all_out.exists(), "all_ca.tsv should be written to disk"
         assert result.mut_out.exists(), "mutation_ca.tsv should be written to disk"
+        assert result.all_out.parent.name == "TP53_P04637", (
+            f"the per-protein output folder should be named {{gene}}_{{uid}} for "
+            f"readability, not just the bare UniProt accession, got {result.all_out.parent.name!r}"
+        )
         assert len(result.all_ca_df) == 3, f"all_ca_df should have one row per residue (3), got {len(result.all_ca_df)}"
         assert len(result.mut_ca_df) == 1, (
             f"mut_ca_df should only include the one residue (position 2) with a COSMIC "
@@ -752,6 +756,30 @@ class TestRunExport:
         assert "\nkey " in mutation_script_text, (
             f"the generated mutation heatmap script should include a ChimeraX color key, "
             f"got:\n{mutation_script_text}"
+        )
+
+    def test_output_folder_name_sanitizes_unsafe_gene_characters(self, tmp_path, monkeypatch):
+        # Real HGNC gene symbols never contain filesystem-unsafe characters, but
+        # sanitize defensively anyway rather than trust an upstream API response.
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1], res_names=["ALA"], atom_names=["CA"], coords=[[0.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame(columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+
+        result = mod.run_export(
+            uniprot="P04637", gene="MY/GENE:1", cosmic_file=cosmic,
+            output_dir=tmp_path / "out", log_cb=lambda *_: None,
+        )
+        assert result.all_out.parent.name == "MY_GENE_1_P04637", (
+            f"unsafe characters in the gene name should be replaced, not break folder "
+            f"creation, got {result.all_out.parent.name!r}"
         )
 
     def test_multi_fragment_protein_skips_chimerax_files(self, tmp_path, monkeypatch):
@@ -1313,10 +1341,11 @@ class TestRunBatchExport:
             f"{[(i.token, i.error) for i in items]}"
         )
         assert {item.result.uid for item in items} == {"P04637", "P00533"}
-        assert items[0].result.all_out.parent.name == "P04637"
-        assert items[1].result.all_out.parent.name == "P00533", (
-            "each protein's outputs must land in their own {uid} subfolder so a batch never "
-            "mixes proteins' files together"
+        assert items[0].result.all_out.parent.name == "TP53_P04637"
+        assert items[1].result.all_out.parent.name == "EGFR_P00533", (
+            "each protein's outputs must land in their own {gene}_{uid} subfolder so a "
+            "batch never mixes proteins' files together, and it's identifiable by gene "
+            "name at a glance"
         )
 
     def test_classifies_uniprot_vs_gene_tokens(self, tmp_path, monkeypatch):

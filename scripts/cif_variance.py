@@ -291,9 +291,12 @@ def generate_alphafold_seed_json(
     canonical sequence from UniProt, and write an AlphaFold Server batch JSON
     of one job per seed.
 
-    Raises ValueError if no UniProt ID can be resolved, or its sequence can't
-    be fetched.
+    Raises ValueError if no UniProt ID can be resolved, its sequence can't be
+    fetched, or *seeds* is empty.
     """
+    if not seeds:
+        raise ValueError("seeds must contain at least one entry.")
+
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -588,16 +591,25 @@ def main():
         "--generate-seed-json", action="store_true",
         help="Instead of running variance analysis, resolve the protein (same "
              "--uniprot/--gene/--input-dir rules) and write an AlphaFold Server "
-             "batch JSON of 10 separate jobs, one per seed (seeds 1-10), for "
-             "later variance comparison once the resulting CIFs are downloaded.",
+             "batch JSON of separate jobs, one per seed (seeds 1-N, see "
+             "--num-seeds), for later variance comparison once the resulting "
+             "CIFs are downloaded.",
+    )
+    parser.add_argument(
+        "--num-seeds", type=int, default=len(DEFAULT_SEEDS),
+        help=f"Number of separate AlphaFold Server jobs to request with "
+             f"--generate-seed-json, one per seed 1-N (default: {len(DEFAULT_SEEDS)}).",
     )
     args = parser.parse_args()
 
     if args.generate_seed_json:
+        if args.num_seeds < 1:
+            sys.exit("Error: --num-seeds must be at least 1.")
         try:
             path = generate_alphafold_seed_json(
                 input_dir=Path(args.input_dir), output_dir=Path(args.output_dir),
                 uniprot=args.uniprot, gene=args.gene,
+                seeds=list(range(1, args.num_seeds + 1)),
             )
         except ValueError as exc:
             sys.exit(f"Error: {exc}")

@@ -192,7 +192,7 @@ The **Structure Heatmaps** mode (Pipeline tab) exports the 3D coordinates of alp
 
 **Batch proteins:** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the batch. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
 
-If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `Output/coordinates/{UniProt}/` folder:
+If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`), so the folder is identifiable by gene name at a glance rather than only by UniProt accession:
 
 - **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `patients_within_10A` column (total COSMIC patient count summed across all missense mutations within 10 Å of that residue)
 - **`mutation_ca.tsv`** — coordinates only at positions with confirmed somatic missense mutations in COSMIC, plus the mutation labels and patient counts
@@ -272,9 +272,10 @@ Output (in `Output/cif_variance/`):
 - **`variance_data.tsv`** — per-residue variance, pLDDT stats, and PTM/mutation flags
 - **`pairwise_rmsd.tsv`** — RMSD matrix between every pair of input structures
 
-**Generating more seeds to compare:** both the CLI (`--generate-seed-json`) and the Analysis Tools tab (a "Generate AlphaFold Seeds JSON" button) can write a batch JSON file for [AlphaFold Server](https://alphafoldserver.com) requesting 10 separate jobs — one per seed, seeds 1 through 10 — for a protein's canonical sequence, resolved the same way (`--uniprot`/`--gene`/CIF metadata) as the comparison above. Upload it at alphafoldserver.com, then drop the resulting CIFs into `data/cif_comparison/` to compare them here.
+**Generating more seeds to compare:** both the CLI (`--generate-seed-json`) and the Analysis Tools tab (a "Generate AlphaFold Seeds JSON" button, with a **Seeds** field next to it) can write a batch JSON file for [AlphaFold Server](https://alphafoldserver.com) requesting one separate job per seed, seeds 1 through N (10 by default, adjustable), for a protein's canonical sequence, resolved the same way (`--uniprot`/`--gene`/CIF metadata) as the comparison above. Upload it at alphafoldserver.com, then drop the resulting CIFs into `data/cif_comparison/` to compare them here.
 ```bash
 uv run scripts/cif_variance.py --generate-seed-json --uniprot P04637
+uv run scripts/cif_variance.py --generate-seed-json --uniprot P04637 --num-seeds 20
 ```
 
 ---
