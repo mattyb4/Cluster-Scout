@@ -190,12 +190,14 @@ Whichever protein you are running analysis on, in order for it to work, the UniP
 
 The **Structure Heatmaps** mode (Pipeline tab) exports the 3D coordinates of alpha-carbon atoms for one or more proteins at once, along with ready-to-open ChimeraX visualization scripts. It's also available as a standalone script for CLI/scripting use.
 
-**Batch proteins:** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the batch. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
+**Source: Database vs. Upload CIF file.** Database (the default) works from one or more gene symbols/UniProt accessions, resolving structures against AlphaFold DB as described below. Upload CIF file instead lets you point directly at a specific `.cif` you already have — e.g. a seeded [AlphaFold Server](https://alphafoldserver.com) prediction you generated yourself via the CIF Variance tool's "Generate AlphaFold Seeds JSON" option, if you liked how a particular seed came out and want its own heatmaps/coordinates rather than the AlphaFold DB canonical model. This mode always covers exactly one protein (the batch list doesn't apply), never downloads anything or touches `cif_models/`, and is always treated as single-fragment (there's only one file, so the multi-fragment skip below never applies to it). The UniProt ID is auto-detected from the CIF's own embedded metadata when possible; if that fails, enter it directly — gene and other lookups (COSMIC mutations, PTM sites) proceed from there exactly as in Database mode. On the CLI, use `--custom-cif path/to/model.cif` with zero or one positional protein token.
+
+**Batch proteins (Database source):** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the batch. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
 
 If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`), so the folder is identifiable by gene name at a glance rather than only by UniProt accession:
 
-- **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `patients_within_10A` column (total COSMIC patient count summed across all missense mutations within 10 Å of that residue)
-- **`mutation_ca.tsv`** — coordinates only at positions with confirmed somatic missense mutations in COSMIC, plus the mutation labels and patient counts
+- **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `plddt` column (AlphaFold's per-residue confidence, read from the CIF's own B-factor field) and a `patients_within_10A` column (total COSMIC patient count summed across all missense mutations within 10 Å of that residue)
+- **`mutation_ca.tsv`** — coordinates and `plddt` only at positions with confirmed somatic missense mutations in COSMIC, plus the mutation labels and patient counts
 
 **ChimeraX heatmaps and markers** (single-fragment proteins only — skipped, with a warning, for proteins AlphaFold split into multiple fragments):
 
@@ -220,7 +222,7 @@ uv run scripts/export_ca_coordinates.py P04637
 uv run scripts/export_ca_coordinates.py TP53 EGFR P04637
 ```
 
-**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--cosmic path/to/COSMIC.tsv`, `--mutation-low-color`, `--mutation-high-color`, `--plddt-low-color`, `--plddt-high-color`, `--ptm-marker-color`, `--mutation-marker-color`.
+**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--cosmic path/to/COSMIC.tsv`, `--custom-cif path/to/model.cif`, `--mutation-low-color`, `--mutation-high-color`, `--plddt-low-color`, `--plddt-high-color`, `--ptm-marker-color`, `--mutation-marker-color`.
 
 ## Finding the Optimal Distance Cutoff
 

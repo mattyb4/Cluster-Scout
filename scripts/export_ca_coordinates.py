@@ -2,10 +2,11 @@
 
 Every run's output goes into its own Output/coordinates/{gene}_{UniProt}/
 folder, so files for different proteins never mix together and each folder is
-identifiable by gene name at a glance. Produces two TSV files,
-each with a patients_within_10A column giving the total COSMIC patient count
-summed across all missense mutations whose CA coordinate is within 10
-Angstroms:
+identifiable by gene name at a glance. Produces two TSV files, each with a
+plddt column (AlphaFold's per-residue confidence, read from the CIF's own
+B-factor field) and a patients_within_10A column giving the total COSMIC
+patient count summed across all missense mutations whose CA coordinate is
+within 10 Angstroms:
 
   all_ca.tsv       — CA coordinates for every residue
   mutation_ca.tsv  — CA coordinates only at COSMIC missense-mutation positions
@@ -75,6 +76,7 @@ from pipeline_utils import (  # noqa: E402
     AA3TO1,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
+    extract_uniprot_from_cif,
     find_canonical_cifs,
     get_plddt_map,
     hotspots_tsv_path,
@@ -192,7 +194,13 @@ def _download_cif(uid: str, log_cb: Callable[[str], None] = print) -> list[Path]
 
 
 def _load_ca_from_cif(cif_file: Path) -> list[dict]:
-    """Extract alpha-carbon coordinates from a CIF file as a list of {residue, position, x, y, z} dicts."""
+    """Extract alpha-carbon coordinates and pLDDT from a CIF file as a list
+    of {residue, position, x, y, z, plddt} dicts.
+
+    AlphaFold CIFs carry per-residue pLDDT confidence in the standard
+    B-factor field -- load_first_chain already surfaces it as each atom's
+    own b_factor, same as pipeline_utils.get_plddt_map reads it elsewhere.
+    """
     chain = load_first_chain(cif_file)
     if chain is None:
         return []
@@ -210,6 +218,7 @@ def _load_ca_from_cif(cif_file: Path) -> list[dict]:
             "x": round(float(x), 3),
             "y": round(float(y), 3),
             "z": round(float(z), 3),
+            "plddt": round(float(ca_atoms.b_factor[i]), 1),
         })
     return rows
 
@@ -637,6 +646,7 @@ def run_export(
     gene: str | None = None,
     cosmic_file: Path | None = None,
     output_dir: Path = OUTPUT_DIR,
+    custom_cif_path: Path | None = None,
     mutation_heatmap: bool = True,
     plddt_heatmap: bool = False,
     mark_ptm_sites: bool = False,
@@ -654,7 +664,22 @@ def run_export(
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
 
     Either *uniprot* or *gene* must be given; if *uniprot* is omitted, the
-    UniProt accession is resolved from *gene* via a live UniProt API lookup.
+    UniProt accession is resolved from *gene* via a live UniProt API lookup
+    -- unless *custom_cif_path* is given and the CIF carries embedded UniProt
+    metadata, in which case that's tried first (see *custom_cif_path* below).
+
+    *custom_cif_path*, if given, uses that CIF file directly as the
+    structure instead of the AlphaFold DB model in cif_models/{uid}/ (never
+    downloading anything) -- for a structure the caller generated themselves,
+    e.g. a seeded AlphaFold Server prediction from the CIF Variance tool's
+    "Generate AlphaFold Seeds JSON" option. Since it's always exactly one
+    file, it's also always treated as single-fragment, so the "multi-fragment
+    proteins skip ChimeraX files" restriction below never applies to it.
+    Nothing is copied into cif_models/ -- that cache is reserved for the real
+    canonical AlphaFold DB model other pipeline tools expect to find there by
+    its own naming convention, so mixing in an arbitrary custom seed's file
+    under that same accession would corrupt what that cache means to every
+    other tool that reads it.
 
     *mutation_heatmap*/*plddt_heatmap* independently control which ChimeraX
     heatmap script(s) get written (single-fragment proteins only -- see step
@@ -699,8 +724,22 @@ def run_export(
     """
     uniprot = (uniprot or "").strip()
     gene = (gene or "").strip() or None
+    custom_cif_path = Path(custom_cif_path) if custom_cif_path is not None else None
+
+    if custom_cif_path is not None and not uniprot and not gene:
+        if not custom_cif_path.exists():
+            raise ValueError(f"Custom CIF file not found: {custom_cif_path}")
+        detected = extract_uniprot_from_cif(custom_cif_path)
+        if detected:
+            uniprot = detected
+            log_cb(f"Auto-detected UniProt ID from CIF metadata: {uniprot}")
+
     if not uniprot and not gene:
-        raise ValueError("Provide a UniProt accession, a gene symbol, or both.")
+        raise ValueError(
+            "Provide a UniProt accession, a gene symbol, or both."
+            + (" Could not auto-detect one from the custom CIF file's metadata either."
+               if custom_cif_path is not None else "")
+        )
 
     if uniprot:
         uid = uniprot.upper()
@@ -718,18 +757,25 @@ def run_export(
         cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
     cosmic_file = Path(cosmic_file)
 
-    # ── 1. Locate CIF files (download from AlphaFold if not present) ─────────
-    uniprot_dir = MODELS_ROOT / uid
-    cif_files = find_canonical_cifs(uniprot_dir) if uniprot_dir.is_dir() else []
+    # ── 1. Locate CIF files (a caller-provided custom CIF, or download from
+    #      AlphaFold DB if not already cached) ────────────────────────────────
+    if custom_cif_path is not None:
+        if not custom_cif_path.exists():
+            raise ValueError(f"Custom CIF file not found: {custom_cif_path}")
+        cif_files = [custom_cif_path]
+        log_cb(f"Using custom CIF file: {custom_cif_path}")
+    else:
+        uniprot_dir = MODELS_ROOT / uid
+        cif_files = find_canonical_cifs(uniprot_dir) if uniprot_dir.is_dir() else []
 
-    if not cif_files:
-        _download_cif(uid, log_cb)
-        cif_files = find_canonical_cifs(uniprot_dir)
+        if not cif_files:
+            _download_cif(uid, log_cb)
+            cif_files = find_canonical_cifs(uniprot_dir)
 
-    if not cif_files:
-        raise ValueError(f"No canonical AlphaFold CIF files found in {uniprot_dir}")
+        if not cif_files:
+            raise ValueError(f"No canonical AlphaFold CIF files found in {uniprot_dir}")
 
-    log_cb(f"CIF fragment(s): {[f.name for f in cif_files]}")
+        log_cb(f"CIF fragment(s): {[f.name for f in cif_files]}")
 
     # ── 2. Extract CA coordinates from all fragments ──────────────────────────
     all_records: list[dict] = []
@@ -742,7 +788,7 @@ def run_export(
         raise ValueError("No CA atoms could be extracted")
 
     all_ca_df = (
-        pd.DataFrame(all_records, columns=["residue", "position", "x", "y", "z"])
+        pd.DataFrame(all_records, columns=["residue", "position", "x", "y", "z", "plddt"])
         .drop_duplicates(subset=["position"], keep="first")  # deduplicate overlapping fragments
         .sort_values("position")
         .reset_index(drop=True)
@@ -780,6 +826,7 @@ def run_export(
             "x": row["x"],
             "y": row["y"],
             "z": row["z"],
+            "plddt": row["plddt"],
             "mutations": "; ".join(sorted(pos_mutations[pos])),
             "total_patients": pos_patients[pos],
             "patients_within_10A": patients_within.get(pos, 0),
@@ -787,7 +834,7 @@ def run_export(
 
     mut_ca_df = pd.DataFrame(
         mut_rows,
-        columns=["residue", "position", "x", "y", "z", "mutations", "total_patients", "patients_within_10A"],
+        columns=["residue", "position", "x", "y", "z", "plddt", "mutations", "total_patients", "patients_within_10A"],
     )
     log_cb(f"CA atoms at mutation positions: {len(mut_ca_df)}")
 
@@ -1036,6 +1083,17 @@ def main() -> None:
         help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
     )
     parser.add_argument(
+        "--custom-cif",
+        default=None,
+        help="Use this specific CIF file instead of the AlphaFold DB model -- "
+             "e.g. a seeded AlphaFold Server prediction you generated yourself "
+             "via the CIF Variance tool's 'Generate AlphaFold Seeds JSON' "
+             "option. Nothing is downloaded or written to cif_models/ in this "
+             "case. Requires zero or one protein token above: with one, it's "
+             "used as the UniProt/gene for COSMIC lookup; with none, the "
+             "UniProt ID is auto-detected from the CIF file's own metadata.",
+    )
+    parser.add_argument(
         "--mutation-heatmap", action=argparse.BooleanOptionalAction, default=True,
         help="Generate the mutation (patients-within-10A) ChimeraX heatmap. "
              "Enabled by default; use --no-mutation-heatmap to skip it.",
@@ -1111,6 +1169,39 @@ def main() -> None:
     tokens = list(args.proteins)
     if args.gene:
         tokens.append(args.gene)
+
+    if args.custom_cif:
+        if len(tokens) > 1:
+            sys.exit("Error: --custom-cif can only be used with zero or one protein token.")
+        token = tokens[0].strip() if tokens else ""
+        kwargs = dict(
+            cosmic_file=Path(args.cosmic) if args.cosmic else None,
+            custom_cif_path=Path(args.custom_cif),
+            mutation_heatmap=args.mutation_heatmap,
+            plddt_heatmap=args.plddt_heatmap,
+            mark_ptm_sites=args.mark_ptm_sites,
+            mark_mutations=args.mark_mutations,
+            log_scale=args.log_scale,
+            dim_low_confidence=args.dim_low_confidence,
+            mutation_low_color=args.mutation_low_color,
+            mutation_high_color=args.mutation_high_color,
+            plddt_low_color=args.plddt_low_color,
+            plddt_high_color=args.plddt_high_color,
+            ptm_marker_color=args.ptm_marker_color,
+            mutation_marker_color=args.mutation_marker_color,
+            log_cb=print,
+        )
+        try:
+            if not token:
+                run_export(**kwargs)
+            elif looks_like_uniprot_id(token):
+                run_export(uniprot=token, **kwargs)
+            else:
+                run_export(gene=token, **kwargs)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            sys.exit(f"Error: {exc}")
+        return
+
     if not tokens:
         sys.exit("Error: Provide at least one gene symbol or UniProt accession.")
 

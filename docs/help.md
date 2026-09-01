@@ -37,9 +37,11 @@ Accepts the same **Cutoff**, **Min pLDDT**, and **Max PAE** settings as the main
 
 ### Structure Heatmaps
 
+**Source: Database / Upload CIF file** — Database (the default) works from a list of proteins by gene symbol or UniProt accession, resolving each against AlphaFold DB. Upload CIF file instead exports a single specific `.cif` you already have — e.g. a seeded [AlphaFold Server](https://alphafoldserver.com) prediction you generated yourself via the CIF Variance tool's **Generate AlphaFold Seeds JSON** option, if a particular seed looked better than the canonical model and you want heatmaps/coordinates for that one instead. Nothing is downloaded and nothing is added to the shared structure cache; the Proteins list doesn't apply, and the file is always treated as single-fragment. The UniProt ID field auto-fills from the CIF's own metadata when possible — edit it if detection fails or looks wrong. Every option below applies the same way regardless of source.
+
 Export alpha-carbon coordinates for every residue of one or more proteins — each added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the rest of the batch.
 
-Each protein's output goes in its own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`): `all_ca.tsv` (every residue's coordinates, plus a nearby-patient-count column) and `mutation_ca.tsv` (coordinates only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
+Each protein's output goes in its own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`): `all_ca.tsv` (every residue's coordinates, plus its AlphaFold pLDDT confidence and a nearby-patient-count column) and `mutation_ca.tsv` (the same columns, only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
 
 **Heatmaps** — for single-fragment proteins, also produces ChimeraX scripts you can open directly to reproduce the view with no manual steps:
 

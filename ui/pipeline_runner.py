@@ -234,7 +234,18 @@ class PipelineRunnerMixin:
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
                 return
         elif mode == "ca-coordinates":
-            if not self._ca_proteins:
+            if self._ca_source_var.get() == "Upload CIF file":
+                from tkinter import messagebox
+                if not self._ca_custom_cif_var.get().strip():
+                    messagebox.showwarning("Missing input", "Select a CIF file to upload.")
+                    return
+                if not self._ca_custom_cif_uniprot_var.get().strip():
+                    messagebox.showwarning(
+                        "Missing input",
+                        "Enter the UniProt ID for this CIF file (could not auto-detect it).",
+                    )
+                    return
+            elif not self._ca_proteins:
                 from tkinter import messagebox
                 messagebox.showwarning(
                     "Missing input", "Add at least one gene symbol or UniProt accession.",
@@ -945,6 +956,34 @@ class PipelineRunnerMixin:
         self._q("finished")
 
     def _run_ca_coordinates(self):
+        """Dispatch to the batch (database-backed) or single custom-CIF
+        Structure Heatmaps export, based on the panel's Source toggle.
+        """
+        if self._ca_source_var.get() == "Upload CIF file":
+            self._run_ca_coordinates_custom_cif()
+        else:
+            self._run_ca_coordinates_batch()
+
+    def _ca_heatmap_kwargs(self) -> dict:
+        """Heatmap/marker options shared by both the batch and custom-CIF
+        Structure Heatmaps export paths, read fresh from the panel's widgets.
+        """
+        return dict(
+            mutation_heatmap=self._ca_mutation_heatmap_var.get(),
+            plddt_heatmap=self._ca_plddt_heatmap_var.get(),
+            mark_ptm_sites=self._ca_mark_ptm_var.get(),
+            mark_mutations=self._ca_mark_mutations_var.get(),
+            log_scale=self._ca_log_scale_var.get(),
+            dim_low_confidence=self._ca_dim_confidence_var.get(),
+            mutation_low_color=self._ca_mutation_low_var.get(),
+            mutation_high_color=self._ca_mutation_high_var.get(),
+            plddt_low_color=self._ca_plddt_low_var.get(),
+            plddt_high_color=self._ca_plddt_high_var.get(),
+            ptm_marker_color=self._ca_ptm_marker_color_var.get(),
+            mutation_marker_color=self._ca_mutation_marker_color_var.get(),
+        )
+
+    def _run_ca_coordinates_batch(self):
         """Run the CA-coordinate export in-process, in the background thread.
 
         Batches over every protein added to the list, sharing one progress
@@ -971,20 +1010,9 @@ class PipelineRunnerMixin:
             items = run_batch_export(
                 tokens,
                 output_dir=self._output_dir / "coordinates",
-                mutation_heatmap=self._ca_mutation_heatmap_var.get(),
-                plddt_heatmap=self._ca_plddt_heatmap_var.get(),
-                mark_ptm_sites=self._ca_mark_ptm_var.get(),
-                mark_mutations=self._ca_mark_mutations_var.get(),
-                log_scale=self._ca_log_scale_var.get(),
-                dim_low_confidence=self._ca_dim_confidence_var.get(),
-                mutation_low_color=self._ca_mutation_low_var.get(),
-                mutation_high_color=self._ca_mutation_high_var.get(),
-                plddt_low_color=self._ca_plddt_low_var.get(),
-                plddt_high_color=self._ca_plddt_high_var.get(),
-                ptm_marker_color=self._ca_ptm_marker_color_var.get(),
-                mutation_marker_color=self._ca_mutation_marker_color_var.get(),
                 progress_cb=_progress,
                 log_cb=lambda line: self._q("log", line),
+                **self._ca_heatmap_kwargs(),
             )
         except ImportError as exc:
             self._q("status", 0, "✗  Failed", _RED)
@@ -1015,6 +1043,58 @@ class PipelineRunnerMixin:
             self._q("status", 0, f"⚠  {n_ok}/{n_total} succeeded", _YELLOW)
         else:
             self._q("status", 0, "✗  Failed (0 succeeded)", _RED)
+        self._q("enable_open")
+        self._q("finished")
+
+    def _run_ca_coordinates_custom_cif(self):
+        """Run a single Structure Heatmaps export against a caller-provided
+        CIF file (e.g. a seeded AlphaFold Server prediction), in-process, in
+        the background thread -- see export_ca_coordinates.run_export's
+        custom_cif_path docstring for why this bypasses the AlphaFold DB
+        download/cache entirely.
+        """
+        cif_path = Path(self._ca_custom_cif_var.get().strip())
+        uniprot = self._ca_custom_cif_uniprot_var.get().strip()
+
+        self._q("pipeline_start", 1, "ca-coordinates", "warm")
+        self._q("show_log")
+        self._q("status", 0, "▶  Exporting…", _BLUE)
+        self._q("show_progress", 0)
+        self._q("log", f"Exporting Structure Heatmaps for custom CIF: {cif_path}")
+        self._q("log", "")
+
+        t0 = time.time()
+        try:
+            from export_ca_coordinates import run_export
+            result = run_export(
+                uniprot=uniprot,
+                custom_cif_path=cif_path,
+                output_dir=self._output_dir / "coordinates",
+                log_cb=lambda line: self._q("log", line),
+                **self._ca_heatmap_kwargs(),
+            )
+        except ImportError as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+        except Exception as exc:
+            self._q("status", 0, "✗  Failed", _RED)
+            self._q("log", f"Unexpected error: {exc}")
+            self._q("hide_progress", 0)
+            self._q("finished")
+            return
+
+        elapsed = time.time() - t0
+        self._q("hide_progress", 0)
+        self._q("status", 0, f"✓  {result.gene} ({result.uid}) in {_fmt_time(elapsed)}", _GREEN)
         self._q("enable_open")
         self._q("finished")
 

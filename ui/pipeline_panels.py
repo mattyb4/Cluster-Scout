@@ -492,9 +492,34 @@ class PipelineTabMixin:
             font=ctk.CTkFont(weight="bold"),
         ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
 
-        # Proteins list (gene symbols and/or UniProt accessions, run as a batch)
-        proteins_label_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        proteins_label_frame.grid(row=1, column=0, padx=(12, 6), pady=6, sticky="nw")
+        # Source toggle: batch of database-backed proteins, or one caller-provided CIF
+        source_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        source_frame.grid(row=1, column=0, columnspan=3, padx=12, pady=(0, 4), sticky="w")
+        ctk.CTkLabel(source_frame, text="Source:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 8))
+        if not hasattr(self, "_ca_source_var"):
+            self._ca_source_var = ctk.StringVar(value="Database")
+        ctk.CTkSegmentedButton(
+            source_frame, values=["Database", "Upload CIF file"],
+            variable=self._ca_source_var, command=self._on_ca_source_change,
+        ).pack(side="left")
+        help_icon(
+            source_frame,
+            "Database exports one or more proteins by gene/UniProt, using "
+            "AlphaFold DB's model (downloaded automatically if needed). "
+            "Upload CIF file instead uses a specific .cif you already have "
+            "-- e.g. a seeded AlphaFold Server prediction from the CIF "
+            "Variance tool's \"Generate AlphaFold Seeds JSON\" option -- for "
+            "a single protein, with nothing downloaded or added to the "
+            "shared structure cache.",
+        ).pack(side="left", padx=(6, 0))
+
+        # ── Database source: proteins list (gene symbols and/or UniProt accessions) ──
+        self._ca_database_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        self._ca_database_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self._ca_database_frame.grid_columnconfigure(1, weight=1)
+
+        proteins_label_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
+        proteins_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="nw")
         ctk.CTkLabel(proteins_label_frame, text="Proteins:", anchor="w").pack(side="left")
         help_icon(
             proteins_label_frame,
@@ -508,8 +533,8 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_proteins"):
             self._ca_proteins: list[str] = []
 
-        protein_input_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        protein_input_frame.grid(row=1, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        protein_input_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
+        protein_input_frame.grid(row=0, column=1, columnspan=2, padx=6, pady=6, sticky="w")
 
         self._ca_protein_input_var = ctk.StringVar(value="")
         protein_entry = ctk.CTkEntry(
@@ -526,15 +551,51 @@ class PipelineTabMixin:
 
         # Feedback for _add_ca_protein — hidden until there's something to say
         self._ca_protein_error_label = ctk.CTkLabel(
-            self._steps_outer, text="", text_color=_RED,
+            self._ca_database_frame, text="", text_color=_RED,
             font=ctk.CTkFont(size=11), anchor="w",
         )
-        self._ca_protein_error_label.grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 4), sticky="w")
+        self._ca_protein_error_label.grid(row=1, column=1, columnspan=2, padx=6, pady=(0, 4), sticky="w")
         self._ca_protein_error_label.grid_remove()
 
-        self._ca_proteins_list_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        self._ca_proteins_list_frame.grid(row=3, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="ew")
+        self._ca_proteins_list_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
+        self._ca_proteins_list_frame.grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="ew")
         self._refresh_ca_protein_chips()
+
+        # ── Upload-CIF source: one specific file + its UniProt ID ──
+        self._ca_custom_cif_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
+        self._ca_custom_cif_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self._ca_custom_cif_frame.grid_columnconfigure(1, weight=1)
+        self._ca_custom_cif_frame.grid_remove()  # Database is the default source
+
+        ctk.CTkLabel(self._ca_custom_cif_frame, text="CIF file:", anchor="w").grid(
+            row=0, column=0, padx=(12, 6), pady=6, sticky="w"
+        )
+        if not hasattr(self, "_ca_custom_cif_var"):
+            self._ca_custom_cif_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._ca_custom_cif_frame, textvariable=self._ca_custom_cif_var,
+        ).grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        ctk.CTkButton(
+            self._ca_custom_cif_frame, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_ca_custom_cif,
+        ).grid(row=0, column=2, padx=12, pady=6, sticky="e")
+
+        ctk.CTkLabel(self._ca_custom_cif_frame, text="UniProt ID:", anchor="w").grid(
+            row=1, column=0, padx=(12, 6), pady=(0, 6), sticky="w"
+        )
+        if not hasattr(self, "_ca_custom_cif_uniprot_var"):
+            self._ca_custom_cif_uniprot_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            self._ca_custom_cif_frame, textvariable=self._ca_custom_cif_uniprot_var, width=200,
+            placeholder_text="auto-detected, or enter if not found",
+        ).grid(row=1, column=1, padx=6, pady=(0, 6), sticky="w")
+
+        # Both frames above default to gridded/removed for a fresh "Database"
+        # source -- resync to whichever source was actually last selected,
+        # since this whole panel (and both frames) is torn down and rebuilt
+        # on every mode switch, but self._ca_source_var itself persists.
+        self._on_ca_source_change()
 
         from export_ca_coordinates import (
             MUTATION_DEFAULT_HIGH_COLOR,
@@ -560,13 +621,13 @@ class PipelineTabMixin:
         # Heatmaps section
         ctk.CTkLabel(
             self._steps_outer, text="Heatmaps:", font=ctk.CTkFont(weight="bold"),
-        ).grid(row=4, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
+        ).grid(row=3, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
 
         # Mutation heatmap
         if not hasattr(self, "_ca_mutation_heatmap_var"):
             self._ca_mutation_heatmap_var = ctk.BooleanVar(value=True)
         mut_heatmap_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_heatmap_frame.grid(row=5, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        mut_heatmap_frame.grid(row=4, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             mut_heatmap_frame, text="Mutation heatmap (patients within 10 Å)",
             variable=self._ca_mutation_heatmap_var,
@@ -582,7 +643,7 @@ class PipelineTabMixin:
 
         # Mutation heatmap colors (low/high swatches)
         mut_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_colors_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        mut_colors_frame.grid(row=5, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
         ctk.CTkLabel(mut_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
         color_swatch_button(mut_colors_frame, self._ca_mutation_low_var).pack(side="left")
         ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
@@ -606,7 +667,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_log_scale_var"):
             self._ca_log_scale_var = ctk.BooleanVar(value=False)
         log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        log_scale_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
+        log_scale_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
         self._ca_log_scale_checkbox = ctk.CTkCheckBox(
             log_scale_frame, text="Log-scale",
             variable=self._ca_log_scale_var,
@@ -627,7 +688,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_dim_confidence_var"):
             self._ca_dim_confidence_var = ctk.BooleanVar(value=False)
         dim_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        dim_frame.grid(row=8, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
+        dim_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
         self._ca_dim_confidence_checkbox = ctk.CTkCheckBox(
             dim_frame, text="Dim low-confidence residues",
             variable=self._ca_dim_confidence_var,
@@ -651,7 +712,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_plddt_heatmap_var"):
             self._ca_plddt_heatmap_var = ctk.BooleanVar(value=False)
         plddt_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_frame.grid(row=9, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        plddt_frame.grid(row=8, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             plddt_frame, text="pLDDT heatmap",
             variable=self._ca_plddt_heatmap_var,
@@ -669,7 +730,7 @@ class PipelineTabMixin:
 
         # pLDDT heatmap colors (low/high swatches)
         plddt_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_colors_frame.grid(row=10, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
+        plddt_colors_frame.grid(row=9, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
         ctk.CTkLabel(plddt_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
         color_swatch_button(plddt_colors_frame, self._ca_plddt_low_var).pack(side="left")
         ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
@@ -693,7 +754,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_mark_ptm_var"):
             self._ca_mark_ptm_var = ctk.BooleanVar(value=False)
         ptm_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        ptm_frame.grid(row=11, column=0, columnspan=3, padx=24, pady=2, sticky="w")
+        ptm_frame.grid(row=10, column=0, columnspan=3, padx=24, pady=2, sticky="w")
         ctk.CTkCheckBox(
             ptm_frame, text="Mark PTM sites",
             variable=self._ca_mark_ptm_var,
@@ -719,7 +780,7 @@ class PipelineTabMixin:
         if not hasattr(self, "_ca_mark_mutations_var"):
             self._ca_mark_mutations_var = ctk.BooleanVar(value=False)
         mut_marker_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_marker_frame.grid(row=12, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
+        mut_marker_frame.grid(row=11, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
         ctk.CTkCheckBox(
             mut_marker_frame, text="Show mutation markers",
             variable=self._ca_mark_mutations_var,
@@ -748,14 +809,44 @@ class PipelineTabMixin:
             self._steps_outer, text="●  Ready", width=100,
             anchor="e", text_color=_GRAY,
         )
-        status.grid(row=13, column=1, columnspan=2, padx=12, pady=6, sticky="e")
+        status.grid(row=12, column=1, columnspan=2, padx=12, pady=6, sticky="e")
         self._step_status_labels.append(status)
 
         bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
         bar.set(0)
-        bar.grid(row=13, column=0, padx=12, pady=6, sticky="w")
+        bar.grid(row=12, column=0, padx=12, pady=6, sticky="w")
         bar.grid_remove()
         self._step_progress_bars.append(bar)
+
+    def _on_ca_source_change(self, _value: str = "") -> None:
+        if self._ca_source_var.get() == "Upload CIF file":
+            self._ca_database_frame.grid_remove()
+            self._ca_custom_cif_frame.grid()
+        else:
+            self._ca_custom_cif_frame.grid_remove()
+            self._ca_database_frame.grid()
+
+    def _browse_ca_custom_cif(self) -> None:
+        """Open a file dialog for a user-supplied CIF and try to auto-fill its
+        UniProt ID from embedded metadata.
+
+        Unlike Single Protein mode's _browse_cif, this does NOT fall back to
+        the file's parent folder name when detection fails -- that heuristic
+        only makes sense for cif_models/{UniProt}/... paths, but a custom
+        upload (e.g. fresh out of an AlphaFold Server download or a
+        data/cif_comparison/ folder) can live anywhere, so a folder-name
+        guess here would usually just be wrong rather than merely unhelpful.
+        """
+        path = filedialog.askopenfilename(
+            title="Select CIF structure file",
+            filetypes=[("CIF files", "*.cif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self._ca_custom_cif_var.set(path)
+        uid = extract_uniprot_from_cif(Path(path))
+        if uid:
+            self._ca_custom_cif_uniprot_var.set(uid)
 
     def _on_ca_mutation_heatmap_toggle(self) -> None:
         """Keep the log-scale and dim-confidence checkboxes in sync with the

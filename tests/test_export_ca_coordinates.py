@@ -133,13 +133,17 @@ class TestLoadCaFromCif:
         cif = tmp_path / "model.cif"
         _write_synthetic_cif(
             cif, res_ids=[1, 2], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
-            coords=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]],
+            coords=[[0.0, 0.0, 0.0], [1.5, 0.0, 0.0]], b_factors=[92.3, 55.0],
         )
         rows = mod._load_ca_from_cif(cif)
         assert rows == [
-            {"residue": "A", "position": 1, "x": 0.0, "y": 0.0, "z": 0.0},
-            {"residue": "S", "position": 2, "x": 1.5, "y": 0.0, "z": 0.0},
-        ], f"each CA atom should produce a {{residue,position,x,y,z}} dict with coords rounded to 3dp, got {rows}"
+            {"residue": "A", "position": 1, "x": 0.0, "y": 0.0, "z": 0.0, "plddt": 92.3},
+            {"residue": "S", "position": 2, "x": 1.5, "y": 0.0, "z": 0.0, "plddt": 55.0},
+        ], (
+            f"each CA atom should produce a {{residue,position,x,y,z,plddt}} dict with "
+            f"coords rounded to 3dp and pLDDT (from the CIF's B-factor field) rounded to "
+            f"1dp, got {rows}"
+        )
 
     def test_returns_empty_list_when_chain_unparseable(self, tmp_path):
         cif = tmp_path / "garbage.cif"
@@ -1298,6 +1302,109 @@ class TestRunExportColors:
         assert "color green name" not in text and "orange target ab" not in text, (
             f"the old default marker colors should not appear once overridden, got:\n{text}"
         )
+
+
+class TestRunExportCustomCif:
+    def _write_cosmic(self, tmp_path):
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S2A", "S1", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return cosmic
+
+    def test_uses_custom_cif_without_touching_cif_models(self, tmp_path, monkeypatch):
+        # cif_models/ points somewhere that's never created, and any network
+        # call would fail the test -- proving the custom CIF path is used
+        # as-is, with no AlphaFold DB download and nothing written to the cache.
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models_unused")
+
+        def _fail_get(*a, **k):
+            raise AssertionError("should not query the AlphaFold DB when a custom CIF is given")
+        monkeypatch.setattr(mod.requests, "get", _fail_get)
+
+        custom_cif = tmp_path / "my_seeds" / "seed3.cif"
+        custom_cif.parent.mkdir(parents=True)
+        _write_synthetic_cif(
+            custom_cif,
+            res_ids=[1, 2, 3], res_names=["ALA", "SER", "GLY"], atom_names=["CA", "CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        )
+
+        result = mod.run_export(
+            uniprot="P04637", gene="TP53", cosmic_file=self._write_cosmic(tmp_path),
+            output_dir=tmp_path / "out", custom_cif_path=custom_cif, log_cb=lambda *_: None,
+        )
+
+        assert len(result.all_ca_df) == 3, (
+            f"CA coordinates should come from the custom CIF, got {len(result.all_ca_df)} rows"
+        )
+        assert not (tmp_path / "cif_models_unused").exists(), (
+            "nothing should be written to cif_models/ when using a custom CIF"
+        )
+
+    def test_custom_cif_always_treated_as_single_fragment(self, tmp_path, monkeypatch):
+        # Even a protein whose real AlphaFold DB model is multi-fragment should
+        # still get ChimeraX heatmap files when the caller supplies one custom
+        # CIF directly -- there's no second fragment to worry about.
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models_unused")
+        custom_cif = tmp_path / "seed1.cif"
+        _write_synthetic_cif(
+            custom_cif, res_ids=[1], res_names=["ALA"], atom_names=["CA"], coords=[[0.0, 0.0, 0.0]],
+        )
+
+        result = mod.run_export(
+            uniprot="P04637", gene="TP53", cosmic_file=self._write_cosmic(tmp_path),
+            output_dir=tmp_path / "out", custom_cif_path=custom_cif, log_cb=lambda *_: None,
+        )
+
+        assert result.mutation_chimerax_script_out is not None and result.mutation_chimerax_script_out.exists(), (
+            "a custom CIF is always exactly one file, so ChimeraX heatmap generation should never be skipped"
+        )
+
+    def test_auto_detects_uniprot_from_custom_cif_metadata_when_none_given(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models_unused")
+        custom_cif = tmp_path / "seed2.cif"
+        _write_synthetic_cif(
+            custom_cif, res_ids=[1, 2], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        with custom_cif.open("a") as f:
+            f.write("_ma_target_ref_db_details.db_accession   P04637\n")
+
+        gene_cache = tmp_path / "gene_cache.tsv"
+        pd.DataFrame([{"UniProt": "P04637", "gene": "TP53"}]).to_csv(gene_cache, sep="\t", index=False)
+        monkeypatch.setattr(mod, "GENE_CACHE", gene_cache)
+
+        result = mod.run_export(
+            cosmic_file=self._write_cosmic(tmp_path), output_dir=tmp_path / "out",
+            custom_cif_path=custom_cif, log_cb=lambda *_: None,
+        )
+        assert result.uid == "P04637", (
+            f"with no uniprot/gene given, the UniProt ID should be auto-detected from the "
+            f"custom CIF's own embedded metadata, got {result.uid!r}"
+        )
+
+    def test_raises_when_no_uniprot_gene_or_detectable_metadata(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models_unused")
+        custom_cif = tmp_path / "seed_no_metadata.cif"
+        _write_synthetic_cif(
+            custom_cif, res_ids=[1], res_names=["ALA"], atom_names=["CA"], coords=[[0.0, 0.0, 0.0]],
+        )
+        with pytest.raises(ValueError):
+            mod.run_export(
+                cosmic_file=self._write_cosmic(tmp_path), output_dir=tmp_path / "out",
+                custom_cif_path=custom_cif, log_cb=lambda *_: None,
+            )
+
+    def test_raises_when_custom_cif_does_not_exist(self, tmp_path):
+        with pytest.raises(ValueError):
+            mod.run_export(
+                uniprot="P04637", gene="TP53", cosmic_file=self._write_cosmic(tmp_path),
+                output_dir=tmp_path / "out", custom_cif_path=tmp_path / "does_not_exist.cif",
+                log_cb=lambda *_: None,
+            )
 
 
 class TestRunBatchExport:
