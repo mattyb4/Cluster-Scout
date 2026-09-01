@@ -1,3 +1,16 @@
+"""Headless CLI entry point for the mutation-proximity pipeline.
+
+Runs each pipeline step (scripts/1_filter.py through scripts/4_annotate.py)
+as its own subprocess in sequence, streaming its output live and stopping
+immediately if a step fails. This is the command-line equivalent of clicking
+"Run Pipeline" in the desktop app's Pipeline tab.
+
+--mode ptm-proximity (default) runs all 4 steps and writes
+Output/ptm_mutation_proximity_db.tsv. --mode mutation-clustering runs the
+same 4 steps against a different Step 1 input/output pair and writes
+Output/mutation_cluster_db.tsv instead -- see pipeline_utils.PTM_PROXIMITY_STEPS
+/MUTATION_CLUSTERING_STEPS for the exact step labels used in each mode.
+"""
 from __future__ import annotations
 
 import argparse

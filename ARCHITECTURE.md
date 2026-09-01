@@ -229,30 +229,7 @@ pass `encoding="utf-16"` or they'll appear corrupt.
 
 ---
 
-## 8. How to make common changes
-
-**Add a new annotation to step 4:** `4_annotate.py` currently does five
-annotations in one file. Add yours as a new function following the existing
-ones, wire it into the annotation pass, add its output column(s), and add a
-test file under `tests/` mirroring `test_4_annotate_*.py`. (If you have room to
-improve things: this file is a good candidate to split into an `annotators/`
-subpackage, one module per source.)
-
-**Add a new pipeline step:** create `scripts/N_name.py`, add it to the step
-list in `pipeline_utils.py`, and teach BOTH `main.py` and
-`pipeline_runner.py` to invoke it. Add a test file.
-
-**Add a new tab:** create `ui/newtab_tab.py` with a `NewTabMixin`, add it to the
-`App` base-class list in `app.py`, add a `self._build_newtab_tab()` call in
-`_build_ui`, and initialize any new `self._` attributes in `App.__init__`.
-
-**Add a standalone analysis tool:** model it on `radius_sweep.py` — import from
-`pipeline_utils`, take argparse args, write to `Output/`. Surface it in the
-Analysis Tools tab if it should be GUI-accessible.
-
----
-
-## 9. Testing
+## 8. Testing
 
 Tests live in `tests/`, one file per pipeline step / tool, run with `pytest`
 (configured in `pyproject.toml`). The suite is large and is the best
@@ -263,7 +240,7 @@ standalone scripts.
 
 ---
 
-## 10. Conventions & gotchas
+## 9. Conventions & gotchas
 
 - **Two shared-utility modules**, mirroring the two layers: `pipeline_utils.py`
   (backend) and `ui/common.py` (frontend). Don't import GUI code into the

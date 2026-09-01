@@ -1,3 +1,16 @@
+"""Pipeline Step 2: download AlphaFold structures for every protein Step 1 found.
+
+Reads UniProt accessions from a column of the given input table (Step 1's
+hotspot TSV in the main pipeline, but usable standalone against any table),
+and for each one queries the AlphaFold DB API, downloading the canonical
+model's CIF (or PDB) file -- and, with --also_pae, its Predicted Aligned
+Error JSON -- into out_dir/{accession}/. Every accession is checked against
+AlphaFold DB's current version in parallel, even if a file with a matching
+name already exists locally, so a newer release is picked up (and the stale
+version removed) automatically rather than only downloading what's missing.
+Writes a per-accession status report (download_report.tsv) and a filtered
+error log (download_errors.tsv) to --logs_dir.
+"""
 from __future__ import annotations
 
 import argparse

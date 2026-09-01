@@ -1,3 +1,22 @@
+"""Pipeline Step 1: filter and merge the raw input data into the per-protein
+hotspot table the rest of the pipeline reads.
+
+--mode ptm-proximity (default) merges PTMD's disease-associated PTM sites
+with COSMIC's recurrent missense mutations (>= HOTSPOT_MIN_AFFECTED_CASES
+distinct samples, confirmed/reported-somatic only), keeping only genes that
+have both a PTM site and at least one qualifying mutation. Writes
+data/steps/PTMD_COSMIC_hotspots_by_protein.tsv.
+
+--mode mutation-clustering keeps every COSMIC hotspot mutation mapped to a
+reviewed human UniProt accession, with no PTM requirement. Writes
+data/steps/COSMIC_hotspots_by_protein.tsv.
+
+Both modes also map UniProt accessions to gene symbols (or vice versa) via
+the UniProt REST API, and flag genes where COSMIC's mutation numbering
+follows a different UniProt isoform than the canonical AlphaFold-modeled
+sequence -- both cached under data/cache/ so repeat runs only look up
+whatever wasn't already resolved.
+"""
 import argparse
 import ast
 import re

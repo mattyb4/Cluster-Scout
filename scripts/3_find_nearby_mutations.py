@@ -1,3 +1,23 @@
+"""Pipeline Step 3: compute 3D distances between hotspots and mutations using
+the downloaded AlphaFold structures.
+
+--mode ptm-proximity (default) finds, for each PTM site, every COSMIC hotspot
+mutation on that protein whose alpha-carbon is within DISTANCE_CUTOFF
+Angstroms, splitting results into "within 5 sequence positions" (likely
+directly disrupting) vs. "more than 5" (spatially close but sequence-distant)
+of the PTM site. Writes Output/ptm_mutation_proximity_db.tsv (one row per PTM
+site) and Output/ptm_mutation_proximity_long.tsv (one row per PTM/mutation
+pair); Step 4 fills in the annotation columns both files leave blank here.
+
+--mode mutation-clustering instead finds, for each hotspot mutation, every
+OTHER hotspot mutation on that protein within the same cutoff -- symmetric,
+so a nearby pair (A, B) produces one row anchored on A and one anchored on B.
+Writes Output/mutation_cluster_db.tsv and Output/mutation_cluster_long.tsv.
+
+Positions the structure has no residue for, or that could only be reached via
+a residue/PTM mismatch, are logged (not silently dropped) to
+Output/logs/ptm_skipped.tsv or mutation_cluster_skipped.tsv.
+"""
 import sys
 import numpy as np
 from pathlib import Path
