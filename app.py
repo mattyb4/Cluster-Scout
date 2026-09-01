@@ -45,13 +45,13 @@ import tkinter as tk  # noqa: E402
 import customtkinter as ctk  # noqa: E402
 from PIL import Image, ImageTk  # noqa: E402
 
-from ui.common import PROJECT_ROOT, MIN_UI_SCALE, MAX_UI_SCALE, UI_SCALE_STEP, _BLUE  # noqa: E402
+from ui.analysis_tools_tab import AnalysisToolsTabMixin  # noqa: E402
+from ui.common import _BLUE, MAX_UI_SCALE, MIN_UI_SCALE, PROJECT_ROOT, UI_SCALE_STEP  # noqa: E402
+from ui.help_tab import HelpTabMixin  # noqa: E402
 from ui.pipeline_panels import PipelineTabMixin  # noqa: E402
 from ui.pipeline_runner import PipelineRunnerMixin  # noqa: E402
 from ui.results_tab import ResultsTabMixin  # noqa: E402
 from ui.visualization_tab import VisualizationTabMixin  # noqa: E402
-from ui.analysis_tools_tab import AnalysisToolsTabMixin  # noqa: E402
-from ui.help_tab import HelpTabMixin  # noqa: E402
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")

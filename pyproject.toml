@@ -22,7 +22,26 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "ruff>=0.14.0",
+    "mypy>=1.19.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# A deliberately conservative starting set for first-time adoption on an
+# existing codebase -- pyflakes + pycodestyle + import sorting. Ruff enables
+# nearly every rule family (bandit, pylint, bugbear, pyupgrade, etc.) when no
+# select is given at all, which is too much noise (e.g. flags every
+# deliberate `except Exception` around network calls) to turn on at once.
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["app.py", "main.py", "scripts", "ui", "tests"]
+ignore_missing_imports = true

@@ -3,8 +3,6 @@ import csv
 from pathlib import Path
 
 import pandas as pd
-import pytest
-
 from conftest import import_script
 
 mod = import_script("analyze_single_cif_nearby_mutations.py")

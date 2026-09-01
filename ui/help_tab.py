@@ -43,6 +43,7 @@ class HelpTabMixin:
 
         try:
             import webbrowser
+
             from tkinterweb import HtmlFrame
             frame = HtmlFrame(
                 tab, messages_enabled=False,

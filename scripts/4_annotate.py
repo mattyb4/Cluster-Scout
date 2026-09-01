@@ -35,9 +35,16 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, AA3TO1, MUT_RE, SITE_RE, fmt_time,
-    find_canonical_cif, load_first_chain,
-    input_dir, resolve_input_file, INTERACTORS_1433_INPUT_DIR,
+    AA3TO1,
+    INTERACTORS_1433_INPUT_DIR,
+    MUT_RE,
+    SITE_RE,
+    find_canonical_cif,
+    fmt_time,
+    input_dir,
+    load_first_chain,
+    project_root,
+    resolve_input_file,
 )
 
 PROJECT_ROOT = project_root(__file__)

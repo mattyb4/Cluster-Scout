@@ -16,8 +16,15 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from ui.common import (
-    _GRAY, _GREEN, _RED, _YELLOW, add_resize_grip, isolate_textbox_scroll,
-    help_icon, _RADIUS_SWEEP_HELP, _CIF_VARIANCE_HELP,
+    _CIF_VARIANCE_HELP,
+    _GRAY,
+    _GREEN,
+    _RADIUS_SWEEP_HELP,
+    _RED,
+    _YELLOW,
+    add_resize_grip,
+    help_icon,
+    isolate_textbox_scroll,
 )
 
 
@@ -41,8 +48,8 @@ class AnalysisToolsTabMixin:
     def _build_analysis_tools_tab(self, tab) -> None:
         import matplotlib
         matplotlib.use("TkAgg")
-        from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
 
         self._analysis_subtool_var = ctk.StringVar(value="Radius Sweep")
 
@@ -299,7 +306,7 @@ class AnalysisToolsTabMixin:
         if not token:
             return
 
-        from radius_sweep import PTM_TSV, resolve_gene_token, has_cif, has_multiple_fragments
+        from radius_sweep import PTM_TSV, has_cif, has_multiple_fragments, resolve_gene_token
 
         if not PTM_TSV.exists():
             # Can't validate yet -- the Run button's own check reports this clearly

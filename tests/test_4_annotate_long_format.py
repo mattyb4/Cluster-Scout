@@ -3,8 +3,6 @@ that fills ~15 annotation columns on the long-format PTM/mutation table
 in-place, aggregating results from all 5 annotation phases.
 """
 import pandas as pd
-import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

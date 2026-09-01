@@ -6,7 +6,6 @@ Each fetch/compute function should:
    markers) so they aren't re-queried on the next run
 """
 import pytest
-
 from conftest import FakeResponse
 
 

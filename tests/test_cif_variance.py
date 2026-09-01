@@ -4,7 +4,6 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-
 from conftest import FakeResponse, import_script
 
 mod = import_script("cif_variance.py")
@@ -18,7 +17,7 @@ def _write_cif(path, residues, chain_id="A"):
     *residues* is a list of (resname, position, [x,y,z], bfactor, hetero) --
     hetero=True marks a HETATM (e.g. water), which load_ca_data must skip.
     """
-    from Bio.PDB import StructureBuilder, MMCIFIO
+    from Bio.PDB import MMCIFIO, StructureBuilder
 
     sb = StructureBuilder.StructureBuilder()
     sb.init_structure(path.stem)

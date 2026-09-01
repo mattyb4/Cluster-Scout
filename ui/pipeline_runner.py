@@ -18,21 +18,35 @@ import threading
 import time
 from pathlib import Path
 
+import customtkinter as ctk
 import psutil
 
-import customtkinter as ctk
-
 from ui.common import (
-    PROJECT_ROOT, SCRIPTS_DIR,
-    _GRAY, _BLUE, _RED, _GREEN, _YELLOW,
-    _fmt_time, _load_runtimes, _save_runtimes, _detect_run_type,
-    _CACHE_ITEMS, _cache_entry_count,
-    PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    input_dir, resolve_input_file,
-    COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
+    _BLUE,
+    _CACHE_ITEMS,
+    _GRAY,
+    _GREEN,
+    _RED,
+    _YELLOW,
+    COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
-    validate_cosmic_file, validate_ptmd_file, validate_1433_file,
+    INTERACTORS_1433_INPUT_DIR,
+    MUTATION_CLUSTERING_STEPS,
+    PROJECT_ROOT,
+    PTM_PROXIMITY_STEPS,
+    PTMD_INPUT_DIR,
+    SCRIPTS_DIR,
+    _cache_entry_count,
+    _detect_run_type,
+    _fmt_time,
+    _load_runtimes,
+    _save_runtimes,
     hotspots_tsv_path,
+    input_dir,
+    resolve_input_file,
+    validate_1433_file,
+    validate_cosmic_file,
+    validate_ptmd_file,
 )
 
 

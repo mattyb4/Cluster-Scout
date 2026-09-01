@@ -6,8 +6,6 @@ test_single_protein_append.py.
 import csv
 
 import numpy as np
-import pytest
-
 from conftest import import_script
 
 mod = import_script("analyze_single_cif_nearby_mutations.py")
@@ -20,8 +18,8 @@ def _make_residue(resname, pos, coord=(0.0, 0.0, 0.0), bfactor=80.0, hetero=Fals
     `"CA" in residue`) works the same whether the chain is a real Bio.PDB
     Chain or just a plain list of Residue objects.
     """
-    from Bio.PDB.Residue import Residue
     from Bio.PDB.Atom import Atom
+    from Bio.PDB.Residue import Residue
 
     hetfield = "H" if hetero else " "
     res = Residue((hetfield, pos, " "), resname, " ")

@@ -31,10 +31,13 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root,
-    find_canonical_cif, load_first_chain,
-    sample_permutation_indices, permutation_pvalue, benjamini_hochberg,
+    benjamini_hochberg,
+    find_canonical_cif,
     hotspots_tsv_path,
+    load_first_chain,
+    permutation_pvalue,
+    project_root,
+    sample_permutation_indices,
 )
 
 PROJECT_ROOT = project_root(__file__)

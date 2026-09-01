@@ -11,7 +11,6 @@ import types
 import numpy as np
 import pandas as pd
 import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

@@ -1,10 +1,8 @@
 """Unit tests for 14-3-3 annotation functions in scripts/4_annotate.py."""
-import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

@@ -8,7 +8,6 @@ them before AND after each test so no test's cached data can leak into another.
 import numpy as np
 import pandas as pd
 import pytest
-
 from conftest import import_script
 
 mod = import_script("radius_sweep.py")

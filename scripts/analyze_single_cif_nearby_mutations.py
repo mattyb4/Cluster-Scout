@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 
-import sys
-from Bio.PDB import MMCIFParser
-import numpy as np
-from pathlib import Path
 import argparse
-import re
 import csv
+import re
+import sys
+from pathlib import Path
 from typing import Any
 
+import numpy as np
+from Bio.PDB import MMCIFParser
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_utils import AA3TO1, load_pae_matrix, hotspots_tsv_path  # noqa: E402
+from pipeline_utils import AA3TO1, hotspots_tsv_path, load_pae_matrix  # noqa: E402
 
 parser = MMCIFParser(QUIET=True)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -159,7 +160,7 @@ def parse_ptm_entries(uniprot, tsv_path):
 
     return sorted([(site, pos, ptm_type) for (site, pos), ptm_type in entries.items()], key=lambda x: x[1])
 
-def parse_mutation_positions(ptm_pos, tsv_path, uniprot=None): 
+def parse_mutation_positions(ptm_pos, tsv_path, uniprot=None):
     mutation_map = {}
 
     with tsv_path.open("r", encoding="utf-8", newline="") as handle:

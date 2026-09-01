@@ -21,13 +21,43 @@ OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 from pipeline_utils import (  # noqa: E402
-    PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    input_dir, resolve_input_file, extract_uniprot_from_cif,
-    COSMIC_INPUT_DIR, PTMD_INPUT_DIR, INTERACTORS_1433_INPUT_DIR,
-    COSMIC_SOMATIC_STATUSES, fmt_time as _fmt_time,
-    validate_cosmic_file, validate_ptmd_file, validate_1433_file,
-    get_protein_length, hotspots_tsv_path,
+    COSMIC_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES,
+    INTERACTORS_1433_INPUT_DIR,
+    MUTATION_CLUSTERING_STEPS,
+    PTM_PROXIMITY_STEPS,
+    PTMD_INPUT_DIR,
+    extract_uniprot_from_cif,
+    get_protein_length,
+    hotspots_tsv_path,
+    input_dir,
+    resolve_input_file,
+    validate_1433_file,
+    validate_cosmic_file,
+    validate_ptmd_file,
 )
+from pipeline_utils import (  # noqa: E402
+    fmt_time as _fmt_time,
+)
+
+# Names imported above purely to be re-exported for sibling ui/*.py modules
+# to `from ui.common import ...` -- not used directly in this file, so a
+# linter's unused-import check would otherwise (incorrectly) flag and even
+# auto-remove them. Mirrors pipeline_utils.py's own role as the backend
+# scripts' single shared-utilities module: ui/common.py is that module for
+# the UI layer, so its "usage" is legitimately elsewhere.
+__all__ = [
+    "COSMIC_SOMATIC_STATUSES",
+    "INTERACTORS_1433_INPUT_DIR",
+    "MUTATION_CLUSTERING_STEPS",
+    "PTM_PROXIMITY_STEPS",
+    "_fmt_time",
+    "extract_uniprot_from_cif",
+    "get_protein_length",
+    "hotspots_tsv_path",
+    "resolve_input_file",
+    "validate_1433_file",
+]
 
 # 14-3-3 confirmed-interactors file isn't listed here: it's bundled with the app
 # (data/input/1433_interactors/), not something the user provides, so it's kept

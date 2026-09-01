@@ -32,7 +32,10 @@ from Bio.PDB import MMCIFParser, Superimposer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, AA3TO1, extract_uniprot_from_cif, hotspots_tsv_path,
+    AA3TO1,
+    extract_uniprot_from_cif,
+    hotspots_tsv_path,
+    project_root,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -97,7 +100,6 @@ def align_to_reference(ref_coords: np.ndarray, mobile_coords: np.ndarray,
     mob_idx = [mobile_positions.index(p) for p in sorted(shared)]
 
     from Bio.PDB.Atom import Atom
-    from Bio.PDB.Residue import Residue
 
     ref_atoms = []
     mob_atoms = []

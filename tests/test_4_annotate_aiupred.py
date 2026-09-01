@@ -1,9 +1,6 @@
 """Unit tests for AIUPred disorder-score (Phase 4) functions in scripts/4_annotate.py."""
-import json
 
 import pandas as pd
-import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

@@ -22,16 +22,22 @@ import ast
 import re
 import sys
 import time
-import requests
-import pandas as pd
 from pathlib import Path
+
+import pandas as pd
+import requests
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, COSMIC_SOMATIC_STATUSES, fmt_time,
-    input_dir, resolve_input_file, COSMIC_INPUT_DIR, PTMD_INPUT_DIR,
+    COSMIC_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES,
+    PTMD_INPUT_DIR,
+    fmt_time,
     hotspots_tsv_path,
+    input_dir,
+    project_root,
+    resolve_input_file,
 )
 
 PROJECT_ROOT = project_root(__file__)

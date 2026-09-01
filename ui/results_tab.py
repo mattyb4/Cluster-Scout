@@ -15,12 +15,25 @@ import re
 import customtkinter as ctk
 
 from ui.common import (
-    _MUT_ENTRY_RE, _PP_LABEL, _PTM_TV_COLS, _MUT_TV_COLS, _MUT_LONG_SRC_MAP,
-    _PTM_COL_HELP, _MUT_COL_HELP,
-    _ANCHOR_TV_COLS, _NEARBY_TV_COLS, _CLUSTER_LONG_SRC_MAP,
-    _ANCHOR_COL_HELP, _NEARBY_COL_HELP,
-    _RED, _GREEN, _YELLOW, _BLUE,
-    _load_column_prefs, _save_column_prefs, help_icon,
+    _ANCHOR_COL_HELP,
+    _ANCHOR_TV_COLS,
+    _BLUE,
+    _CLUSTER_LONG_SRC_MAP,
+    _GREEN,
+    _MUT_COL_HELP,
+    _MUT_ENTRY_RE,
+    _MUT_LONG_SRC_MAP,
+    _MUT_TV_COLS,
+    _NEARBY_COL_HELP,
+    _NEARBY_TV_COLS,
+    _PP_LABEL,
+    _PTM_COL_HELP,
+    _PTM_TV_COLS,
+    _RED,
+    _YELLOW,
+    _load_column_prefs,
+    _save_column_prefs,
+    help_icon,
 )
 
 _PTM_TV_SRC_IDS = [c[1] for c in _PTM_TV_COLS if c[1] != "#col"]

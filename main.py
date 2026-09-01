@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-from pipeline_utils import PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS, hotspots_tsv_path  # noqa: E402
+from pipeline_utils import MUTATION_CLUSTERING_STEPS, PTM_PROXIMITY_STEPS, hotspots_tsv_path  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"

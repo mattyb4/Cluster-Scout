@@ -72,10 +72,17 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, AA3TO1, COSMIC_SOMATIC_STATUSES,
-    find_canonical_cifs, load_first_chain, get_plddt_map,
-    input_dir, resolve_input_file, COSMIC_INPUT_DIR,
-    hotspots_tsv_path, looks_like_uniprot_id,
+    AA3TO1,
+    COSMIC_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES,
+    find_canonical_cifs,
+    get_plddt_map,
+    hotspots_tsv_path,
+    input_dir,
+    load_first_chain,
+    looks_like_uniprot_id,
+    project_root,
+    resolve_input_file,
 )
 
 PROJECT_ROOT = project_root(__file__)

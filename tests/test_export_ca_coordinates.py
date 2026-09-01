@@ -2,8 +2,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-
-from conftest import import_script, FakeResponse
+from conftest import FakeResponse, import_script
 
 mod = import_script("export_ca_coordinates.py")
 

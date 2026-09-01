@@ -19,7 +19,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Any, Optional
 
 import pandas as pd
 import requests

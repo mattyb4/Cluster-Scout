@@ -29,9 +29,16 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, find_canonical_cif, find_canonical_cifs, load_first_chain,
-    COSMIC_SOMATIC_STATUSES, input_dir, resolve_input_file, COSMIC_INPUT_DIR,
-    hotspots_tsv_path, looks_like_uniprot_id,
+    COSMIC_INPUT_DIR,
+    COSMIC_SOMATIC_STATUSES,
+    find_canonical_cif,
+    find_canonical_cifs,
+    hotspots_tsv_path,
+    input_dir,
+    load_first_chain,
+    looks_like_uniprot_id,
+    project_root,
+    resolve_input_file,
 )
 
 PROJECT_ROOT = project_root(__file__)
@@ -370,7 +377,7 @@ def run_sweep(
         cif_dir = MODELS_ROOT / uid
         cif_file = find_canonical_cif(cif_dir) if cif_dir.is_dir() else None
         if cif_file is None:
-            log_cb(f"  No CIF file found, skipping")
+            log_cb("  No CIF file found, skipping")
             continue
 
         if has_multiple_fragments(uid):
@@ -379,7 +386,7 @@ def run_sweep(
 
         chain = load_first_chain(cif_file)
         if chain is None:
-            log_cb(f"  Could not parse CIF, skipping")
+            log_cb("  Could not parse CIF, skipping")
             continue
 
         all_ca = get_all_ca_coords(chain)
@@ -391,7 +398,7 @@ def run_sweep(
                f"(>= {min_cases} samples), {protein_length} residues")
 
         if not ptm_coords:
-            log_cb(f"  No PTM coordinates found, skipping")
+            log_cb("  No PTM coordinates found, skipping")
             continue
 
         avg_counts = sweep_radii(ptm_coords, mutation_coords, radii)

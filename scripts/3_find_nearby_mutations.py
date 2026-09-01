@@ -18,21 +18,27 @@ Positions the structure has no residue for, or that could only be reached via
 a residue/PTM mismatch, are logged (not silently dropped) to
 Output/logs/ptm_skipped.tsv or mutation_cluster_skipped.tsv.
 """
-import sys
-import numpy as np
-from pathlib import Path
-import re
-import csv
-import json
 import argparse
+import csv
+import re
+import sys
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
-    project_root, AA3TO1, MUT_RE, SITE_RE,
-    find_canonical_cif, load_first_chain, load_pae_matrix, get_plddt_map,
+    AA3TO1,
+    MUT_RE,
+    SITE_RE,
+    find_canonical_cif,
+    get_plddt_map,
     hotspots_tsv_path,
+    load_first_chain,
+    load_pae_matrix,
+    project_root,
 )
 
 PROJECT_ROOT = project_root(__file__)

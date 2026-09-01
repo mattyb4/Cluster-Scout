@@ -1,8 +1,6 @@
 """Unit tests for the post-hoc PolyPhen-class filter in scripts/4_annotate.py
 (applied to the wide-format proximity DB after Phase 2 has tagged mutations)."""
 import pandas as pd
-import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

@@ -10,9 +10,20 @@ import re
 import customtkinter as ctk
 
 from ui.common import (
-    _MUT_ENTRY_RE, _PP_LABEL, _PP_COLORS, _PTM_MARKER_COLOR, _NEEDLE_DEFAULT_COLOR,
-    _RED, _YELLOW, _GREEN, _CIF_DIR, _DOMAIN_TYPE_COLORS, _DOMAIN_TYPE_LANES,
-    _DOMAIN_TYPE_FALLBACK_COLOR, _DOMAIN_TYPE_FALLBACK_LANE, _load_interpro_entries,
+    _CIF_DIR,
+    _DOMAIN_TYPE_COLORS,
+    _DOMAIN_TYPE_FALLBACK_COLOR,
+    _DOMAIN_TYPE_FALLBACK_LANE,
+    _DOMAIN_TYPE_LANES,
+    _GREEN,
+    _MUT_ENTRY_RE,
+    _NEEDLE_DEFAULT_COLOR,
+    _PP_COLORS,
+    _PP_LABEL,
+    _PTM_MARKER_COLOR,
+    _RED,
+    _YELLOW,
+    _load_interpro_entries,
     get_protein_length,
 )
 
@@ -21,8 +32,8 @@ class VisualizationTabMixin:
     def _build_viz_tab(self, tab) -> None:
         import matplotlib
         matplotlib.use("TkAgg")
-        from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
 
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(3, weight=1)
@@ -346,8 +357,8 @@ class VisualizationTabMixin:
     # ── Visualization: whole-protein plot area ──────────────────────────────
 
     def _build_viz_whole_protein_area(self, tab) -> None:
-        from matplotlib.figure import Figure
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
 
         self._viz_whole_protein_frame = ctk.CTkFrame(tab, fg_color="transparent")
         self._viz_whole_protein_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
@@ -726,8 +737,8 @@ class VisualizationTabMixin:
 
     def _measure_text_widths_px(self, texts: list[str], fontsize: float) -> list[float]:
         """Real rendered pixel widths for *texts*, via a scratch figure."""
-        from matplotlib.figure import Figure as _Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure as _Figure
 
         scratch_fig = _Figure(dpi=100)
         canvas = FigureCanvasAgg(scratch_fig)

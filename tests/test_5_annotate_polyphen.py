@@ -1,7 +1,6 @@
 """Unit tests for PolyPhen-2 annotation functions in scripts/4_annotate.py."""
 import pandas as pd
 import pytest
-
 from conftest import import_script
 
 mod = import_script("4_annotate.py")

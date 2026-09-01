@@ -6,19 +6,30 @@ handles simple input events (browsing for a file, toggling the log).
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from tkinter import filedialog
-import shutil
 
 import customtkinter as ctk
 from PIL import Image
 
 from ui.common import (
-    PROJECT_ROOT, OUTPUT_DIR, _INPUT_FOLDERS,
-    _GRAY, _RED, _GREEN, _YELLOW,
-    PTM_PROXIMITY_STEPS, MUTATION_CLUSTERING_STEPS,
-    resolve_input_file, extract_uniprot_from_cif, help_icon, add_resize_grip,
-    isolate_textbox_scroll, _MODE_HELP, color_swatch_button,
+    _GRAY,
+    _GREEN,
+    _INPUT_FOLDERS,
+    _MODE_HELP,
+    _RED,
+    _YELLOW,
+    MUTATION_CLUSTERING_STEPS,
+    OUTPUT_DIR,
+    PROJECT_ROOT,
+    PTM_PROXIMITY_STEPS,
+    add_resize_grip,
+    color_swatch_button,
+    extract_uniprot_from_cif,
+    help_icon,
+    isolate_textbox_scroll,
+    resolve_input_file,
 )
 
 
@@ -526,9 +537,12 @@ class PipelineTabMixin:
         self._refresh_ca_protein_chips()
 
         from export_ca_coordinates import (
-            MUTATION_DEFAULT_LOW_COLOR, MUTATION_DEFAULT_HIGH_COLOR,
-            PLDDT_DEFAULT_LOW_COLOR, PLDDT_DEFAULT_HIGH_COLOR,
-            PTM_MARKER_DEFAULT_COLOR, MUTATION_MARKER_DEFAULT_COLOR,
+            MUTATION_DEFAULT_HIGH_COLOR,
+            MUTATION_DEFAULT_LOW_COLOR,
+            MUTATION_MARKER_DEFAULT_COLOR,
+            PLDDT_DEFAULT_HIGH_COLOR,
+            PLDDT_DEFAULT_LOW_COLOR,
+            PTM_MARKER_DEFAULT_COLOR,
         )
         if not hasattr(self, "_ca_mutation_low_var"):
             self._ca_mutation_low_var = ctk.StringVar(value=MUTATION_DEFAULT_LOW_COLOR)
