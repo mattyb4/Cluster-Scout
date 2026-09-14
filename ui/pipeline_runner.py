@@ -862,7 +862,7 @@ class PipelineRunnerMixin:
             from radius_sweep import run_sweep
             result = run_sweep(
                 genes, radii, min_cases=min_cases, unfiltered=unfiltered,
-                output_tsv_path=self._output_dir / "radius_sweep.tsv",
+                output_tsv_path=Path(self._radius_output_dir_var.get()) / "radius_sweep.tsv",
                 log_cb=lambda line: self._q("log", line),
             )
         except ImportError as exc:
@@ -919,7 +919,7 @@ class PipelineRunnerMixin:
             from cif_variance import run_variance_analysis
             result = run_variance_analysis(
                 input_dir=input_dir,
-                output_dir=self._output_dir / "cif_variance",
+                output_dir=Path(self._variance_output_dir_var.get()),
                 top=top,
                 range_=range_,
                 align_range=align_range,
@@ -1009,7 +1009,7 @@ class PipelineRunnerMixin:
             from export_ca_coordinates import run_batch_export
             items = run_batch_export(
                 tokens,
-                output_dir=self._output_dir / "coordinates",
+                output_dir=Path(self._ca_output_dir_var.get()),
                 progress_cb=_progress,
                 log_cb=lambda line: self._q("log", line),
                 **self._ca_heatmap_kwargs(),
@@ -1069,7 +1069,7 @@ class PipelineRunnerMixin:
             result = run_export(
                 uniprot=uniprot,
                 custom_cif_path=cif_path,
-                output_dir=self._output_dir / "coordinates",
+                output_dir=Path(self._ca_output_dir_var.get()),
                 log_cb=lambda line: self._q("log", line),
                 **self._ca_heatmap_kwargs(),
             )
@@ -1499,12 +1499,20 @@ class PipelineRunnerMixin:
 
     # ── Output folder ────────────────────────────────────────────────────────
 
-    def _open_output_folder(self):
-        out = self._output_dir
-        out.mkdir(parents=True, exist_ok=True)
+    def _open_folder(self, path: Path) -> None:
+        """Open *path* in the OS file manager, creating it first if it
+        doesn't exist yet -- shared by the Pipeline tab's "Open Output
+        Folder" button and the Analysis Tools tab's per-subtool ones.
+        """
+        path.mkdir(parents=True, exist_ok=True)
         if platform.system() == "Windows":
-            subprocess.run(["explorer", str(out)], check=False)
+            subprocess.run(["explorer", str(path)], check=False)
         elif platform.system() == "Darwin":
-            subprocess.run(["open", str(out)], check=False)
+            subprocess.run(["open", str(path)], check=False)
         else:
-            subprocess.run(["xdg-open", str(out)], check=False)
+            subprocess.run(["xdg-open", str(path)], check=False)
+
+    def _open_output_folder(self):
+        """Open whichever output folder the Pipeline tab's active mode
+        currently writes to (see PipelineTabMixin._active_output_dir_var)."""
+        self._open_folder(Path(self._active_output_dir_var().get()))

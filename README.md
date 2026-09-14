@@ -192,9 +192,9 @@ The **Structure Heatmaps** mode (Pipeline tab) exports the 3D coordinates of alp
 
 **Source: Database vs. Upload CIF file.** Database (the default) works from one or more gene symbols/UniProt accessions, resolving structures against AlphaFold DB as described below. Upload CIF file instead lets you point directly at a specific `.cif` you already have — e.g. a seeded [AlphaFold Server](https://alphafoldserver.com) prediction you generated yourself via the CIF Variance tool's "Generate AlphaFold Seeds JSON" option, if you liked how a particular seed came out and want its own heatmaps/coordinates rather than the AlphaFold DB canonical model. This mode always covers exactly one protein (the batch list doesn't apply), never downloads anything or touches `cif_models/`, and is always treated as single-fragment (there's only one file, so the multi-fragment skip below never applies to it). The UniProt ID is auto-detected from the CIF's own embedded metadata when possible; if that fails, enter it directly — gene and other lookups (COSMIC mutations, PTM sites) proceed from there exactly as in Database mode. On the CLI, use `--custom-cif path/to/model.cif` with zero or one positional protein token.
 
-**Batch proteins (Database source):** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the batch. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
+**Batch proteins (Database source):** add gene symbols and/or UniProt accessions to a list (each auto-detected, `+ Add` button or Enter), then run — every protein in the list is exported in turn with the same options applied to all of them. Each entry is validated upfront, the same as Radius Sweep's gene list: on Add, the token is resolved (gene ↔ UniProt) and checked against AlphaFold DB for a canonical entry — run off the main thread so the UI stays responsive — and an unresolvable gene or bad accession is rejected with an explanation immediately rather than only failing partway through a run. A protein spanning multiple AlphaFold fragments is still added (coordinate export covers every fragment) but flagged with a non-blocking warning, since the ChimeraX heatmap/marker scripts are single-fragment only. COSMIC is scanned once and reused for the whole batch rather than re-read per protein.
 
-If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`), so the folder is identifiable by gene name at a glance rather than only by UniProt accession:
+If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `{gene}_{UniProt}/` subfolder (e.g. `TP53_P04637`) of Structure Heatmaps' output folder — `Output/coordinates/` by default, but independently changeable from the Pipeline tab's other modes: selecting Structure Heatmaps swaps the "Output folder" section to its own folder/Change/Reset/Open Output Folder, separate from the shared folder PTM Proximity/Mutation Clustering/Single Protein use.
 
 - **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `plddt` column (AlphaFold's per-residue confidence, read from the CIF's own B-factor field) and a `patients_within_10A` column (total COSMIC patient count summed across all missense mutations within 10 Å of that residue)
 - **`mutation_ca.tsv`** — coordinates and `plddt` only at positions with confirmed somatic missense mutations in COSMIC, plus the mutation labels and patient counts
@@ -203,7 +203,7 @@ If a protein's CIF file hasn't been downloaded yet, it's fetched automatically f
 
 | Option | Output file(s) | Effect |
 |---|---|---|
-| Mutation heatmap (on by default) | `mutations.defattr`, `mutations_view.cxc` | Colors the cartoon by `patients_within_10A`, sequential red palette by default |
+| Mutation heatmap (off by default in the GUI; on by default on the CLI) | `mutations.defattr`, `mutations_view.cxc` | Colors the cartoon by `patients_within_10A`, sequential red palette by default |
 | &nbsp;&nbsp;↳ Log-scale | — | Colors by `log1p(patients_within_10A)` instead of the raw count, for heavily right-skewed data |
 | &nbsp;&nbsp;↳ Dim low-confidence residues | — | Fades each residue in proportion to how low its pLDDT is (`100 - pLDDT` percent transparent); switches that script's lighting from ChimeraX's `soft` preset to `simple`, since soft's ambient shadows render incorrectly once part of a model is transparent |
 | pLDDT heatmap | `plddt_view.cxc` | Colors the cartoon by AlphaFold's own per-residue confidence, using ChimeraX's built-in `alphafold` palette by default |
@@ -226,7 +226,7 @@ uv run scripts/export_ca_coordinates.py TP53 EGFR P04637
 
 ## Finding the Optimal Distance Cutoff
 
-Also available from the **Analysis Tools** tab (a gene/UniProt chip list, the same parameters as below, and the resulting plot shown in-app). `scripts/radius_sweep.py` tests a range of distance cutoffs (default 4-20 Å) to help choose the PTM-to-mutation distance threshold used by the pipeline. For a set of genes, it computes the average number of nearby mutations per PTM site at each radius, compares against a random-placement baseline (mutations shuffled across the same protein), and detects the "elbow" of each curve — the point of diminishing returns — using `kneed`.
+Also available from the **Analysis Tools** tab (a gene/UniProt chip list, the same parameters as below, an independent output-folder field defaulting to `Output/`, and the resulting plot shown in-app). `scripts/radius_sweep.py` tests a range of distance cutoffs (default 4-20 Å) to help choose the PTM-to-mutation distance threshold used by the pipeline. For a set of genes, it computes the average number of nearby mutations per PTM site at each radius, compares against a random-placement baseline (mutations shuffled across the same protein), and detects the "elbow" of each curve — the point of diminishing returns — using `kneed`.
 
 **Basic usage** (uses a default gene panel: EGFR, TP53, VHL, CANT1, DDR2, PTPN11, LZTR1, CDK12):
 ```bash
@@ -254,7 +254,7 @@ Output is written to `Output/radius_sweep.png` (a 2- or 4-panel plot depending o
 
 ## Comparing Structural Variance Across CIF Models
 
-Also available from the **Analysis Tools** tab. `scripts/cif_variance.py` compares multiple AlphaFold CIF predictions of the same protein (e.g., different seeds or model versions) to assess structural confidence. It aligns the structures to an iteratively-refined average reference, then reports per-residue positional variance and pLDDT agreement, cross-referenced against PTM and mutation sites from the pipeline's intermediate data.
+Also available from the **Analysis Tools** tab, with its own independent output-folder field defaulting to `Output/cif_variance`. `scripts/cif_variance.py` compares multiple AlphaFold CIF predictions of the same protein (e.g., different seeds or model versions) to assess structural confidence. It aligns the structures to an iteratively-refined average reference, then reports per-residue positional variance and pLDDT agreement, cross-referenced against PTM and mutation sites from the pipeline's intermediate data.
 
 Place two or more `.cif` files for the same protein in `data/cif_comparison/`, then run:
 ```bash

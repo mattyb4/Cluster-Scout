@@ -224,6 +224,144 @@ class TestLookupUniprotFromGene:
         assert result is None, f"a network error should return None, not raise, got {result!r}"
 
 
+class TestCheckAlphafoldEntry:
+    def test_returns_true_and_fragment_count_for_single_record(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: _JsonResp({"uniprotAccession": "P04637"}),
+        )
+        exists, count = mod.check_alphafold_entry("P04637", log_cb=lambda *_: None)
+        assert (exists, count) == (True, 1)
+
+    def test_counts_multiple_fragments(self, monkeypatch):
+        records = [{"uniprotAccession": "P04637"}] * 3
+        monkeypatch.setattr(mod.requests, "get", lambda url, timeout=None: _JsonResp(records))
+        exists, count = mod.check_alphafold_entry("P04637", log_cb=lambda *_: None)
+        assert (exists, count) == (True, 3), (
+            f"fragment count should reflect how many canonical records AlphaFold DB "
+            f"returned, got {(exists, count)}"
+        )
+
+    def test_ignores_isoform_only_records(self, monkeypatch):
+        # Isoform records have uniprotAccession like "P04637-2", not the bare accession.
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, timeout=None: _JsonResp([{"uniprotAccession": "P04637-2"}]),
+        )
+        exists, count = mod.check_alphafold_entry("P04637", log_cb=lambda *_: None)
+        assert (exists, count) == (False, 0)
+
+    def test_returns_false_on_404(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.requests, "get", lambda url, timeout=None: _JsonResp(None, status_code=404),
+        )
+        exists, count = mod.check_alphafold_entry("Q99999999", log_cb=lambda *_: None)
+        assert (exists, count) == (False, 0)
+
+    def test_raises_runtimeerror_on_network_failure(self, monkeypatch):
+        def _raise(*_a, **_k):
+            raise mod.requests.RequestException("timeout")
+        monkeypatch.setattr(mod.requests, "get", _raise)
+        with pytest.raises(RuntimeError):
+            mod.check_alphafold_entry("P04637", log_cb=lambda *_: None)
+
+
+class TestResolveAndCheckProtein:
+    def test_empty_token_reports_error_without_network_calls(self, monkeypatch):
+        def _fail(*_a, **_k):
+            raise AssertionError("should not make any network call for an empty token")
+        monkeypatch.setattr(mod.requests, "get", _fail)
+
+        result = mod.resolve_and_check_protein("   ", log_cb=lambda *_: None)
+        assert result["ok"] is False and result["error"]
+
+    def test_resolves_uniprot_token(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "GENE_CACHE", tmp_path / "does_not_exist.tsv")
+
+        def _fake_get(url, params=None, timeout=None):
+            if "alphafold" in url:
+                return _JsonResp({"uniprotAccession": "P04637"})
+            return FakeResponse("Gene Names\tProtein names\nTP53 p53\tCellular tumor antigen p53\n")
+        monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+        result = mod.resolve_and_check_protein("p04637", log_cb=lambda *_: None)
+        assert result == {"ok": True, "gene": "TP53", "uniprot": "P04637", "fragment_count": 1, "error": None}, (
+            f"a lowercase UniProt token should be format-detected, uppercased, and "
+            f"resolved to its gene symbol, got {result}"
+        )
+
+    def test_resolves_gene_token(self, monkeypatch):
+        def _fake_get(url, params=None, timeout=None):
+            if "alphafold" in url:
+                return _JsonResp({"uniprotAccession": "P04637"})
+            return FakeResponse("Entry\nP04637\n")
+        monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+        result = mod.resolve_and_check_protein("tp53", log_cb=lambda *_: None)
+        assert result == {"ok": True, "gene": "TP53", "uniprot": "P04637", "fragment_count": 1, "error": None}, (
+            f"a gene token should be uppercased and resolved to its UniProt accession, got {result}"
+        )
+
+    def test_reports_unresolvable_gene(self, monkeypatch):
+        monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None: FakeResponse("Entry\n"))
+        result = mod.resolve_and_check_protein("NOTAGENE", log_cb=lambda *_: None)
+        assert result["ok"] is False and "NOTAGENE" in result["error"]
+
+    def test_reports_missing_alphafold_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "GENE_CACHE", tmp_path / "does_not_exist.tsv")
+
+        def _fake_get(url, params=None, timeout=None):
+            if "alphafold" in url:
+                return _JsonResp(None, status_code=404)
+            return FakeResponse("Gene Names\tProtein names\nFAKEGENE fake\tFake protein\n")
+        monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+        result = mod.resolve_and_check_protein("Q99999", log_cb=lambda *_: None)
+        assert result["ok"] is False and "AlphaFold DB entry" in result["error"], (
+            f"a resolvable protein with no AlphaFold structure should report a clear "
+            f"error, not be silently accepted, got {result}"
+        )
+
+    def test_reports_multiple_fragments_without_failing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "GENE_CACHE", tmp_path / "does_not_exist.tsv")
+
+        def _fake_get(url, params=None, timeout=None):
+            if "alphafold" in url:
+                return _JsonResp([{"uniprotAccession": "P04637"}] * 3)
+            return FakeResponse("Gene Names\tProtein names\nTP53 p53\tCellular tumor antigen p53\n")
+        monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+        result = mod.resolve_and_check_protein("P04637", log_cb=lambda *_: None)
+        assert result["ok"] is True and result["fragment_count"] == 3, (
+            f"a multi-fragment protein should still resolve successfully (ChimeraX "
+            f"heatmaps are what's skipped for it, not the export itself), got {result}"
+        )
+
+    def test_reports_deleted_uniprot_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "GENE_CACHE", tmp_path / "does_not_exist.tsv")
+        monkeypatch.setattr(
+            mod.requests, "get",
+            lambda url, params=None, timeout=None: FakeResponse("Gene Names\tProtein names\n\tdeleted\n"),
+        )
+        result = mod.resolve_and_check_protein("P00000", log_cb=lambda *_: None)
+        assert result["ok"] is False and "deleted" in result["error"].lower()
+
+    def test_network_failure_reports_error_not_exception(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "GENE_CACHE", tmp_path / "does_not_exist.tsv")
+
+        def _fake_get(url, params=None, timeout=None):
+            if "alphafold" in url:
+                raise mod.requests.RequestException("timeout")
+            return FakeResponse("Gene Names\tProtein names\nTP53 p53\tCellular tumor antigen p53\n")
+        monkeypatch.setattr(mod.requests, "get", _fake_get)
+
+        result = mod.resolve_and_check_protein("P04637", log_cb=lambda *_: None)
+        assert result["ok"] is False and result["error"], (
+            "a network failure during the AlphaFold check should be reported through "
+            "the result dict, not raise out of the function"
+        )
+
+
 class TestLoadCosmicMutations:
     def _cosmic_file(self, tmp_path, rows):
         path = tmp_path / "cosmic.tsv"

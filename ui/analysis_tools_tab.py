@@ -22,6 +22,7 @@ from ui.common import (
     _RADIUS_SWEEP_HELP,
     _RED,
     _YELLOW,
+    OUTPUT_DIR,
     add_resize_grip,
     help_icon,
     isolate_textbox_scroll,
@@ -297,6 +298,42 @@ class AnalysisToolsTabMixin:
         ).pack(side="left")
         help_icon(unfiltered_frame, _RADIUS_SWEEP_HELP["unfiltered"]).pack(side="left", padx=(4, 0))
 
+        # Output folder
+        radius_output_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        radius_output_label_frame.grid(row=6, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(radius_output_label_frame, text="Output folder:", anchor="w").pack(side="left")
+        help_icon(
+            radius_output_label_frame,
+            "Where radius_sweep.tsv (and radius_sweep_plot.png, if you use "
+            "Save PNG) are written. Defaults to the app's main Output folder.",
+        ).pack(side="left", padx=(4, 0))
+        if not hasattr(self, "_radius_output_dir_var"):
+            self._radius_output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR))
+        radius_output_row = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        radius_output_row.grid(row=6, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
+        radius_output_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(
+            radius_output_row, textvariable=self._radius_output_dir_var, state="readonly",
+        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        ctk.CTkButton(
+            radius_output_row, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_radius_output_dir,
+        ).grid(row=0, column=1, padx=(0, 6))
+        ctk.CTkButton(
+            radius_output_row, text="Open Folder", width=90, height=26,
+            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            command=lambda: self._open_folder(Path(self._radius_output_dir_var.get())),
+        ).grid(row=0, column=2)
+
+    def _browse_radius_output_dir(self) -> None:
+        path = filedialog.askdirectory(
+            title="Select Radius Sweep output folder",
+            initialdir=self._radius_output_dir_var.get(),
+        )
+        if path:
+            self._radius_output_dir_var.set(path)
+
     def _add_radius_gene(self) -> None:
         """Add a gene (symbol or UniProt accession, auto-detected). Validates
         upfront that the dataset has an entry and its AlphaFold CIF is downloaded,
@@ -505,6 +542,42 @@ class AnalysisToolsTabMixin:
         )
         self._variance_seed_json_status.grid(row=8, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="w")
 
+        # Output folder
+        variance_output_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        variance_output_label_frame.grid(row=9, column=0, padx=(12, 6), pady=6, sticky="w")
+        ctk.CTkLabel(variance_output_label_frame, text="Output folder:", anchor="w").pack(side="left")
+        help_icon(
+            variance_output_label_frame,
+            "Where the variance plot/data, pairwise RMSD, and any generated "
+            "AlphaFold Seeds JSON are written. Defaults to Output/cif_variance.",
+        ).pack(side="left", padx=(4, 0))
+        if not hasattr(self, "_variance_output_dir_var"):
+            self._variance_output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR / "cif_variance"))
+        variance_output_row = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
+        variance_output_row.grid(row=9, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
+        variance_output_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(
+            variance_output_row, textvariable=self._variance_output_dir_var, state="readonly",
+        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        ctk.CTkButton(
+            variance_output_row, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12),
+            command=self._browse_variance_output_dir,
+        ).grid(row=0, column=1, padx=(0, 6))
+        ctk.CTkButton(
+            variance_output_row, text="Open Folder", width=90, height=26,
+            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            command=lambda: self._open_folder(Path(self._variance_output_dir_var.get())),
+        ).grid(row=0, column=2)
+
+    def _browse_variance_output_dir(self) -> None:
+        path = filedialog.askdirectory(
+            title="Select CIF Variance output folder",
+            initialdir=self._variance_output_dir_var.get(),
+        )
+        if path:
+            self._variance_output_dir_var.set(path)
+
     def _generate_alphafold_seed_json(self) -> None:
         """Resolve the CIF Variance tool's target protein and write an
         AlphaFold Server batch JSON of one separate job per seed (1-N, see
@@ -531,7 +604,7 @@ class AnalysisToolsTabMixin:
         input_dir = Path(self._variance_input_dir_var.get().strip())
         uniprot = self._variance_uniprot_var.get().strip() or None
         gene = self._variance_gene_var.get().strip() or None
-        output_dir = self._output_dir / "cif_variance"
+        output_dir = Path(self._variance_output_dir_var.get())
 
         self._variance_seed_json_btn.configure(state="disabled")
         self._variance_seed_json_status.configure(
@@ -626,7 +699,7 @@ class AnalysisToolsTabMixin:
         if not self._radius_sweep_fig.axes:
             self._at_status_label.configure(text="Run a sweep before saving.", text_color=_RED)
             return
-        out_dir = self._output_dir
+        out_dir = Path(self._radius_output_dir_var.get())
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "radius_sweep_plot.png"
         self._radius_sweep_fig.savefig(
@@ -648,7 +721,7 @@ class AnalysisToolsTabMixin:
         if not self._cif_variance_fig.axes:
             self._at_status_label.configure(text="Run an analysis before saving.", text_color=_RED)
             return
-        out_dir = self._output_dir
+        out_dir = Path(self._variance_output_dir_var.get())
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "cif_variance_plot.png"
         self._cif_variance_fig.savefig(

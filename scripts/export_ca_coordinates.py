@@ -295,6 +295,81 @@ def _lookup_uniprot_from_gene(gene: str, log_cb: Callable[[str], None] = print) 
     return None
 
 
+def check_alphafold_entry(uid: str, log_cb: Callable[[str], None] = print) -> tuple[bool, int]:
+    """Query AlphaFold DB's prediction metadata for *uid* -- the same
+    endpoint _download_cif uses -- WITHOUT downloading any structure/PAE
+    file, just to confirm a canonical entry exists and count its fragments.
+
+    Returns (exists, fragment_count); fragment_count is 0 when exists is
+    False. Raises RuntimeError on a network failure (the caller decides how
+    to surface that -- see resolve_and_check_protein).
+    """
+    log_cb(f"Checking AlphaFold DB for {uid} ...")
+    try:
+        resp = requests.get(_AF_API.format(uid=uid), timeout=15)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"AlphaFold API request failed: {exc}") from exc
+    if resp.status_code == 404:
+        return False, 0
+    resp.raise_for_status()
+    records = resp.json()
+    if isinstance(records, dict):
+        records = [records]
+    canonical = [r for r in records if r.get("uniprotAccession") == uid]
+    return bool(canonical), len(canonical)
+
+
+def resolve_and_check_protein(token: str, log_cb: Callable[[str], None] = print) -> dict:
+    """Resolve *token* (a gene symbol or UniProt accession) to a (gene,
+    uniprot) pair and confirm AlphaFold DB has a canonical entry for it,
+    without downloading anything -- for validating a batch-list entry (the
+    app's Proteins list) up front, before committing to it, the same
+    "catch bad input immediately" philosophy as Radius Sweep's own gene
+    picker (see ui/analysis_tools_tab.py's _add_radius_gene).
+
+    Never raises -- every failure mode (unresolvable token, deleted UniProt
+    entry, no AlphaFold DB record, network error) is reported through the
+    returned dict instead, so a caller running this off the main thread
+    doesn't need to catch exceptions from several different failure points.
+
+    Returns {"ok": bool, "gene": str | None, "uniprot": str | None,
+    "fragment_count": int, "error": str | None}. When ok is True,
+    fragment_count > 1 means the protein spans multiple AlphaFold
+    fragments -- run_export still exports coordinates for all of them, but
+    skips ChimeraX heatmap/marker generation (single-fragment only).
+    """
+    token = token.strip()
+    if not token:
+        return {"ok": False, "gene": None, "uniprot": None, "fragment_count": 0,
+                "error": "Enter a gene symbol or UniProt accession."}
+
+    try:
+        if looks_like_uniprot_id(token):
+            uid = token.upper()
+            gene = _lookup_gene(uid, log_cb)
+            if gene is None:
+                return {"ok": False, "gene": None, "uniprot": None, "fragment_count": 0,
+                        "error": f"Could not resolve a gene symbol for {uid}."}
+        else:
+            gene = token.upper()
+            resolved_uid = _lookup_uniprot_from_gene(gene, log_cb)
+            if resolved_uid is None:
+                return {"ok": False, "gene": None, "uniprot": None, "fragment_count": 0,
+                        "error": f"Could not find a reviewed human UniProt accession for "
+                                 f"gene '{gene}'."}
+            uid = resolved_uid.upper()
+
+        exists, fragment_count = check_alphafold_entry(uid, log_cb)
+    except (ValueError, RuntimeError) as exc:
+        return {"ok": False, "gene": None, "uniprot": None, "fragment_count": 0, "error": str(exc)}
+
+    if not exists:
+        return {"ok": False, "gene": None, "uniprot": None, "fragment_count": 0,
+                "error": f"{uid} has no AlphaFold DB entry (404). Check the accession."}
+
+    return {"ok": True, "gene": gene, "uniprot": uid, "fragment_count": fragment_count, "error": None}
+
+
 _cosmic_df_cache: dict[str, pd.DataFrame] = {}
 
 

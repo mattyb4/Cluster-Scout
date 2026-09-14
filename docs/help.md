@@ -39,13 +39,13 @@ Accepts the same **Cutoff**, **Min pLDDT**, and **Max PAE** settings as the main
 
 **Source: Database / Upload CIF file** — Database (the default) works from a list of proteins by gene symbol or UniProt accession, resolving each against AlphaFold DB. Upload CIF file instead exports a single specific `.cif` you already have — e.g. a seeded [AlphaFold Server](https://alphafoldserver.com) prediction you generated yourself via the CIF Variance tool's **Generate AlphaFold Seeds JSON** option, if a particular seed looked better than the canonical model and you want heatmaps/coordinates for that one instead. Nothing is downloaded and nothing is added to the shared structure cache; the Proteins list doesn't apply, and the file is always treated as single-fragment. The UniProt ID field auto-fills from the CIF's own metadata when possible — edit it if detection fails or looks wrong. Every option below applies the same way regardless of source.
 
-Export alpha-carbon coordinates for every residue of one or more proteins — each added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. One protein failing (no AlphaFold model, unresolvable gene, etc.) is logged and skipped rather than stopping the rest of the batch.
+Export alpha-carbon coordinates for every residue of one or more proteins — each added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. Each entry is validated as soon as you add it: the gene/UniProt accession is resolved and checked against AlphaFold DB for a canonical entry, the same "catch it upfront" validation Radius Sweep's own gene list uses, so an unresolvable gene or a typo is rejected with an explanation immediately instead of only failing partway through a run. A protein spanning multiple AlphaFold fragments is still accepted (coordinates are exported for every fragment) but flagged with a warning, since the ChimeraX heatmap/marker scripts below are single-fragment only.
 
 Each protein's output goes in its own `Output/coordinates/{gene}_{UniProt}/` folder (e.g. `TP53_P04637`): `all_ca.tsv` (every residue's coordinates, plus its AlphaFold pLDDT confidence and a nearby-patient-count column) and `mutation_ca.tsv` (the same columns, only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
 
 **Heatmaps** — for single-fragment proteins, also produces ChimeraX scripts you can open directly to reproduce the view with no manual steps:
 
-- **Mutation heatmap** (on by default) — colors the structure by COSMIC patient count near each residue, a red heatmap. Two sub-options apply only to this heatmap: **Log-scale** (compresses heavily skewed patient counts so lower-count regions stay visible instead of being crushed toward one flat color) and **Dim low-confidence residues** (fades each residue in proportion to how low its AlphaFold confidence is, so a hotspot in a poorly-modeled region reads as less certain than an equally hot one in a well-modeled region).
+- **Mutation heatmap** (off by default) — colors the structure by COSMIC patient count near each residue, a red heatmap. Two sub-options apply only to this heatmap: **Log-scale** (compresses heavily skewed patient counts so lower-count regions stay visible instead of being crushed toward one flat color) and **Dim low-confidence residues** (fades each residue in proportion to how low its AlphaFold confidence is, so a hotspot in a poorly-modeled region reads as less certain than an equally hot one in a well-modeled region).
 - **pLDDT heatmap** — colors the structure by AlphaFold's own per-residue confidence score, using the same color scheme AlphaFold DB itself uses.
 
 Both heatmaps can be on at once — they're written as separate scripts, since ChimeraX can only show one coloring at a time on a single open structure. Each heatmap script also draws an on-screen color key with a title label, so a screenshot of the view is self-explanatory. Only the two ends of the scale are labeled — 0 and the true maximum — with nothing in between, as a simple two-color gradient (approximating the default red/AlphaFold scheme when colors haven't been customized): the mutation heatmap's high label is the protein's actual maximum patient count (already converted back from the log scale, if enabled), and the pLDDT heatmap's key always spans 0-100.
@@ -133,7 +133,9 @@ Selecting a PTM site (or anchor mutation, in Mutation Clustering mode) in the Re
 
 ## Analysis Tools
 
-A separate tab for two standalone structural-analysis tools, independent of the main pipeline modes above. A toggle at the top switches between them — each keeps its own settings and plot when you switch away and back. Set parameters, click **Run**, then **Save PNG** to export the resulting plot to the output folder. **Show Details** reveals a log panel with the tool's console output (elbow points, warnings, etc.).
+A separate tab for two standalone structural-analysis tools, independent of the main pipeline modes above. A toggle at the top switches between them — each keeps its own settings and plot when you switch away and back. Set parameters, click **Run**, then **Save PNG** to export the resulting plot to that tool's own output folder. **Show Details** reveals a log panel with the tool's console output (elbow points, warnings, etc.).
+
+Each tool has its own **Output folder** field, independent of the Pipeline tab's and of each other's — click **Browse** to change it, or **Open Folder** to jump straight to it in your file manager.
 
 ### Radius Sweep
 
@@ -143,8 +145,9 @@ Tests a range of distance cutoffs (not just one fixed value) for one or more gen
 - **Radius range (Å)** — start, stop, and step size for the sweep (default 4–20, step 1). The proximity search re-runs at every radius in this range.
 - **Min samples** — minimum distinct COSMIC samples for a mutation to count as a hotspot (default 3). This is computed live from the raw COSMIC file and is independent of whatever **Min samples** value the main pipeline's Step 1 used to build its intermediate file — it can only be tightened or loosened within what that file already contains.
 - **Include unfiltered COSMIC comparison** — also sweeps every COSMIC missense mutation for the same genes, not just the recurrent hotspot ones, so hotspot-filtered results can be compared against the full mutation set at each radius. Produces a 4-panel plot instead of 2.
+- **Output folder** — where `radius_sweep.tsv` and (via Save PNG) `radius_sweep_plot.png` are written; defaults to the app's main `Output/` folder.
 
-Output is written to `Output/radius_sweep.png` (matching the in-app plot) and a companion `Output/radius_sweep.tsv` with the raw per-radius data; elbow points and the average optimal radius are also printed to the run log.
+Output is written to `radius_sweep.tsv` (raw per-radius data) in the Output folder above, and to `radius_sweep_plot.png` there too if you use Save PNG; elbow points and the average optimal radius are also printed to the run log.
 
 ### CIF Variance
 
@@ -156,8 +159,9 @@ Compares multiple AlphaFold CIF files for the *same* protein — e.g. different 
 - **Align range** — use only this residue range for structural alignment, rather than the whole protein; defaults to the Report range if left blank. Useful for excluding disordered regions from alignment while still reporting their variance.
 - **UniProt override** — UniProt accession to use for PTM/mutation cross-referencing; auto-detected from the CIF file if left blank.
 - **Gene override** — gene symbol used to look up the UniProt ID from the pipeline's intermediate data, only consulted if the UniProt override above is left blank.
+- **Output folder** — where the analysis output, any Save PNG plot, and any generated AlphaFold Seeds JSON are written; defaults to `Output/cif_variance/`.
 
-Output (written to `Output/cif_variance/`):
+Output (written to the Output folder above, `Output/cif_variance/` by default):
 
 - **`variance_plot.png`** — per-residue positional variance and pLDDT (mean ± std) across structures, with PTM and mutation sites marked; the same plot shown in-app
 - **`variance_data.tsv`** — per-residue variance, pLDDT stats, and PTM/mutation flags
@@ -177,7 +181,9 @@ Output (written to `Output/cif_variance/`):
 
 ### Output Folder
 
-Use the **Change** button to select a custom output directory. Click **Reset** to return to the default `Output/` folder.
+The Output folder section (and the **Open Output Folder** button at the bottom of the Pipeline tab) tracks whichever mode is currently selected: PTM Proximity, Mutation Clustering, and Single Protein share one folder (defaulting to `Output/`, since they read and write the same output DB files), while Structure Heatmaps gets its own independent folder (defaulting to `Output/coordinates/`) — switching modes swaps which one is shown, labeled, and opened, so **Open Output Folder** always takes you to what that mode actually produced. Use **Change** to pick a custom directory for whichever mode is active; **Reset** returns it to its own default.
+
+Radius Sweep and CIF Variance (Analysis Tools tab) each have their own **Output folder** field and **Open Folder** button too, independent of the Pipeline tab and of each other — Radius Sweep defaults to `Output/`, CIF Variance to `Output/cif_variance/`.
 
 ---
 
