@@ -374,3 +374,72 @@ class TestTotalPatientCount:
             f"a hit with no entry in patient_counts should default to contributing 0, "
             f"not raise a KeyError, got {result}"
         )
+
+
+PSP_ROW = {
+    "uniprot_id": "P31749",
+    "gene": "AKT1",
+    "ptms_on_protein": "S473:Phosphorylation; K14:Monomethylation",
+    "ptm_disease_pairs": (
+        "S473:Phosphorylation | breast cancer (increased); "
+        "S473:Phosphorylation | Alzheimer's disease (increased)"
+    ),
+    "psp_site_scores": "S473:Phosphorylation=12/40/3; K14:Monomethylation=1/0/0; T1:Bad=x/1/2",
+}
+
+
+class TestPspParsing:
+    @pytest.fixture(autouse=True)
+    def _rows(self, mod):
+        mod._PTM_ROWS = [PSP_ROW]
+        yield
+        mod._PTM_ROWS = None
+
+    def test_site_scores_map_to_ltp_htp_cst(self, mod):
+        scores = mod.parse_psp_site_scores("P31749")
+        assert scores == {
+            "S473:Phosphorylation": (12, 40, 3),
+            "K14:Monomethylation": (1, 0, 0),
+        }, f"each well-formed 'site=LTP/HTP/CST' entry should parse, malformed ones skipped, got {scores}"
+
+    def test_disease_map_keeps_every_disease(self, mod):
+        diseases = mod.parse_ptm_disease_map("P31749")["S473:Phosphorylation"]
+        assert diseases == ["breast cancer (increased)", "Alzheimer's disease (increased)"], (
+            f"the full disease list (for psp_diseases) must include non-cancer diseases, got {diseases}"
+        )
+
+    def test_ptm_diseases_stays_cancer_only(self, mod):
+        result = mod.parse_ptm_diseases("P31749", "S473", "Phosphorylation")
+        assert result == "breast cancer (increased)", (
+            f"ptm_diseases means cancer-related diseases in both sources, got {result!r}"
+        )
+
+
+class TestCanonicalNumberingColumns:
+    ROW = {
+        "uniprot_id": "P12345",
+        "gene": "TEST",
+        "mutations_on_protein": "R20V (7); W13A (2)",
+        "cosmic_mutation_labels": "R20V=R26V",
+        "unmapped_mutations": "W13A",
+    }
+
+    @pytest.fixture(autouse=True)
+    def _rows(self, mod):
+        mod._PTM_ROWS = [self.ROW]
+        yield
+        mod._PTM_ROWS = None
+
+    def test_cosmic_labels(self, mod):
+        labels = mod.parse_cosmic_labels("P12345")
+        assert labels == {"R20V": "R26V"}
+        assert mod.cosmic_label("R20V(isoform?)", labels) == "R26V", "any (isoform?) tag is ignored"
+        assert mod.cosmic_label("E5K", labels) == "E5K", "unmoved mutations keep their own label"
+
+    def test_unmapped_mutations_are_tagged_even_if_the_residue_matches(self, mod):
+        pos_to_aa = {13: "W", 20: "R"}
+        tagged = mod.tag_uncertain_mutations("P12345", [("W13A", 13), ("R20V", 20)], pos_to_aa)
+        assert tagged == [("W13A(isoform?)", 13), ("R20V", 20)], (
+            "a mutation step 1 couldn't place is in COSMIC's numbering, so a matching "
+            "structure residue is coincidence -- it must still be tagged"
+        )

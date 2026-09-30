@@ -16,17 +16,20 @@ InterPro functional domains.
 ptm_mutation_proximity_db.tsv/_long.tsv. --mode mutation-clustering runs only
 Phases 2/4/5 (PolyPhen/AIUPred/InterPro are mutation/position-level; 14-3-3
 and Kinase require a curated PTM site, which mutation-clustering mode has no
-concept of) against mutation_cluster_db.tsv/_long.tsv.
+concept of) against mutation_cluster_db.tsv/_long.tsv. --ptm-source psp
+annotates the PhosphoSitePlus-based psp_ptm_mutation_proximity_db.tsv/_long.tsv
+instead.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -36,14 +39,17 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     AA3TO1,
+    DEFAULT_PTM_SOURCE,
     INTERACTORS_1433_INPUT_DIR,
     MUT_RE,
+    PTM_SOURCES,
     SITE_RE,
     find_canonical_cif,
     fmt_time,
     input_dir,
     load_first_chain,
     project_root,
+    ptm_output_paths,
     resolve_input_file,
 )
 
@@ -220,8 +226,13 @@ _PP_API_URL = "https://myvariant.info/v1/query"
 # myvariant.info rate-limits by burst/concurrency, not steady request rate -- 30
 # concurrent workers triggered ~90% HTTP 429s within a second in testing, while
 # sequential requests paced this closely succeeded ~100% of the time. So this
-# phase fetches sequentially with a small delay instead of via a thread pool.
+# phase fetches sequentially with a small delay instead of via a thread pool --
+# but asks for many variants per request (see fetch_polyphen_batch), which cut
+# the time per variant from ~250 ms to ~17 ms in testing.
 _PP_REQUEST_DELAY = 0.1
+_PP_BATCH_POSITIONS = 100      # positions per batched request
+_PP_BATCH_MAX_HITS = 1000      # myvariant.info's largest page; bigger chunks are split
+_PP_BATCH_FIELDS = "dbnsfp.polyphen2,dbnsfp.aa.ref,dbnsfp.aa.alt,dbnsfp.aa.pos"
 _PP_RATE_LIMIT_RETRIES = 3
 _PP_RATE_LIMIT_BACKOFF = 1.0
 _pp_session = requests.Session()
@@ -253,32 +264,38 @@ def _pp_save_cache(cache: dict[tuple[str, str], tuple[str, str]]) -> None:
         _PP_CACHE_FILE, sep="\t", index=False)
 
 
+def _as_list(value) -> list:
+    return value if isinstance(value, list) else [value]
+
+
 def _pp_best_prediction(hits: list[dict]) -> tuple[str, str]:
-    """Return the most severe HDIV (pred, score) across all hits."""
+    """Return the most severe HDIV (pred, score) across all hits and
+    transcripts -- and within that class, the highest score, so the answer
+    doesn't depend on the order myvariant.info returns records in."""
     best_pred, best_score = "", -1.0
     for hit in hits:
-        dbnsfp = hit.get("dbnsfp", {})
-        polyphen2 = dbnsfp.get("polyphen2", {})
-        if isinstance(polyphen2, list):
-            pp2_entries = polyphen2
-        elif isinstance(polyphen2, dict):
-            pp2_entries = [polyphen2]
-        else:
-            continue
-        for pp2 in pp2_entries:
-            hdiv = pp2.get("hdiv", {}) if isinstance(pp2, dict) else {}
-            preds = hdiv.get("pred", [])
-            scores = hdiv.get("score", [])
-            if isinstance(preds, str):
-                preds = [preds]
-            if isinstance(scores, (int, float)):
-                scores = [scores]
-            for pred, score in zip(preds, scores):
-                if pred not in _PP_SEVERITY:
-                    continue
-                if _PP_SEVERITY[pred] > _PP_SEVERITY.get(best_pred, -1):
-                    best_pred = pred
-                    best_score = float(score) if isinstance(score, (int, float)) else -1.0
+        for dbnsfp in _as_list(hit.get("dbnsfp") or {}):
+            polyphen2 = dbnsfp.get("polyphen2", {}) if isinstance(dbnsfp, dict) else {}
+            if isinstance(polyphen2, list):
+                pp2_entries = polyphen2
+            elif isinstance(polyphen2, dict):
+                pp2_entries = [polyphen2]
+            else:
+                continue
+            for pp2 in pp2_entries:
+                hdiv = pp2.get("hdiv", {}) if isinstance(pp2, dict) else {}
+                preds = hdiv.get("pred", [])
+                scores = hdiv.get("score", [])
+                if isinstance(preds, str):
+                    preds = [preds]
+                if isinstance(scores, (int, float)):
+                    scores = [scores]
+                for pred, score in zip(preds, scores):
+                    if pred not in _PP_SEVERITY:
+                        continue
+                    value = float(score) if isinstance(score, (int, float)) else -1.0
+                    if (_PP_SEVERITY[pred], value) > (_PP_SEVERITY.get(best_pred, -1), best_score):
+                        best_pred, best_score = pred, value
     if not best_pred:
         return "", ""
     return best_pred, (f"{best_score:.3f}" if best_score >= 0 else "")
@@ -329,6 +346,111 @@ def fetch_polyphen(gene: str, mutation: str) -> tuple[str, str] | None:
     return None
 
 
+def _pp_get(params: dict) -> dict | None:
+    """One myvariant.info query, retrying HTTP 429 with backoff; None if it failed."""
+    backoff = _PP_RATE_LIMIT_BACKOFF
+    for attempt in range(_PP_RATE_LIMIT_RETRIES):
+        try:
+            resp = _pp_session.get(_PP_API_URL, params=params, timeout=60)
+        except Exception:
+            return None
+        if resp.status_code == 429:
+            if attempt < _PP_RATE_LIMIT_RETRIES - 1:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return None
+        try:
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+    return None
+
+
+def _hit_aa_values(hit: dict) -> tuple[set[str], set[str], set[int]]:
+    """(reference residues, alternate residues, protein positions) a dbNSFP
+    record lists, pooled across its transcripts -- the same values the
+    single-variant query's field matches search."""
+    refs: set[str] = set()
+    alts: set[str] = set()
+    positions: set[int] = set()
+    for dbnsfp in _as_list(hit.get("dbnsfp") or {}):
+        if not isinstance(dbnsfp, dict):
+            continue
+        for aa in _as_list(dbnsfp.get("aa") or {}):
+            if not isinstance(aa, dict):
+                continue
+            refs.update(str(r) for r in _as_list(aa.get("ref")) if r is not None)
+            alts.update(str(a) for a in _as_list(aa.get("alt")) if a is not None)
+            for pos in _as_list(aa.get("pos")):
+                try:
+                    positions.add(int(pos))
+                except (TypeError, ValueError):
+                    pass
+    return refs, alts, positions
+
+
+def fetch_polyphen_batch(gene: str, mutations: list[str],
+                         request_delay: float = _PP_REQUEST_DELAY) -> dict[str, tuple[str, str] | None]:
+    """PolyPhen-2 HDIV predictions for many of one gene's mutations at once.
+
+    Asks myvariant.info for every dbNSFP record of *gene* at up to
+    _PP_BATCH_POSITIONS positions per request, then gives each mutation the
+    records whose reference residue, alternate residue and (any transcript's)
+    position match it -- the same records fetch_polyphen's one-variant query
+    finds -- scored by _pp_best_prediction. A chunk over myvariant.info's
+    1000-record page is split in half.
+
+    Returns {mutation: (pred, score)}, or None for a mutation whose request
+    failed (so the caller doesn't cache it). Stop codons and unparseable
+    labels get ("", "") without a request, as in fetch_polyphen.
+    """
+    results: dict[str, tuple[str, str] | None] = {}
+    by_position: dict[int, list[tuple[str, str, str]]] = {}
+    for mutation in mutations:
+        m = MUT_RE.match(mutation)
+        if not m or m.group(3) == "*":
+            results[mutation] = ("", "")
+            continue
+        by_position.setdefault(int(m.group(2)), []).append((mutation, m.group(1), m.group(3)))
+
+    positions = sorted(by_position)
+    queue = [positions[i:i + _PP_BATCH_POSITIONS] for i in range(0, len(positions), _PP_BATCH_POSITIONS)]
+    while queue:
+        chunk = queue.pop(0)
+        query = f"dbnsfp.genename:{gene} AND dbnsfp.aa.pos:({' OR '.join(map(str, chunk))})"
+        body = _pp_get({"q": query, "fields": _PP_BATCH_FIELDS, "size": _PP_BATCH_MAX_HITS})
+        if request_delay:
+            time.sleep(request_delay)
+        if body is None:
+            for pos in chunk:
+                for mutation, _ref, _alt in by_position[pos]:
+                    results[mutation] = None
+            continue
+        if body.get("total", 0) > _PP_BATCH_MAX_HITS:
+            if len(chunk) > 1:
+                half = len(chunk) // 2
+                queue[:0] = [chunk[:half], chunk[half:]]
+            else:
+                # One position with more records than a page -- ask per variant
+                for mutation, _ref, _alt in by_position[chunk[0]]:
+                    results[mutation] = fetch_polyphen(gene, mutation)
+            continue
+
+        matched: dict[str, list[dict]] = {m: [] for pos in chunk for m, _r, _a in by_position[pos]}
+        wanted = set(chunk)
+        for hit in body.get("hits", []):
+            refs, alts, hit_positions = _hit_aa_values(hit)
+            for pos in hit_positions & wanted:
+                for mutation, ref, alt in by_position[pos]:
+                    if ref in refs and alt in alts:
+                        matched[mutation].append(hit)
+        for mutation, hits in matched.items():
+            results[mutation] = _pp_best_prediction(hits)
+    return results
+
+
 def annotate_mutation_string(
     mutation_str: str, gene: str,
     cache: dict[tuple[str, str], tuple[str, str]],
@@ -365,8 +487,9 @@ def run_polyphen_phase(
     tagged inline (no entry format to tag); read back afterward via
     _pp_lookup_single once the cache is populated.
 
-    Fetches sequentially with *request_delay* between calls rather than
-    concurrently -- see the comment above _PP_REQUEST_DELAY.
+    Fetches gene by gene, many variants per request (fetch_polyphen_batch),
+    sequentially with *request_delay* between calls rather than concurrently
+    -- see the comment above _PP_REQUEST_DELAY.
     """
     print("\n── Phase 2: PolyPhen-2 pathogenicity scores ──")
 
@@ -400,17 +523,24 @@ def run_polyphen_phase(
     if to_fetch:
         failed = 0
         total = len(to_fetch)
-        for done, (g, mut) in enumerate(tqdm(to_fetch, desc="Fetching PolyPhen-2 scores"), 1):
-            result = fetch_polyphen(g, mut)
-            if result is not None:
-                cache[(g, mut)] = result
-            else:
-                failed += 1
-            _emit_progress(phase_idx, done / total * 100, f"PolyPhen-2 scores: {done}/{total}", num_phases)
-            if request_delay:
-                time.sleep(request_delay)
+        by_gene: dict[str, list[str]] = {}
+        for g, mut in to_fetch:
+            by_gene.setdefault(g, []).append(mut)
+        done = 0
+        with tqdm(total=total, desc="Fetching PolyPhen-2 scores") as bar:
+            for n_genes, (g, muts) in enumerate(sorted(by_gene.items()), 1):
+                for mut, result in fetch_polyphen_batch(g, muts, request_delay).items():
+                    if result is not None:
+                        cache[(g, mut)] = result
+                    else:
+                        failed += 1
+                done += len(muts)
+                bar.update(len(muts))
+                _emit_progress(phase_idx, done / total * 100, f"PolyPhen-2 scores: {done}/{total}", num_phases)
+                if n_genes % 25 == 0:
+                    _pp_save_cache(cache)  # keep progress if the run is interrupted
         if failed:
-            print(f"  {failed} request(s) failed and will be retried on the next run (not cached)")
+            print(f"  {failed} lookup(s) failed and will be retried on the next run (not cached)")
         _pp_save_cache(cache)
     else:
         _emit_progress(phase_idx, 100, "PolyPhen-2 scores: all cached", num_phases)
@@ -444,7 +574,12 @@ def _pp_lookup_single(mutation: str, gene: str, cache: dict[tuple[str, str], tup
 _KIN_TOP_K = 5
 _KIN_WINDOW = 7
 _KIN_CACHE_FILE = PROJECT_ROOT / "data" / "cache" / "kinase_predictions.tsv"
-_KIN_MAX_WORKERS = 6
+_KIN_MAX_WORKERS = 6          # helper processes run in parallel
+_KIN_CHUNK_SIZE = 250         # windows per helper process
+# Kinase Library predictions run in a separate uv-managed environment -- see
+# scripts/kinase_predictor.py for why (its numpy/pandas pins conflict with ours)
+_KIN_HELPER = Path(__file__).resolve().parent / "kinase_predictor.py"
+_KIN_HELPER_TIMEOUT = 3600    # seconds; the first call also builds the environment
 
 
 def _kin_load_cache() -> dict[str, str]:
@@ -485,34 +620,83 @@ def build_kinase_window(pos_to_aa: dict[int, str], site_pos: int) -> str | None:
     return "".join(chars)
 
 
-def _speed_up_kinase_library() -> None:
-    """Memoize kinase_library's reference-data loaders for this process.
-
-    Substrate.predict() re-reads the same kinome/matrix reference files from
-    disk on every call instead of caching them; wrapping the two most-called
-    loaders in an lru_cache eliminates that redundant I/O. Idempotent.
-    """
-    import kinase_library.modules.data as kl_data
-    if getattr(kl_data, "_cluster_scout_cached", False):
-        return
-    kl_data.get_kinase_list = lru_cache(maxsize=None)(kl_data.get_kinase_list)
-    kl_data.get_kinome_info = lru_cache(maxsize=None)(kl_data.get_kinome_info)
-    kl_data._cluster_scout_cached = True
+def _kinase_helper_command() -> list[str] | None:
+    uv = shutil.which("uv")
+    return [uv, "run", "--quiet", "--script", str(_KIN_HELPER)] if uv else None
 
 
-def predict_kinases(window: str) -> str:
-    """Run the Kinase Library on a 15-mer window and return a formatted top-5 string."""
-    import kinase_library as kl
-    _speed_up_kinase_library()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        sub = kl.Substrate(window)
-        result = sub.predict()
-    top = result.head(_KIN_TOP_K)
-    parts = []
-    for kinase, row in top.iterrows():
-        parts.append(f"{kinase}({row['Score']:.2f},{row['Percentile']:.1f}%)")
-    return "; ".join(parts)
+def _kinase_helper_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)  # the project's env -- irrelevant to the helper's own
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def check_kinase_helper() -> str | None:
+    """Build (first time) and verify the Kinase Library helper's environment.
+    Returns None if it works, else a description of what went wrong."""
+    command = _kinase_helper_command()
+    if command is None:
+        return ("uv isn't on PATH -- kinase predictions run in their own uv-managed environment "
+                "(see scripts/kinase_predictor.py)")
+    try:
+        proc = subprocess.run(command + ["--check"], capture_output=True, text=True, encoding="utf-8",
+                              env=_kinase_helper_env(), timeout=_KIN_HELPER_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"couldn't start the Kinase Library helper ({exc})"
+    if proc.returncode != 0 or '"ok": true' not in proc.stdout:
+        last = (proc.stderr.strip().splitlines() or ["no error output"])[-1]
+        return f"the Kinase Library helper's environment failed to set up ({last})"
+    return None
+
+
+def _predict_chunk(windows: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """One helper process over *windows*: ({window: prediction}, {window: error})."""
+    command = _kinase_helper_command()
+    predictions: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    if command is None:
+        return predictions, {w: "uv isn't on PATH" for w in windows}
+    try:
+        proc = subprocess.run(command, input="\n".join(windows) + "\n", capture_output=True, text=True,
+                              encoding="utf-8", env=_kinase_helper_env(), timeout=_KIN_HELPER_TIMEOUT)
+        output, stderr = proc.stdout, proc.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        output, stderr = "", str(exc)
+    for line in output.splitlines():
+        try:
+            result = json.loads(line)
+        except ValueError:
+            continue
+        if "prediction" in result:
+            predictions[result["window"]] = result["prediction"]
+        elif "error" in result:
+            errors[result["window"]] = result["error"]
+    last = (stderr.strip().splitlines() or ["no output"])[-1]
+    for window in windows:
+        if window not in predictions and window not in errors:
+            errors[window] = f"the helper produced no result ({last})"
+    return predictions, errors
+
+
+def predict_kinase_windows(windows: list[str], progress=None) -> tuple[dict[str, str], dict[str, str]]:
+    """Kinase Library top-5 predictions for many windows, spread over
+    _KIN_MAX_WORKERS helper processes. Returns ({window: prediction},
+    {window: error}); *progress(done, total)* is called as chunks finish."""
+    chunks = [windows[i:i + _KIN_CHUNK_SIZE] for i in range(0, len(windows), _KIN_CHUNK_SIZE)]
+    predictions: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=_KIN_MAX_WORKERS) as pool:
+        futures = {pool.submit(_predict_chunk, chunk): chunk for chunk in chunks}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Predicting kinases (chunks)"):
+            chunk_predictions, chunk_errors = future.result()
+            predictions.update(chunk_predictions)
+            errors.update(chunk_errors)
+            done += len(futures[future])
+            if progress:
+                progress(done, len(windows))
+    return predictions, errors
 
 
 def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
@@ -566,18 +750,23 @@ def run_kinase_phase(df: pd.DataFrame) -> tuple[dict, dict]:
 
     failed_windows: set[str] = set()
     if to_predict:
-        with ThreadPoolExecutor(max_workers=_KIN_MAX_WORKERS) as pool:
-            futures = {pool.submit(predict_kinases, w): w for w in to_predict}
-            done = 0
-            total = len(futures)
-            for future in tqdm(as_completed(futures), total=total, desc="Predicting kinases"):
-                window = futures[future]
-                try:
-                    cache[window] = future.result()
-                except Exception:
-                    failed_windows.add(window)
-                done += 1
-                _emit_progress(2, done / total * 100, f"Kinase predictions: {done}/{total}")
+        problem = check_kinase_helper()
+        if problem:
+            failed_windows = set(to_predict)
+            first_error = problem
+        else:
+            predictions, errors = predict_kinase_windows(
+                to_predict,
+                progress=lambda done, total: _emit_progress(2, done / total * 100,
+                                                            f"Kinase predictions: {done}/{total}"),
+            )
+            cache.update(predictions)
+            failed_windows = set(errors)
+            first_error = next(iter(errors.values()), "")
+        if failed_windows:
+            print(f"  Warning: kinase prediction failed for {len(failed_windows)} of {len(to_predict)} "
+                  f"new windows ({first_error}) -- those sites get no prediction this run; they "
+                  f"aren't cached, so they're retried next run")
         new_count = len(to_predict) - len(failed_windows)
         if new_count:
             _kin_save_cache(cache)
@@ -636,6 +825,53 @@ def _positions_from_str(mutation_str: str) -> list[int]:
     return result
 
 
+_WITHIN_COL, _BEYOND_COL = _MUTATION_COLS
+
+
+def _filter_split_mut_cols(df: pd.DataFrame, exclude_codes: set[str], ref_pos_col: str,
+                           extra_cols: tuple[str, ...] = ()) -> None:
+    """Filter the within-5/more-than-5 mutation strings in place and recompute
+    their count, unique-position, and morethan5_linear_distance columns.
+
+    ref_pos_col names the column whose first integer is the reference position
+    linear distances are measured from (ptm_site or anchor_position).
+    extra_cols are filtered too, but have no derived columns to recompute.
+    """
+    for col in (_WITHIN_COL, _BEYOND_COL, *extra_cols):
+        if col in df.columns:
+            df[col] = df[col].fillna("").apply(
+                lambda s: _filter_mut_str(s, exclude_codes)
+            )
+
+    def _count(s: str) -> int:
+        return len([e for e in s.split(", ") if e.strip()]) if s else 0
+
+    def _uniq_pos(s: str) -> int:
+        return len(set(_positions_from_str(s)))
+
+    for prefix, col in [("within_5", _WITHIN_COL), ("more_than_5", _BEYOND_COL)]:
+        df[f"mutation_count_{prefix}_positions"] = df[col].apply(_count)
+        df[f"unique_mutation_position_count_{prefix}_positions"] = df[col].apply(_uniq_pos)
+
+    # Recompute morethan5_linear_distance from filtered beyond-5 string
+    if "morethan5_linear_distance" in df.columns and ref_pos_col in df.columns:
+        def _linear_dists(row) -> str:
+            ref_m = re.search(r"(\d+)", str(row.get(ref_pos_col, "")))
+            if not ref_m:
+                return ""
+            ref_pos = int(ref_m.group(1))
+            return ",".join(str(abs(p - ref_pos)) for p in _positions_from_str(row[_BEYOND_COL]))
+        df["morethan5_linear_distance"] = df.apply(_linear_dists, axis=1)
+
+
+def _has_remaining_mutations(df: pd.DataFrame) -> pd.Series:
+    """Rows with at least one mutation left in either the within-5 or more-than-5 string."""
+    return (
+        (df[_WITHIN_COL].fillna("").str.len() > 0) |
+        (df[_BEYOND_COL].fillna("").str.len() > 0)
+    )
+
+
 def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.DataFrame:
     """Remove mutations of excluded PP classes from the wide-format proximity DB.
 
@@ -650,35 +886,8 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
     print(f"\nApplying PolyPhen filter — excluding: {', '.join(exclude_classes)}")
     print("  Note: *_total_patient_count columns retain pre-filter totals")
 
-    within_col = "mutations_within_5_positions"
-    beyond_col = "mutations_more_than_5_positions"
-    disrupting_col = "confirmed_disrupting_mutations"
-
-    for col in (within_col, beyond_col, disrupting_col):
-        if col in df.columns:
-            df[col] = df[col].fillna("").apply(
-                lambda s: _filter_mut_str(s, exclude_codes)
-            )
-
-    def _count(s: str) -> int:
-        return len([e for e in s.split(", ") if e.strip()]) if s else 0
-
-    def _uniq_pos(s: str) -> int:
-        return len(set(_positions_from_str(s)))
-
-    for prefix, col in [("within_5", within_col), ("more_than_5", beyond_col)]:
-        df[f"mutation_count_{prefix}_positions"] = df[col].apply(_count)
-        df[f"unique_mutation_position_count_{prefix}_positions"] = df[col].apply(_uniq_pos)
-
-    # Recompute morethan5_linear_distance from filtered beyond-5 string
-    if "morethan5_linear_distance" in df.columns and "ptm_site" in df.columns:
-        def _linear_dists(row) -> str:
-            ptm_m = re.search(r"(\d+)", str(row.get("ptm_site", "")))
-            if not ptm_m:
-                return ""
-            ptm_pos = int(ptm_m.group(1))
-            return ",".join(str(abs(p - ptm_pos)) for p in _positions_from_str(row[beyond_col]))
-        df["morethan5_linear_distance"] = df.apply(_linear_dists, axis=1)
+    _filter_split_mut_cols(df, exclude_codes, "ptm_site",
+                           extra_cols=("confirmed_disrupting_mutations",))
 
     # Recompute mutation_at_ptm_site from filtered within-5 string
     if "mutation_at_ptm_site" in df.columns and "ptm_site" in df.columns:
@@ -686,14 +895,11 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
             ptm_m = re.search(r"(\d+)", str(row.get("ptm_site", "")))
             if not ptm_m:
                 return "no"
-            return "yes" if int(ptm_m.group(1)) in _positions_from_str(row[within_col]) else "no"
+            return "yes" if int(ptm_m.group(1)) in _positions_from_str(row[_WITHIN_COL]) else "no"
         df["mutation_at_ptm_site"] = df.apply(_at_ptm, axis=1)
 
     before = len(df)
-    df = df[
-        (df[within_col].fillna("").str.len() > 0) |
-        (df[beyond_col].fillna("").str.len() > 0)
-    ].reset_index(drop=True)
+    df = df[_has_remaining_mutations(df)].reset_index(drop=True)
     removed = before - len(df)
     print(f"  Removed {removed} PTM rows with no qualifying mutations; "
           f"{len(df)} rows remaining")
@@ -703,32 +909,24 @@ def apply_polyphen_filter(df: pd.DataFrame, exclude_classes: list[str]) -> pd.Da
 def apply_polyphen_filter_cluster(df: pd.DataFrame, exclude_classes: list[str]) -> pd.DataFrame:
     """Remove mutations of excluded PP classes from the wide-format cluster DB.
 
-    Filters nearby_mutations and recomputes its count/position columns, then
-    drops the whole anchor row if the anchor's own class is excluded or no
-    nearby mutations remain. total_nearby_patient_count is left as the
-    pre-filter total -- same caveat as apply_polyphen_filter's *_total_patient_count.
+    Filters the within-5/more-than-5 neighbor strings and recomputes their
+    count/position/linear-distance columns, then drops the whole anchor row if
+    the anchor's own class is excluded or no neighbors remain in either group.
+    *_total_patient_count columns are left as pre-filter totals -- same caveat
+    as apply_polyphen_filter.
     """
     exclude_codes = {_PP_CODE_MAP[c] for c in exclude_classes if c in _PP_CODE_MAP}
     if not exclude_codes:
         return df
 
     print(f"\nApplying PolyPhen filter — excluding: {', '.join(exclude_classes)}")
-    print("  Note: total_nearby_patient_count retains pre-filter totals")
+    print("  Note: *_total_patient_count columns retain pre-filter totals")
 
-    df["nearby_mutations"] = df["nearby_mutations"].fillna("").apply(
-        lambda s: _filter_mut_str(s, exclude_codes)
-    )
-    df["nearby_mutation_count"] = df["nearby_mutations"].apply(
-        lambda s: len([e for e in s.split(", ") if e.strip()]) if s else 0
-    )
-    df["unique_nearby_position_count"] = df["nearby_mutations"].apply(
-        lambda s: len(set(_positions_from_str(s)))
-    )
+    _filter_split_mut_cols(df, exclude_codes, "anchor_position")
 
     before = len(df)
     anchor_excluded = df["anchor_polyphen_class"].isin(exclude_classes)
-    no_neighbors_left = df["nearby_mutations"].fillna("").str.len() == 0
-    df = df[~anchor_excluded & ~no_neighbors_left].reset_index(drop=True)
+    df = df[~anchor_excluded & _has_remaining_mutations(df)].reset_index(drop=True)
     removed = before - len(df)
     print(f"  Removed {removed} anchor rows (excluded anchor class or no qualifying neighbors); "
           f"{len(df)} rows remaining")
@@ -1142,9 +1340,11 @@ def annotate_cluster_long_format(
 # Main
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str]) -> None:
+def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
+                            ptm_source: str = DEFAULT_PTM_SOURCE) -> None:
     """Run all 5 annotation phases on the PTM Proximity proximity database."""
-    proximity_db = output_dir / "ptm_mutation_proximity_db.tsv"
+    ptm_paths = ptm_output_paths(output_dir, ptm_source)
+    proximity_db = ptm_paths["db"]
     print(f"Reading proximity DB: {proximity_db}")
     df = pd.read_csv(proximity_db, sep="\t", encoding="utf-16", dtype=str,
                      keep_default_na=False)
@@ -1200,7 +1400,7 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str]) -> None:
     df.to_csv(proximity_db, sep="\t", index=False, encoding="utf-16")
     print(f"\nUpdated proximity DB written to: {proximity_db}")
 
-    long_db = output_dir / "ptm_mutation_proximity_long.tsv"
+    long_db = ptm_paths["long"]
     if long_db.exists():
         print(f"\nAnnotating long-format DB: {long_db}")
         df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
@@ -1232,7 +1432,7 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
 
     t0 = time.time()
     pp_cache = run_polyphen_phase(
-        df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
+        df, bare_mutation_cols=("anchor_mutation",),
         phase_idx=0, num_phases=3,
     )
     anchor_classes, anchor_scores = [], []
@@ -1320,6 +1520,12 @@ def main() -> None:
         help="Which pipeline mode's output to annotate (default: ptm-proximity)",
     )
     parser.add_argument(
+        "--ptm-source",
+        choices=PTM_SOURCES,
+        default=DEFAULT_PTM_SOURCE,
+        help="Which PTM source's ptm-proximity output to annotate: 'ptmd' (default) or 'psp'",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT_DIR),
         help="Directory containing the output database (default: Output/)",
@@ -1338,7 +1544,7 @@ def main() -> None:
     if args.mode == "mutation-clustering":
         _annotate_mutation_clustering(output_dir, args.pp_exclude)
     else:
-        _annotate_ptm_proximity(output_dir, args.pp_exclude)
+        _annotate_ptm_proximity(output_dir, args.pp_exclude, args.ptm_source)
 
 
 if __name__ == "__main__":

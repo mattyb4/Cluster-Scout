@@ -25,12 +25,15 @@ from pipeline_utils import (  # noqa: E402
     COSMIC_SOMATIC_STATUSES,
     INTERACTORS_1433_INPUT_DIR,
     MUTATION_CLUSTERING_STEPS,
+    PSP_INPUT_DIR,
     PTM_PROXIMITY_STEPS,
     PTMD_INPUT_DIR,
     extract_uniprot_from_cif,
     get_protein_length,
     hotspots_tsv_path,
     input_dir,
+    pipeline_steps,
+    ptm_output_paths,
     resolve_input_file,
     validate_1433_file,
     validate_cosmic_file,
@@ -39,6 +42,7 @@ from pipeline_utils import (  # noqa: E402
 from pipeline_utils import (  # noqa: E402
     fmt_time as _fmt_time,
 )
+from psp_input import discover_psp_files, psp_folder_summary, validate_psp_folder  # noqa: E402
 
 # Names imported above purely to be re-exported for sibling ui/*.py modules
 # to `from ui.common import ...` -- not used directly in this file, so a
@@ -54,9 +58,14 @@ __all__ = [
     "_fmt_time",
     "extract_uniprot_from_cif",
     "get_protein_length",
+    "discover_psp_files",
     "hotspots_tsv_path",
+    "pipeline_steps",
+    "psp_folder_summary",
+    "ptm_output_paths",
     "resolve_input_file",
     "validate_1433_file",
+    "validate_psp_folder",
 ]
 
 # 14-3-3 confirmed-interactors file isn't listed here: it's bundled with the app
@@ -77,6 +86,14 @@ _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
         validate_ptmd_file,
     ),
 }
+
+# PhosphoSitePlus is a folder of files rather than one file, so it's handled
+# separately from _INPUT_FOLDERS (see psp_input.py for how files are recognized)
+_PSP_INPUT_FOLDER = input_dir(PROJECT_ROOT, PSP_INPUT_DIR)
+
+# PTM Proximity's two PTM sources: (Pipeline/Results tab label, --ptm-source value)
+_PTM_SOURCE_OPTIONS = [("PTMD", "ptmd"), ("PhosphoSitePlus", "psp")]
+_PTM_SOURCE_BY_LABEL = dict(_PTM_SOURCE_OPTIONS)
 
 
 # ── Hover-tooltip help icons ──────────────────────────────────────────────────
@@ -236,8 +253,9 @@ def isolate_textbox_scroll(textbox: ctk.CTkTextbox) -> None:
 _MODE_HELP: dict[str, str] = {
     "ptm-proximity": "Find cancer mutations that cluster near, or directly "
                       "disrupt, known PTM (post-translational modification) "
-                      "sites in 3D protein structure. Merges PTMD's PTM-site "
-                      "data with recurrent COSMIC hotspot mutations, then "
+                      "sites in 3D protein structure. Merges PTM-site data "
+                      "(from PTMD or PhosphoSitePlus - see PTM source) with "
+                      "recurrent COSMIC hotspot mutations, then "
                       "annotates results with PolyPhen-2, kinase, 14-3-3, "
                       "and AIUPred predictions.",
     "mutation-clustering": "Find recurrent COSMIC hotspot mutations that "
@@ -314,7 +332,7 @@ _CACHE_ITEMS = [
     # (step_label, display_name, path, is_dir)
     ("Step 1", "UniProt gene mapping",   _CACHE_DIR / "uniprot_gene_mapping.tsv",    False),
     ("Step 1", "Gene → UniProt mapping", _CACHE_DIR / "gene_to_uniprot_mapping.tsv", False),
-    ("Step 1", "Isoform safe lengths",   _CACHE_DIR / "isoform_safe_lengths.tsv",    False),
+    ("Step 1", "Isoform sequences",      _CACHE_DIR / "uniprot_isoform_sequences.tsv", False),
     ("Step 4", "14-3-3 predictions",     _CACHE_DIR / "1433pred",                    True),
     ("Step 4", "PolyPhen-2 scores",      _CACHE_DIR / "polyphen.tsv",                False),
     ("Step 4", "Kinase predictions",     _CACHE_DIR / "kinase_predictions.tsv",      False),
@@ -425,6 +443,11 @@ _PTM_TV_COLS = [
     ("At PTM",               "atptm",             52, False, True),
     ("Confirmed disrupted", "confirmed_disrupt",150, False, False),
     ("PTM diseases",         "diseases",         140, False, False),
+    ("LTP",                  "psp_ltp",           50, True,  True),
+    ("HTP",                  "psp_htp",           50, True,  True),
+    ("CST MS",               "psp_cst",           65, True,  False),
+    ("Disease assoc.",       "disease_assoc",     95, False, True),
+    ("PSP diseases",         "psp_diseases",     180, False, True),
     ("14-3-3",               "pred14",            58, False, True),
     ("14-3-3 consensus score", "pred14_consensus",  150, False, False),
     ("14-3-3 confirmed",     "conf14",            120, False, False),
@@ -443,6 +466,7 @@ _PTM_TV_COLS = [
 _MUT_TV_COLS = [
     ("#",                    "#col",              32, True,  True),
     ("Mutation",             "mut",               80, False, True),
+    ("COSMIC label",         "cosmic_mut",        90, False, True),
     ("Seq dist",             "seqd",              62, True,  True),
     ("Dist (Å)",             "dist",              62, True,  True),
     ("Binding?",             "isbnd",             58, False, True),
@@ -496,7 +520,24 @@ _PTM_COL_HELP: dict[str, str] = {
     "confirmed_disrupt": "Nearby mutations experimentally confirmed, in "
                           "PTMD's literature, to disrupt this specific PTM site.",
     "diseases": "Cancer-related diseases associated with this PTM site in "
-                "PTMD's literature-curated data.",
+                "the PTM source's literature-curated data (PTMD, or "
+                "PhosphoSitePlus's disease-associated sites).",
+    "psp_ltp": "PhosphoSitePlus only. Number of literature records where this "
+               "site was studied with low-throughput methods aimed at the site "
+               "itself (mutagenesis, site-specific antibodies, kinase assays) - "
+               "the stronger kind of evidence.",
+    "psp_htp": "PhosphoSitePlus only. Number of published high-throughput "
+               "mass-spectrometry papers that detected this site. Shows the site "
+               "exists, not that anyone studied what it does.",
+    "psp_cst": "PhosphoSitePlus only. Number of Cell Signaling Technology's own "
+               "(mostly unpublished) mass-spec experiments that detected this "
+               "site. Counts experiments, not papers, so it can be very large.",
+    "disease_assoc": "PhosphoSitePlus only. Whether PhosphoSitePlus lists any "
+                     "disease association for this site.",
+    "psp_diseases": "PhosphoSitePlus only. Every disease associated with this "
+                    "site, with PhosphoSitePlus's alteration in parentheses (e.g. "
+                    "increased phosphorylation in that disease). Unlike PTM "
+                    "diseases, not limited to cancer.",
     "pred14": "Predicted 14-3-3 binding at this site (14-3-3 proteins often "
               "bind phosphorylated motifs).",
     "pred14_consensus": "14-3-3-Pred's combined \"Consensus\" score for this "
@@ -532,8 +573,25 @@ _PTM_COL_HELP: dict[str, str] = {
                   "- all are shown, semicolon-separated.",
 }
 
+# Columns that only one PTM source fills in, per Results-tab table. They're
+# hidden while the other source is shown, so they don't sit there blank.
+_PTM_SOURCE_ONLY_COLS: dict[str, dict[str, set[str]]] = {
+    "ptm": {
+        "psp": {"psp_ltp", "psp_htp", "psp_cst", "disease_assoc", "psp_diseases"},
+        "ptmd": {"confirmed_disrupt"},
+    },
+    "mut": {"ptmd": {"confirmed_disrupt"}},
+}
+
 _MUT_COL_HELP: dict[str, str] = {
-    "mut": "The specific mutation (e.g. R175H) shown in this row.",
+    "mut": "The specific mutation (e.g. R175H) shown in this row, numbered "
+           "along the canonical sequence AlphaFold models.",
+    "cosmic_mut": "The mutation as COSMIC labels it. COSMIC sometimes numbers a "
+                  "protein by a different isoform than the canonical sequence "
+                  "AlphaFold models; the pipeline moves those mutations to their "
+                  "canonical position (the Mutation column), so this differs "
+                  "from it when that happened. Use this label to look the "
+                  "mutation up in COSMIC.",
     "seqd": "Linear (sequence) distance, in residues, between this mutation "
             "and the PTM site.",
     "dist": "3D spatial distance, in Ångströms, between this mutation and "
@@ -578,6 +636,7 @@ _MUT_COL_HELP: dict[str, str] = {
 # (i.e. everything except "#col", the synthetic row index).
 _MUT_LONG_SRC_MAP = {
     "mut": "mutation",
+    "cosmic_mut": "cosmic_mutation",
     "seqd": "sequence_distance",
     "dist": "distance_angstrom",
     "isbnd": "mut_is_binding",
@@ -602,14 +661,22 @@ _ANCHOR_TV_COLS = [
     ("UniProt",          "uniprot",     70,  False, True),
     ("Gene",             "gene",        58,  False, True),
     ("Anchor mutation",  "anchor",     100,  False, True),
+    ("Anchor COSMIC label", "anchor_cosmic", 120, False, True),
     ("Binding?",         "isbnd",       58,  False, True),
     ("Disordered?",      "isdis",       78,  False, True),
     ("PP Class",         "ppc",        115,  False, True),
     ("PP Score",         "pps",         62,  True,  False),
     ("Anchor pLDDT",     "anchor_plddt", 90, True,  True),
-    ("Nearby count",     "near_count",  95,  True,  True),
-    ("Unique positions", "uniq_pos",   100,  True,  True),
-    ("Nearby patients",  "near_pts",   100,  True,  True),
+    ("≤5 pos",           "near",        52,  True,  True),
+    (">5 pos",           "far",         52,  True,  True),
+    ("≤5 pos patients",  "near_pts",   100,  True,  False),
+    (">5 pos patients",  "far_pts",    100,  True,  False),
+    ("≤5 unique pos",    "near_unique", 90,  True,  False),
+    (">5 unique pos",    "far_unique",  90,  True,  False),
+    ("Unique pos",       "total",       75,  True,  True),
+    ("Patients",         "pts",         65,  True,  True),
+    ("Max lin. dist.",   "maxlin",      90,  True,  True),
+    ("Linear distances", "lin_dist_raw", 150, False, False),
     ("Anchor AIUPred gen.",  "anchor_aiupred_gen",  120, True,  False),
     ("Anchor AIUPred bind.", "anchor_aiupred_bind", 120, True,  False),
     ("Anchor domain",    "anchor_domain", 180, False, False),
@@ -618,6 +685,7 @@ _ANCHOR_TV_COLS = [
 _NEARBY_TV_COLS = [
     ("#",                    "#col", 32, True,  True),
     ("Mutation",             "mut",  80, False, True),
+    ("COSMIC label",         "cosmic_mut", 90, False, True),
     ("Seq dist",             "seqd", 62, True,  True),
     ("Dist (Å)",             "dist", 62, True,  True),
     ("Binding?",             "isbnd",             58, False, True),
@@ -639,15 +707,35 @@ _ANCHOR_COL_HELP: dict[str, str] = {
               "symmetric - every mutation with at least one 3D neighbor gets "
               "its own anchor row, so a pair (A, B) appears twice: once "
               "anchored on A, once anchored on B.",
+    "anchor_cosmic": "The anchor mutation as COSMIC labels it. Differs from the "
+                     "Anchor mutation column when COSMIC numbers this protein by "
+                     "a different isoform than the canonical sequence and the "
+                     "pipeline moved the mutation to its canonical position.",
     "anchor_plddt": "AlphaFold's per-residue confidence (pLDDT, 0-100) at "
                     "the anchor mutation's position.",
-    "near_count": "Number of other recurrent mutations within the distance "
-                  "cutoff of this anchor mutation.",
-    "uniq_pos": "Number of distinct mutated positions among the nearby "
-                "mutations (vs. Nearby count, which counts every mutation, "
-                "including multiple substitutions at the same position).",
-    "near_pts": "Total COSMIC patient count summed across every nearby "
-                "mutation for this anchor.",
+    "near": "Number of other recurrent mutations within the distance cutoff "
+            "of this anchor that are also within 5 residues of it in the "
+            "linear sequence.",
+    "far": "Number of other recurrent mutations within the distance cutoff "
+           "of this anchor that are more than 5 residues away in the linear "
+           "sequence - close in 3D space but not sequence-adjacent.",
+    "near_pts": "Total COSMIC patient count summed across the ≤ 5 pos "
+                "(sequence-adjacent) nearby mutations.",
+    "far_pts": "Total COSMIC patient count summed across the > 5 pos "
+               "(sequence-distant) nearby mutations.",
+    "near_unique": "Number of distinct mutated positions among the ≤ 5 pos "
+                   "group (vs. ≤ 5 pos itself, which counts every mutation, "
+                   "including multiple substitutions at the same position).",
+    "far_unique": "Number of distinct mutated positions among the > 5 pos group.",
+    "total": "Total number of distinct nearby mutation positions "
+             "(≤ 5 pos + > 5 pos, unique positions only).",
+    "pts": "Total COSMIC patient count across every nearby mutation for this "
+           "anchor (≤ 5 pos + > 5 pos combined).",
+    "maxlin": "The largest linear (sequence) distance among the > 5 pos "
+              "nearby mutations - how far the most sequence-distant-but-"
+              "3D-close mutation actually is.",
+    "lin_dist_raw": "Linear (sequence) distance from the anchor to each "
+                    "individual > 5 pos mutation.",
     "isbnd": "Yes/no: is the anchor mutation's residue predicted to be a "
              "disordered binding region (AIUPred binding score > 0.5)?",
     "isdis": "Yes/no: is the anchor mutation's residue predicted to be "
@@ -668,7 +756,14 @@ _ANCHOR_COL_HELP: dict[str, str] = {
 }
 
 _NEARBY_COL_HELP: dict[str, str] = {
-    "mut": "The specific nearby mutation (e.g. R175H) shown in this row.",
+    "mut": "The specific nearby mutation (e.g. R175H) shown in this row, "
+           "numbered along the canonical sequence AlphaFold models.",
+    "cosmic_mut": "The mutation as COSMIC labels it. COSMIC sometimes numbers a "
+                  "protein by a different isoform than the canonical sequence "
+                  "AlphaFold models; the pipeline moves those mutations to their "
+                  "canonical position (the Mutation column), so this differs "
+                  "from it when that happened. Use this label to look the "
+                  "mutation up in COSMIC.",
     "seqd": "Linear (sequence) distance, in residues, between this mutation "
             "and the anchor mutation.",
     "dist": "3D spatial distance, in Ångströms, between this mutation and "
@@ -702,6 +797,7 @@ _NEARBY_COL_HELP: dict[str, str] = {
 # that's a direct pass-through (i.e. everything except "#col").
 _CLUSTER_LONG_SRC_MAP = {
     "mut": "mutation",
+    "cosmic_mut": "cosmic_mutation",
     "seqd": "sequence_distance",
     "dist": "distance_angstrom",
     "isbnd": "mut_is_binding",

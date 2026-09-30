@@ -31,18 +31,67 @@ def chain():
     ])
 
 
-class TestGetCaCoord:
-    def test_returns_ca_coordinate(self, mod, chain):
-        coord = mod.get_ca_coord(chain, 10)
+class TestGetCaCoordMap:
+    def test_maps_residue_to_ca_coordinate(self, mod, chain):
+        coord = mod.get_ca_coord_map(chain)[10]
         assert np.array_equal(coord, [0.0, 0.0, 0.0]), (
-            "should return the CA atom's coordinate for the given residue, ignoring "
+            "should map each residue to its CA atom's coordinate, ignoring "
             f"the N/C atoms at the same residue -- got {coord}"
         )
 
-    def test_returns_none_for_missing_residue(self, mod, chain):
-        assert mod.get_ca_coord(chain, 999) is None, (
-            "a residue number with no matching atom in the chain must return None, "
-            "not raise or return a garbage coordinate"
+    def test_missing_residue_is_absent(self, mod, chain):
+        assert 999 not in mod.get_ca_coord_map(chain), (
+            "a residue number with no CA atom in the chain must not appear in the map"
+        )
+
+    def test_first_ca_wins_when_residue_has_several(self, mod):
+        chain = FakeChain([
+            (1, "CA", [1.0, 0.0, 0.0]),
+            (1, "CA", [9.0, 0.0, 0.0]),  # e.g. an alternate location
+        ])
+        coord = mod.get_ca_coord_map(chain)[1]
+        assert np.array_equal(coord, [1.0, 0.0, 0.0]), (
+            f"with duplicate CA atoms, the first one should be used, got {coord}"
+        )
+
+
+class TestGetResidueAaMap:
+    def test_maps_each_residue_to_one_letter_code_once(self, mod):
+        class NamedChain:
+            res_id = np.array([1, 1, 2, 3])
+            res_name = np.array(["SER", "SER", "LYS", "XYZ"])
+
+        assert mod.get_residue_aa_map(NamedChain()) == {1: "S", 2: "K", 3: "?"}, (
+            "each residue should map to its one-letter code, with unrecognized "
+            "residue names mapped to '?'"
+        )
+
+
+class TestSharedCaCoords:
+    def test_find_nearby_mutations_uses_passed_map(self, mod, chain):
+        # Move residue 15 out of range in the passed map only -- if the function
+        # rebuilt the map from the chain instead, it would still find the hit.
+        ca_coords = mod.get_ca_coord_map(chain)
+        ca_coords[15] = np.array([90.0, 0.0, 0.0])
+        results = mod.find_nearby_mutations(
+            chain, ptm_pos=10, mutation_entries=[("A15B", 15)], cutoff=10.0, ca_coords=ca_coords,
+        )
+        assert results == [], (
+            f"a passed ca_coords map must be used as-is rather than rebuilt from the chain, got {results}"
+        )
+
+    def test_find_mutation_clusters_preserves_input_order_of_neighbors(self, mod):
+        chain = FakeChain([
+            (1, "CA", [0.0, 0.0, 0.0]),
+            (2, "CA", [2.0, 0.0, 0.0]),
+            (3, "CA", [1.0, 0.0, 0.0]),
+        ])
+        clusters = mod.find_mutation_clusters(
+            chain, [("A1B", 1), ("C2D", 2), ("E3F", 3)], cutoff=10.0,
+        )
+        assert [h["mutation"] for h in clusters[("A1B", 1)]] == ["C2D", "E3F"], (
+            "neighbors should come back in mutation_entries order, not sorted by distance, "
+            f"got {[h['mutation'] for h in clusters[('A1B', 1)]]}"
         )
 
 

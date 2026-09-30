@@ -24,6 +24,9 @@ The pipeline requires three input data files. Each goes in its own folder under 
 | `data/input/cosmic/` | COSMIC Mutant Census TSV (600+ MB) | [COSMIC](https://cancer.sanger.ac.uk/cosmic) |
 | `data/input/ptmd/` | PTMD disease-associated PTMs TSV | [PTMD 2.0](https://ptmd.biocuckoo.cn/download.php) |
 | `data/input/1433_interactors/` | 14-3-3 confirmed interactors Excel | Provided in this repository |
+| `data/input/phosphositeplus/` | *Optional:* PhosphoSitePlus download (a folder of files) | [PhosphoSitePlus](https://www.phosphosite.org) (free account required) |
+
+**PhosphoSitePlus (optional alternative to PTMD):** PTM Proximity mode can take its PTM sites from a PhosphoSitePlus download instead of PTMD — see "PTM sources" below. Put the download's files in `data/input/phosphositeplus/` as they come (plain or `.gz`, nested folders are fine), or use the app's Browse button next to PhosphoSitePlus and pick the download folder. Files are recognized by their columns, not their names, so a newer download can simply replace an older one. The `*_site_dataset` files (Phosphorylation, Ubiquitination, Acetylation, etc.) are required; `Disease-associated_sites` is optional and fills in the disease columns. Other files in the download are ignored. PhosphoSitePlus data is licensed CC BY-NC-SA 3.0: publications using it must credit "PhosphoSitePlus(R), www.phosphosite.org".
 
 **Using the desktop app:** Click the **Browse** button next to each input file to select it. The app copies it into the correct folder automatically.
 
@@ -92,6 +95,18 @@ uv run main.py --mode ptm-proximity
 uv run main.py --mode mutation-clustering
 ```
 
+**PTM sources:** PTM-proximity mode takes its PTM sites from PTMD by default. `--ptm-source psp` uses PhosphoSitePlus instead: every human site in the download (not only disease-associated ones), with each site's evidence counts and disease associations. PSP runs write their own files with a `psp_` prefix (`Output/psp_ptm_mutation_proximity_db.tsv`, `data/steps/PSP_COSMIC_hotspots_by_protein.tsv`, `Output/logs/psp_ptm_skipped.tsv`), so PTMD and PSP results can both exist and be compared. In the app, pick the source with the **PTM source** toggle under the mode selector.
+
+```bash
+uv run main.py --mode ptm-proximity --ptm-source psp
+```
+
+PSP sites can optionally be narrowed by evidence before anything else runs: `--psp-min-ltp`/`--psp-max-ltp` and `--psp-min-htp`/`--psp-max-htp` set inclusive ranges for the LTP and HTP counts (default 0 to no limit), and `--psp-disease-only` keeps only sites PhosphoSitePlus lists a disease for (needs the `Disease-associated_sites` file). In the app, these appear as **PhosphoSitePlus filters** when that source is selected. The run log records which filters were used and how many sites they kept.
+
+```bash
+uv run main.py --mode ptm-proximity --ptm-source psp --psp-min-ltp 1 --psp-disease-only
+```
+
 **PTM-proximity steps:**
 
 1. **Filter** — merges and filters the PTMD and COSMIC datasets. A mutation must show up in a minimum of 3 distinct samples (and have a confirmed/reported-somatic status) for it to be added to the filtered dataset. This threshold can be changed by editing HOTSPOT_MIN_AFFECTED_CASES near the top of scripts/1_filter.py, or via the "Min samples" setting in the app.
@@ -126,7 +141,7 @@ The main output of this pipeline is ptm_mutation_proximity_db.tsv, found in the 
 **gene** - the gene the protein is associated with  
 **ptm_site** - position within protein sequence where PTM is  
 **ptm_type** - the type of PTM  
-**mutations_within_5_positions** - list of all mutation hotspots within 5 residues of PTM site. The formatting is initial amino acid, location, AA it mutates to, then optional tags and distance. Tags include `(isoform?)` if the reference residue doesn't match the AlphaFold model, `(PP:D,0.999)` for PolyPhen-2 predictions (D=Damaging, P=Possibly Damaging, B=Benign with score), and the PAE score* in parentheses.  
+**mutations_within_5_positions** - list of all mutation hotspots within 5 residues of PTM site. The formatting is initial amino acid, location, AA it mutates to, then optional tags and distance. Mutations are numbered along the canonical sequence AlphaFold models (see "COSMIC isoform numbering" below). Tags include `(isoform?)` if a mutation couldn't be placed on that sequence, or its reference residue doesn't match the AlphaFold model, `(PP:D,0.999)` for PolyPhen-2 predictions (D=Damaging, P=Possibly Damaging, B=Benign with score), and the PAE score* in parentheses.  
 **mutation_count_within_5_positions** - sum of total mutation hotspots in previous column  
 **unique_mutation_position_count_within_5_positions** - count of distinct residue positions represented in mutations_within_5_positions (multiple substitutions at the same residue count once)  
 **nearby_muts_total_patient_count** - total distinct patients across all mutations in mutations_within_5_positions  
@@ -136,8 +151,8 @@ The main output of this pipeline is ptm_mutation_proximity_db.tsv, found in the 
 **distant_muts_total_patient_count** - total distinct patients across all mutations in mutations_more_than_5_positions  
 **morethan5_linear_distance** - list of distances on linear amino acid sequence for all mutation hotspots in mutations_more_than_5_positions. This allows for easily seeing entries with mutations that are far on the linear sequence but fold close to PTM site in 3D space  
 **mutation_at_ptm_site** - indicates if the PTM site itself is a mutation hotspot  
-**confirmed_disrupting_mutations** - mutations experimentally shown to disrupt this PTM (from PTMD)  
-**ptm_diseases** - lists diseases PTM is associated with according to PTMD 2.0  
+**confirmed_disrupting_mutations** - mutations experimentally shown to disrupt this PTM (from PTMD; blank for PhosphoSitePlus, which has no equivalent)  
+**ptm_diseases** - lists cancer-related diseases the PTM is associated with according to the PTM source (PTMD 2.0, or PhosphoSitePlus's disease-associated sites)  
 **total_cosmic_missense_patients** - total distinct patients with any missense mutation in this gene across COSMIC  
 **1433pred_binding_site** - "Yes" if the 14-3-3-Pred consensus score > 0, "No" if ≤ 0, blank for non-Ser/Thr sites  
 **1433pred_consensus** - raw 14-3-3-Pred consensus score  
@@ -148,11 +163,17 @@ The main output of this pipeline is ptm_mutation_proximity_db.tsv, found in the 
 **ptm_aiupred_binding** - AIUPred binding-region disorder score (0-1) at the PTM residue  
 **ptm_is_disordered** - "yes"/"no", thresholded from ptm_aiupred_general at > 0.5  
 **ptm_is_binding** - "yes"/"no", thresholded from ptm_aiupred_binding at > 0.5  
+**psp_ltp**, **psp_htp**, **psp_cst** *(PhosphoSitePlus source only)* - the site's evidence counts from PhosphoSitePlus: low-throughput literature records (LT_LIT), high-throughput mass-spec papers (MS_LIT), and Cell Signaling Technology's own mass-spec runs (MS_CST). Blank in PhosphoSitePlus means 0.  
+**disease_associated** *(PhosphoSitePlus source only)* - "yes" if PhosphoSitePlus lists any disease for this site  
+**psp_diseases** *(PhosphoSitePlus source only)* - every disease PhosphoSitePlus associates with the site (not only cancers), with its alteration in parentheses, e.g. `breast cancer (increased)`  
 **ptm_domain** - InterPro functional domain/family/site entry (or entries, semicolon-separated) whose residue range contains the PTM site, formatted as `name (type, start-end)`. Curated entries only (InterPro's own cross-database consensus, not every individual member-database hit), so nested/overlapping calls (e.g. a domain within a broader superfamily) can both appear. Blank if the position falls in no annotated entry. The `_long.tsv` companion additionally has a per-mutation **mutation_domain** column, the same lookup for each nearby mutation's own position.  
 
 
 
 *Predicted Alignment Error (PAE) score is how confident AlphaFold is that those residues are at that position. Lower score = higher confidence
+
+### COSMIC isoform numbering
+COSMIC numbers each mutation along its own transcript, which is sometimes a different isoform than the canonical UniProt sequence AlphaFold models, so a COSMIC label like R248Q can really be residue 249 of the structure. Step 1 fixes this: for each protein it fetches every UniProt isoform, picks the one that matches the most COSMIC reference residues as COSMIC's numbering, aligns it to the canonical sequence, and moves each mutation to its canonical position, but only if the canonical residue there is the mutation's reference residue. Moved mutations are labelled in canonical numbering throughout the outputs, and the long-format files' **cosmic_mutation** column (**cosmic_anchor_mutation** for cluster anchors) gives COSMIC's own label for looking them up in COSMIC. Mutations that can't be placed (in isoform-only sequence, or no isoform explains the reference residue) keep COSMIC's label and are tagged `(isoform?)`. The step-1 file records what happened per protein in its `cosmic_numbering_isoform`, `cosmic_mutation_labels` and `unmapped_mutations` columns. The full method (alignment parameters, validation, limitations) is in [docs/methods.md](docs/methods.md).
 
 ## Error logging
 The pipeline also generates logs found in Output/logs to record any issues where the pipeline was unable to download a file for a certain protein from AlphaFold or unable to run calculations for a PTM and why. For more information, see skipped_ptm_summary.md in Output/logs 
@@ -312,7 +333,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **Input data files** (`PTMD_disease_associated_ptms.tsv`, `Cosmic_MutantCensus_v104_GRCh38.tsv`) are static files downloaded from PTMD and COSMIC.
 
-**Kinase predictions** are generated locally using the Kinase Library package and only computed for phosphorylation sites (Ser/Thr/Tyr).
+**Kinase predictions** are generated locally using the Kinase Library package and only computed for phosphorylation sites (Ser/Thr/Tyr). The Kinase Library needs older numpy/pandas versions than the rest of the project, so it runs in its own environment: `scripts/kinase_predictor.py` declares it as its own dependency (versions pinned in `scripts/kinase_predictor.py.lock`), and step 4 runs that script with `uv run`. The first run builds that environment automatically (about a minute, a few hundred MB, cached afterwards). Don't install `kinase-library` into the project environment: it would downgrade numpy/pandas, and the next `uv sync` removes it again. The Kinase Library is licensed CC BY-NC-SA 3.0.
 
 **AIUPred disorder scores** are computed locally using AIUPred, once per protein, for both general intrinsic disorder and binding-region disorder.
 

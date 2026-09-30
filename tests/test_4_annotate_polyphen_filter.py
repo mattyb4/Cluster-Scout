@@ -173,19 +173,25 @@ class TestApplyPolyphenFilter:
 
 
 class TestApplyPolyphenFilterCluster:
-    def _row(self, anchor, anchor_class, nearby):
+    def _row(self, anchor, anchor_class, within="", beyond="", anchor_position=175):
         return {
             "UniProt": "P04637",
             "anchor_mutation": anchor,
+            "anchor_position": str(anchor_position),
             "anchor_polyphen_class": anchor_class,
-            "nearby_mutations": nearby,
-            "nearby_mutation_count": 0,
-            "unique_nearby_position_count": 0,
-            "total_nearby_patient_count": 5,
+            "mutations_within_5_positions": within,
+            "mutation_count_within_5_positions": 0,
+            "unique_mutation_position_count_within_5_positions": 0,
+            "nearby_muts_total_patient_count": 5,
+            "mutations_more_than_5_positions": beyond,
+            "mutation_count_more_than_5_positions": 0,
+            "unique_mutation_position_count_more_than_5_positions": 0,
+            "distant_muts_total_patient_count": 7,
+            "morethan5_linear_distance": "",
         }
 
     def test_no_op_when_exclude_classes_is_empty(self):
-        df = pd.DataFrame([self._row("R175H", "probably_damaging", "A101B(PP:D,0.99)-1.00Å")])
+        df = pd.DataFrame([self._row("R175H", "probably_damaging", within="A171B(PP:D,0.99)-1.00Å")])
         result = mod.apply_polyphen_filter_cluster(df, [])
         assert result is df, (
             "with nothing excluded, apply_polyphen_filter_cluster should return the "
@@ -195,7 +201,7 @@ class TestApplyPolyphenFilterCluster:
     def test_removes_excluded_nearby_mutation_but_keeps_row(self):
         df = pd.DataFrame([self._row(
             "R175H", "benign",
-            "A101B(PP:D,0.99)-1.00Å, C102D(PP:B,0.10)-2.00Å",
+            within="A171B(PP:D,0.99)-1.00Å, C172D(PP:B,0.10)-2.00Å",
         )])
         result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
 
@@ -203,19 +209,43 @@ class TestApplyPolyphenFilterCluster:
             f"the anchor isn't excluded and one qualifying (benign) neighbor remains "
             f"-- the row must survive, got {len(result)} row(s)"
         )
-        assert result.iloc[0]["nearby_mutations"] == "C102D(PP:B,0.10)-2.00Å", (
+        assert result.iloc[0]["mutations_within_5_positions"] == "C172D(PP:B,0.10)-2.00Å", (
             f"the D-tagged neighbor should be removed from the string, got "
-            f"{result.iloc[0]['nearby_mutations']!r}"
+            f"{result.iloc[0]['mutations_within_5_positions']!r}"
         )
-        assert result.iloc[0]["nearby_mutation_count"] == 1, (
-            f"nearby_mutation_count must be recomputed from the filtered string, got "
-            f"{result.iloc[0]['nearby_mutation_count']}"
+        assert result.iloc[0]["mutation_count_within_5_positions"] == 1, (
+            f"mutation_count_within_5_positions must be recomputed from the filtered "
+            f"string, got {result.iloc[0]['mutation_count_within_5_positions']}"
+        )
+
+    def test_filters_distant_column_and_recomputes_linear_distance(self):
+        df = pd.DataFrame([self._row(
+            "R175H", "benign",
+            beyond="A101B(PP:D,0.99)-1.00Å, C250D(PP:B,0.10)-2.00Å",
+        )])
+        result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
+
+        assert len(result) == 1, (
+            f"a qualifying > 5 pos neighbor remains, so the row must survive even with "
+            f"no <= 5 pos neighbors, got {len(result)} row(s)"
+        )
+        assert result.iloc[0]["mutations_more_than_5_positions"] == "C250D(PP:B,0.10)-2.00Å", (
+            f"the D-tagged > 5 pos neighbor should be removed, got "
+            f"{result.iloc[0]['mutations_more_than_5_positions']!r}"
+        )
+        assert result.iloc[0]["mutation_count_more_than_5_positions"] == 1, (
+            f"mutation_count_more_than_5_positions must be recomputed, got "
+            f"{result.iloc[0]['mutation_count_more_than_5_positions']}"
+        )
+        assert result.iloc[0]["morethan5_linear_distance"] == "75", (
+            f"linear distance must be recomputed from anchor_position (175) to the "
+            f"remaining C250D, got {result.iloc[0]['morethan5_linear_distance']!r}"
         )
 
     def test_drops_row_when_anchor_own_class_is_excluded(self):
         df = pd.DataFrame([self._row(
             "R175H", "probably_damaging",
-            "C102D(PP:B,0.10)-2.00Å",
+            within="C172D(PP:B,0.10)-2.00Å",
         )])
         result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
         assert len(result) == 0, (
@@ -227,23 +257,29 @@ class TestApplyPolyphenFilterCluster:
     def test_drops_row_when_all_neighbors_filtered_out(self):
         df = pd.DataFrame([self._row(
             "R175H", "benign",
-            "A101B(PP:D,0.99)-1.00Å",
+            within="A171B(PP:D,0.99)-1.00Å",
+            beyond="A101B(PP:D,0.99)-3.00Å",
         )])
         result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
         assert len(result) == 0, (
-            f"the anchor's own class survives, but its only neighbor was filtered out "
-            f"-- a row with zero neighbors is meaningless cluster data and must be "
-            f"dropped, got {len(result)} row(s)"
+            f"the anchor's own class survives, but every neighbor in both groups was "
+            f"filtered out -- a row with zero neighbors is meaningless cluster data and "
+            f"must be dropped, got {len(result)} row(s)"
         )
 
-    def test_total_nearby_patient_count_left_as_pre_filter_total(self):
+    def test_patient_counts_left_as_pre_filter_totals(self):
         df = pd.DataFrame([self._row(
             "R175H", "benign",
-            "A101B(PP:D,0.99)-1.00Å, C102D(PP:B,0.10)-2.00Å",
+            within="A171B(PP:D,0.99)-1.00Å, C172D(PP:B,0.10)-2.00Å",
+            beyond="C250D(PP:B,0.10)-2.00Å",
         )])
         result = mod.apply_polyphen_filter_cluster(df, ["probably_damaging"])
-        assert result.iloc[0]["total_nearby_patient_count"] == 5, (
-            "total_nearby_patient_count can't be recomputed from the mutation string "
+        assert result.iloc[0]["nearby_muts_total_patient_count"] == 5, (
+            "*_total_patient_count can't be recomputed from the mutation string "
             "(no per-entry patient count embedded in it) -- it must retain its "
-            f"pre-filter value, got {result.iloc[0]['total_nearby_patient_count']}"
+            f"pre-filter value, got {result.iloc[0]['nearby_muts_total_patient_count']}"
+        )
+        assert result.iloc[0]["distant_muts_total_patient_count"] == 7, (
+            f"distant_muts_total_patient_count must also retain its pre-filter value, "
+            f"got {result.iloc[0]['distant_muts_total_patient_count']}"
         )

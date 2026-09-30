@@ -631,3 +631,30 @@ class TestHotspotsTsvPath:
             "same path -- that's the bug (one mode's Step 1 silently overwriting the other's "
             "data) this function exists to fix"
         )
+
+
+class TestPtmSourcePaths:
+    def test_psp_step1_file_is_separate_from_ptmd(self, mod, tmp_path):
+        psp = mod.hotspots_tsv_path(tmp_path, "ptm-proximity", "psp")
+        ptmd = mod.hotspots_tsv_path(tmp_path, "ptm-proximity", "ptmd")
+        assert psp == tmp_path / "data" / "steps" / "PSP_COSMIC_hotspots_by_protein.tsv"
+        assert psp != ptmd, "running one PTM source's step 1 must never overwrite the other's"
+
+    def test_ptm_source_is_ignored_for_mutation_clustering(self, mod, tmp_path):
+        assert mod.hotspots_tsv_path(tmp_path, "mutation-clustering", "psp") == \
+            mod.hotspots_tsv_path(tmp_path, "mutation-clustering")
+
+    def test_psp_outputs_are_prefixed_and_ptmd_names_unchanged(self, mod, tmp_path):
+        ptmd = mod.ptm_output_paths(tmp_path, "ptmd")
+        psp = mod.ptm_output_paths(tmp_path, "psp")
+        assert ptmd["db"] == tmp_path / "ptm_mutation_proximity_db.tsv", (
+            "PTMD's output names must stay as they were, so existing results keep loading"
+        )
+        assert psp["db"] == tmp_path / "psp_ptm_mutation_proximity_db.tsv"
+        assert psp["skipped"] == tmp_path / "logs" / "psp_ptm_skipped.tsv"
+        assert not set(ptmd.values()) & set(psp.values()), "no PSP output may share a path with PTMD's"
+
+    def test_step1_label_names_the_source(self, mod):
+        assert "PhosphoSitePlus" in mod.pipeline_steps("ptm-proximity", "psp")[0][0]
+        assert mod.pipeline_steps("ptm-proximity", "ptmd") == mod.PTM_PROXIMITY_STEPS
+        assert mod.pipeline_steps("mutation-clustering", "psp") == mod.MUTATION_CLUSTERING_STEPS

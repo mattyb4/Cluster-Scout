@@ -26,14 +26,13 @@ from ui.common import (
     _CACHE_ITEMS,
     _GRAY,
     _GREEN,
+    _PSP_INPUT_FOLDER,
     _RED,
     _YELLOW,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
     INTERACTORS_1433_INPUT_DIR,
-    MUTATION_CLUSTERING_STEPS,
     PROJECT_ROOT,
-    PTM_PROXIMITY_STEPS,
     PTMD_INPUT_DIR,
     SCRIPTS_DIR,
     _cache_entry_count,
@@ -41,11 +40,14 @@ from ui.common import (
     _fmt_time,
     _load_runtimes,
     _save_runtimes,
+    discover_psp_files,
     hotspots_tsv_path,
     input_dir,
+    pipeline_steps,
     resolve_input_file,
     validate_1433_file,
     validate_cosmic_file,
+    validate_psp_folder,
     validate_ptmd_file,
 )
 
@@ -111,6 +113,8 @@ class PipelineRunnerMixin:
     _DEFAULT_OUTPUT_FILES = [
         "ptm_mutation_proximity_db.tsv",
         "ptm_mutation_proximity_long.tsv",
+        "psp_ptm_mutation_proximity_db.tsv",
+        "psp_ptm_mutation_proximity_long.tsv",
         "mutation_cluster_db.tsv",
         "mutation_cluster_long.tsv",
     ]
@@ -168,7 +172,8 @@ class PipelineRunnerMixin:
         problems: list[str] = []
 
         needs_cosmic = mode in ("ptm-proximity", "mutation-clustering", "ca-coordinates")
-        needs_ptmd = mode == "ptm-proximity"
+        needs_ptmd = mode == "ptm-proximity" and self._ptm_source() == "ptmd"
+        needs_psp = mode == "ptm-proximity" and self._ptm_source() == "psp"
 
         if needs_cosmic:
             try:
@@ -184,6 +189,14 @@ class PipelineRunnerMixin:
             except (FileNotFoundError, RuntimeError) as exc:
                 problems.append(str(exc))
 
+        if needs_psp:
+            problems.extend(validate_psp_folder(_PSP_INPUT_FOLDER))
+            problems.extend(f"PhosphoSitePlus filters: {p}" for p in self._psp_filter_args()[1])
+            if self._psp_disease_only_var.get() and not discover_psp_files(_PSP_INPUT_FOLDER).disease:
+                problems.append("'Disease-associated sites only' needs PhosphoSitePlus's "
+                                "Disease-associated_sites file, which isn't in the input folder")
+
+        if mode == "ptm-proximity":
             # Bundled reference data -- only checked if present, shouldn't block the run
             interactors_dir = input_dir(PROJECT_ROOT, INTERACTORS_1433_INPUT_DIR)
             try:
@@ -462,7 +475,7 @@ class PipelineRunnerMixin:
     _CIF_DOWNLOAD_WORKERS = 6           # scripts/2_download_structures.py: _DOWNLOAD_MAX_WORKERS
     _TIME_PER_CIF_DOWNLOAD = 2.5 / _CIF_DOWNLOAD_WORKERS
     _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
-    _TIME_PER_ISOFORM_BATCH = 5.5       # ~10 genes per batch, sequential (1_filter.py's compute_isoform_safe_lengths)
+    _TIME_PER_ISOFORM_BATCH = 3.0       # ~25 proteins per batch, sequential (cosmic_numbering.py)
     _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
     _TIME_PER_PP_FETCH = 0.15            # sequential, paced (scripts/4_annotate.py: _PP_REQUEST_DELAY + real API latency)
     _KINASE_WORKERS = 6                 # scripts/4_annotate.py: _KIN_MAX_WORKERS
@@ -474,14 +487,14 @@ class PipelineRunnerMixin:
     _TIME_STEP1_BASE = 40               # base time for filtering/merging
     _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
 
-    def _run_precheck(self, mode: str) -> float:
+    def _run_precheck(self, mode: str, ptm_source: str = "ptmd") -> float:
         """Analyze caches and data to estimate total pipeline runtime. Returns seconds."""
         import pandas as pd
 
         self._q("log", "Initializing pipeline...")
         self._q("log", "")
 
-        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode)
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
         cache_dir = PROJECT_ROOT / "data" / "cache"
         models_dir = PROJECT_ROOT / "cif_models"
 
@@ -533,22 +546,23 @@ class PipelineRunnerMixin:
                 pass
         uncached_batches = max(0, (n_proteins - cached_genes)) // 100 + 1 if n_proteins > cached_genes else 0
 
-        # compute_isoform_safe_lengths() also runs in step 1: a separate,
-        # sequential, batch-of-10 UniProt lookup not covered by the gene-mapping cache above
-        isoform_cache = cache_dir / "isoform_safe_lengths.tsv"
+        # Step 1 also fetches every protein's isoform sequences (for canonical
+        # numbering): a separate, sequential, batch-of-25 UniProt lookup not
+        # covered by the gene-mapping cache above. One cache row per isoform.
+        isoform_cache = cache_dir / "uniprot_isoform_sequences.tsv"
         cached_isoform = 0
         if isoform_cache.exists():
             try:
-                cached_isoform = len(pd.read_csv(isoform_cache, sep="\t", dtype=str))
+                cached_isoform = pd.read_csv(isoform_cache, sep="\t", dtype=str)["query_accession"].nunique()
             except Exception:
                 pass
         uncached_isoform_genes = max(0, n_proteins - cached_isoform)
-        uncached_isoform_batches = uncached_isoform_genes // 10 + 1 if uncached_isoform_genes else 0
+        uncached_isoform_batches = uncached_isoform_genes // 25 + 1 if uncached_isoform_genes else 0
 
         step1_est = (self._TIME_STEP1_BASE + uncached_batches * self._TIME_PER_UNIPROT_BATCH
                      + uncached_isoform_batches * self._TIME_PER_ISOFORM_BATCH)
         self._q("log", f"Step 1: {cached_genes} UniProt gene mappings cached, "
-                f"{cached_isoform} isoform-length checks cached")
+                f"{cached_isoform} proteins' isoform sequences cached")
 
         # Step 2: CIF downloads
         cifs_present = 0
@@ -650,7 +664,10 @@ class PipelineRunnerMixin:
             return
 
         python = [sys.executable, "-u"]
-        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode)
+        ptm_source = self._ptm_source() if mode == "ptm-proximity" else "ptmd"
+        source_args = ["--ptm-source", ptm_source] if mode == "ptm-proximity" else []
+        psp_filter_args = self._psp_filter_args()[0] if ptm_source == "psp" else []
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
         models_dir = PROJECT_ROOT / "cif_models"
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
@@ -666,7 +683,7 @@ class PipelineRunnerMixin:
             pp_exclude.append("probably_damaging")
 
         cmds = [
-            [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode,
+            [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode, *source_args, *psp_filter_args,
              "--min-samples", min_samples],
             [
                 *python, str(SCRIPTS_DIR / "2_download_structures.py"),
@@ -678,21 +695,24 @@ class PipelineRunnerMixin:
                 "--also_pae",
                 "--logs_dir", str(self._output_dir / "logs"),
             ],
-            [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode,
+            [*python, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode, *source_args,
              "--output-dir", str(self._output_dir), "--cutoff", cutoff,
              *(["--min-plddt", min_plddt] if min_plddt else []),
              *(["--max-pae", max_pae] if max_pae else [])],
         ]
         if mode in ("ptm-proximity", "mutation-clustering"):
-            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"), "--mode", mode,
+            cmds.append([*python, str(SCRIPTS_DIR / "4_annotate.py"), "--mode", mode, *source_args,
                          "--output-dir", str(self._output_dir),
                          *(["--pp-exclude"] + pp_exclude if pp_exclude else [])])
 
-        steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
+        steps = pipeline_steps(mode, ptm_source)
         run_type = _detect_run_type()
-        self._q("pipeline_start", len(steps), mode, run_type)
+        # PSP runs are far bigger than PTMD runs, so their past step times are
+        # kept separately rather than skewing each other's estimates
+        runtime_key = f"{mode}-psp" if ptm_source == "psp" else mode
+        self._q("pipeline_start", len(steps), runtime_key, run_type)
 
-        estimated_total = self._run_precheck(mode)
+        estimated_total = self._run_precheck(mode, ptm_source)
         self._q("set_estimate", estimated_total)
 
         backups = self._backup_outputs()
@@ -756,7 +776,7 @@ class PipelineRunnerMixin:
                             "close it and rename the .bak file to restore your previous output.")
             else:
                 restore_ok = True
-                self._q("save_runtimes", mode, run_type, step_times)
+                self._q("save_runtimes", runtime_key, run_type, step_times)
                 self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
         except Exception as exc:
             restore_ok = False

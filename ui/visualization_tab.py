@@ -589,25 +589,26 @@ class VisualizationTabMixin:
                     "distance_angstrom", "polyphen_class",
                 ]], None
 
-        # Fallback: wide-format "nearby_mutations" column (no patient counts).
+        # Fallback: wide-format columns only (no patient counts).
         rows = []
-        for entry in (wide_row.get("nearby_mutations", "") or "").split(", "):
-            entry = entry.strip()
-            if not entry:
-                continue
-            m = _MUT_ENTRY_RE.match(entry)
-            if not m:
-                continue
-            pos_m = re.search(r"\d+", m.group(1))
-            if not pos_m:
-                continue
-            rows.append({
-                "mutation": m.group(1),
-                "mutation_position": int(pos_m.group()),
-                "patient_count": 1,
-                "distance_angstrom": float(m.group(4)),
-                "polyphen_class": _PP_LABEL.get(m.group(2) or "", ""),
-            })
+        for col_key in ("mutations_within_5_positions", "mutations_more_than_5_positions"):
+            for entry in (wide_row.get(col_key, "") or "").split(", "):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                m = _MUT_ENTRY_RE.match(entry)
+                if not m:
+                    continue
+                pos_m = re.search(r"\d+", m.group(1))
+                if not pos_m:
+                    continue
+                rows.append({
+                    "mutation": m.group(1),
+                    "mutation_position": int(pos_m.group()),
+                    "patient_count": 1,
+                    "distance_angstrom": float(m.group(4)),
+                    "polyphen_class": _PP_LABEL.get(m.group(2) or "", ""),
+                })
         df_fallback = pd.DataFrame(rows)
         note = None
         if not df_fallback.empty:

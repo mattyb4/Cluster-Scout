@@ -1,9 +1,11 @@
-"""Unit tests for Kinase Library (Phase 3) functions in scripts/4_annotate.py.
+"""Unit tests for Kinase Library (Phase 3): scripts/4_annotate.py and the
+scripts/kinase_predictor.py helper it runs in a separate environment.
 
-The real `kinase_library` package isn't installed in the test environment (and
-even if it were, hitting its actual prediction model in a unit test would be
-slow and non-deterministic) -- tests that need it inject a fake module into
-sys.modules via the fake_kinase_library fixture below.
+The real `kinase_library` package isn't installed in the project's environment
+(it lives in the helper's own uv-managed one, and hitting its prediction model
+in a unit test would be slow anyway) -- tests of the helper's functions inject
+a fake module into sys.modules via the fake_kinase_library fixture below, and
+tests of step 4 replace the helper process with a fake.
 """
 import sys
 import types
@@ -14,6 +16,14 @@ import pytest
 from conftest import import_script
 
 mod = import_script("4_annotate.py")
+helper = import_script("kinase_predictor.py")
+
+
+def use_fake_predictor(monkeypatch, predict):
+    """Replace the helper process: *predict(window)* gives each window's prediction."""
+    monkeypatch.setattr(mod, "check_kinase_helper", lambda: None)
+    monkeypatch.setattr(mod, "predict_kinase_windows",
+                        lambda windows, progress=None: ({w: predict(w) for w in windows}, {}))
 
 
 class FakeChain:
@@ -166,7 +176,7 @@ def fake_kinase_library(monkeypatch):
 
 class TestSpeedUpKinaseLibrary:
     def test_wraps_loaders_with_caching(self, fake_kinase_library):
-        mod._speed_up_kinase_library()
+        helper.speed_up_kinase_library()
 
         import kinase_library.modules.data as kl_data
         kl_data.get_kinase_list()
@@ -179,13 +189,13 @@ class TestSpeedUpKinaseLibrary:
         )
 
     def test_idempotent_when_called_twice(self, fake_kinase_library):
-        mod._speed_up_kinase_library()
+        helper.speed_up_kinase_library()
         import kinase_library.modules.data as kl_data
         first_wrapped = kl_data.get_kinase_list
 
-        mod._speed_up_kinase_library()  # second call must be a no-op
+        helper.speed_up_kinase_library()  # second call must be a no-op
         assert kl_data.get_kinase_list is first_wrapped, (
-            "calling _speed_up_kinase_library a second time must not re-wrap an "
+            "calling speed_up_kinase_library a second time must not re-wrap an "
             "already-wrapped loader (that would silently discard the first cache "
             "and could double-wrap indefinitely) -- the function object should be unchanged"
         )
@@ -193,7 +203,7 @@ class TestSpeedUpKinaseLibrary:
 
 class TestPredictKinases:
     def test_formats_top_k_predictions(self, fake_kinase_library):
-        result = mod.predict_kinases("a" * 7 + "s" + "a" * 7)
+        result = helper.predict_kinases("a" * 7 + "s" + "a" * 7)
         assert result == "CDK1(3.50,99.0%); CDK2(2.10,95.0%); MAPK1(1.00,80.0%)", (
             f"predictions should be formatted as 'KINASE(score,percentile%)', "
             f"semicolon-joined in the model's own ranked order, got {result!r}"
@@ -234,7 +244,7 @@ class TestRunKinasePhase:
         pos_to_aa[10] = "S"
         monkeypatch.setattr(mod, "load_first_chain", lambda cif_file: object())
         monkeypatch.setattr(mod, "extract_sequence", lambda chain: pos_to_aa)
-        monkeypatch.setattr(mod, "predict_kinases", lambda window: "CDK1(3.50,99.0%)")
+        use_fake_predictor(monkeypatch, lambda window: "CDK1(3.50,99.0%)")
 
         df = pd.DataFrame([
             {"UniProt": "P04637", "ptm_site": "S10", "ptm_type": "Phosphorylation"},
@@ -256,7 +266,7 @@ class TestRunKinasePhase:
         monkeypatch.setattr(mod, "load_first_chain", lambda cif_file: object())
         monkeypatch.setattr(mod, "extract_sequence", lambda chain: {10: "S"})
         calls = []
-        monkeypatch.setattr(mod, "predict_kinases", lambda window: calls.append(window) or "SHOULD_NOT_APPEAR")
+        use_fake_predictor(monkeypatch, lambda window: calls.append(window) or "SHOULD_NOT_APPEAR")
 
         df = pd.DataFrame([
             {"UniProt": "P04637", "ptm_site": "S10", "ptm_type": "Ubiquitination"},
@@ -280,7 +290,7 @@ class TestRunKinasePhase:
         monkeypatch.setattr(mod, "load_first_chain", lambda cif_file: object())
         monkeypatch.setattr(mod, "extract_sequence", lambda chain: pos_to_aa)
         calls = []
-        monkeypatch.setattr(mod, "predict_kinases", lambda window: calls.append(window) or "CDK1(1.0,50.0%)")
+        use_fake_predictor(monkeypatch, lambda window: calls.append(window) or "CDK1(1.0,50.0%)")
 
         # Two different proteins, but the SAME site position/sequence context ->
         # identical 15-mer window.
@@ -292,5 +302,58 @@ class TestRunKinasePhase:
 
         assert len(calls) == 1, (
             f"two rows that resolve to the identical sequence window should only be "
-            f"predicted once (deduped before the thread pool), got {len(calls)} calls"
+            f"predicted once (deduped before the helper runs), got {len(calls)} calls"
+        )
+
+
+def _phospho_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(mod, "_KIN_CACHE_FILE", tmp_path / "kinase.tsv")
+    monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path)
+    (tmp_path / "P04637").mkdir()
+    monkeypatch.setattr(mod, "find_canonical_cif", lambda uniprot_dir: "fake.cif")
+    pos_to_aa = {i: "A" for i in range(1, 22)}
+    pos_to_aa[10] = "S"
+    monkeypatch.setattr(mod, "load_first_chain", lambda cif_file: object())
+    monkeypatch.setattr(mod, "extract_sequence", lambda chain: pos_to_aa)
+    return pd.DataFrame([{"UniProt": "P04637", "ptm_site": "S10", "ptm_type": "Phosphorylation"}])
+
+
+class TestKinaseHelper:
+    def test_unavailable_helper_warns_and_leaves_sites_blank(self, monkeypatch, tmp_path, capsys):
+        df = _phospho_setup(monkeypatch, tmp_path)
+        monkeypatch.setattr(mod, "check_kinase_helper", lambda: "uv isn't on PATH")
+        monkeypatch.setattr(mod, "predict_kinase_windows",
+                            lambda *a, **k: pytest.fail("no predictions should be attempted"))
+        mod.run_kinase_phase(df)
+        assert df["kinase_predictions"].tolist() == [""]
+        out = capsys.readouterr().out
+        assert "Warning: kinase prediction failed for 1 of 1" in out and "uv isn't on PATH" in out, (
+            f"a missing helper must be reported, not silently leave predictions blank -- got:\n{out}"
+        )
+        assert not (tmp_path / "kinase.tsv").exists(), "nothing is cached, so the next run retries"
+
+    def test_predict_chunk_reads_results_and_reports_missing_ones(self, monkeypatch):
+        monkeypatch.setattr(mod.shutil, "which", lambda name: "uv")
+        seen = {}
+
+        class Proc:
+            stdout = ('{"window": "AAAAAAAsAAAAAAA", "prediction": "CDK1(3.50,99.0%)"}\n'
+                      '{"window": "BBBBBBBsBBBBBBB", "error": "ValueError: bad window"}\n')
+            stderr = "Traceback ...\nMemoryError"
+            returncode = 1
+
+        def fake_run(command, input, **kwargs):
+            seen["command"], seen["input"], seen["env"] = command, input, kwargs["env"]
+            return Proc()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        monkeypatch.setenv("VIRTUAL_ENV", "C:/project/.venv")
+        predictions, errors = mod._predict_chunk(["AAAAAAAsAAAAAAA", "BBBBBBBsBBBBBBB", "CCCCCCCsCCCCCCC"])
+        assert seen["command"][:4] == ["uv", "run", "--quiet", "--script"]
+        assert seen["command"][4].endswith("kinase_predictor.py")
+        assert "VIRTUAL_ENV" not in seen["env"], "the helper must not inherit the project's environment"
+        assert predictions == {"AAAAAAAsAAAAAAA": "CDK1(3.50,99.0%)"}
+        assert errors["BBBBBBBsBBBBBBB"] == "ValueError: bad window"
+        assert "MemoryError" in errors["CCCCCCCsCCCCCCC"], (
+            "a window the helper never answered (it crashed) gets the helper's last error line"
         )

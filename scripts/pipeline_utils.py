@@ -5,6 +5,7 @@ so that changes only need to be made in one place.
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 from pathlib import Path
@@ -12,6 +13,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from biotite.structure.io.pdbx import CIFFile, get_structure  # type: ignore[import-untyped]
+
+# Step-1 tables hold every mutation of a protein in one cell, which with large
+# mutation sets (e.g. a low Min samples) can exceed the csv module's default
+# 131,072-character field limit. Every script and the UI import this
+# module, so raising it here covers every csv reader. (2**31 - 1, not
+# sys.maxsize: Windows rejects anything past a 32-bit C long.)
+csv.field_size_limit(2**31 - 1)
 
 
 def project_root(script_file: str) -> Path:
@@ -31,6 +39,7 @@ def fmt_time(seconds: float) -> str:
 
 COSMIC_INPUT_DIR = "cosmic"
 PTMD_INPUT_DIR = "ptmd"
+PSP_INPUT_DIR = "phosphositeplus"
 INTERACTORS_1433_INPUT_DIR = "1433_interactors"
 
 
@@ -47,21 +56,45 @@ def input_dir(root: Path, subfolder: str) -> Path:
 # ptms_on_protein), and sharing a path meant running one mode's Step 1 would
 # silently overwrite the other mode's data with a different schema.
 PTM_PROXIMITY_HOTSPOTS_FILENAME = "PTMD_COSMIC_hotspots_by_protein.tsv"
+PSP_PTM_PROXIMITY_HOTSPOTS_FILENAME = "PSP_COSMIC_hotspots_by_protein.tsv"
 MUTATION_CLUSTERING_HOTSPOTS_FILENAME = "COSMIC_hotspots_by_protein.tsv"
 
+# PTM-proximity mode can take its PTM sites from either source. They get
+# separate step-1 files and separate output files (see ptm_output_paths) for
+# the same reason the two modes do: different schemas, and running one source
+# must never overwrite the other's results.
+PTM_SOURCES = ("ptmd", "psp")
+DEFAULT_PTM_SOURCE = "ptmd"
 
-def hotspots_tsv_path(root: Path, mode: str) -> Path:
+
+def hotspots_tsv_path(root: Path, mode: str, ptm_source: str = DEFAULT_PTM_SOURCE) -> Path:
     """Path to the mode-specific Step-1 filtered hotspot TSV under *root*.
 
     *mode* is "mutation-clustering" or (anything else, including the default)
     "ptm-proximity" -- matching the --mode convention used throughout the
-    pipeline scripts.
+    pipeline scripts. *ptm_source* ("ptmd" or "psp") only matters for
+    ptm-proximity.
     """
-    filename = (
-        MUTATION_CLUSTERING_HOTSPOTS_FILENAME if mode == "mutation-clustering"
-        else PTM_PROXIMITY_HOTSPOTS_FILENAME
-    )
+    if mode == "mutation-clustering":
+        filename = MUTATION_CLUSTERING_HOTSPOTS_FILENAME
+    elif ptm_source == "psp":
+        filename = PSP_PTM_PROXIMITY_HOTSPOTS_FILENAME
+    else:
+        filename = PTM_PROXIMITY_HOTSPOTS_FILENAME
     return root / "data" / "steps" / filename
+
+
+def ptm_output_paths(output_dir: Path, ptm_source: str = DEFAULT_PTM_SOURCE) -> dict[str, Path]:
+    """PTM-proximity output file paths for *ptm_source*, keyed "db", "long",
+    "skipped" and "unmatched". PSP files carry a "psp_" prefix so PTMD and PSP
+    results can sit side by side in one output folder."""
+    prefix = "psp_" if ptm_source == "psp" else ""
+    return {
+        "db": output_dir / f"{prefix}ptm_mutation_proximity_db.tsv",
+        "long": output_dir / f"{prefix}ptm_mutation_proximity_long.tsv",
+        "skipped": output_dir / "logs" / f"{prefix}ptm_skipped.tsv",
+        "unmatched": output_dir / "logs" / f"{prefix}ptm_genes_without_cosmic_mutations.tsv",
+    }
 
 
 def resolve_input_file(
@@ -377,3 +410,16 @@ MUTATION_CLUSTERING_STEPS = [
     ("Annotate results (PolyPhen-2, AIUPred, InterPro predictions)",
      "Annotating results (PolyPhen-2, AIUPred, InterPro predictions)"),
 ]
+
+
+def pipeline_steps(mode: str, ptm_source: str = DEFAULT_PTM_SOURCE) -> list[tuple[str, str]]:
+    """Step labels for *mode*, with the step-1 label naming the PTM source."""
+    if mode == "mutation-clustering":
+        return MUTATION_CLUSTERING_STEPS
+    if ptm_source != "psp":
+        return PTM_PROXIMITY_STEPS
+    return [
+        ("Filter and merge PhosphoSitePlus + COSMIC data",
+         "Filtering and merging PhosphoSitePlus + COSMIC data - this may take a moment"),
+        *PTM_PROXIMITY_STEPS[1:],
+    ]

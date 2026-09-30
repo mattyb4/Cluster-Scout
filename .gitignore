@@ -15,7 +15,10 @@ __pycache__/
 # ── User-provided input data (uploaded via the app or placed manually) ────
 data/input/cosmic/
 data/input/ptmd/
+data/input/phosphositeplus/
 data/cif_comparison/
+# Raw PhosphoSitePlus downloads (licensed; large)
+phosphositeplus_downloads*/
 
 # 14-3-3 confirmed interactors: NOT user-provided — small, rarely-updated
 # reference data bundled with the app (see data/input/1433_interactors/).
@@ -33,6 +36,8 @@ data/steps/
 # ── Pipeline outputs (regenerated each run) ────────────────────────────────
 Output/ptm_mutation_proximity_db.tsv
 Output/ptm_mutation_proximity_long.tsv
+Output/psp_ptm_mutation_proximity_db.tsv
+Output/psp_ptm_mutation_proximity_long.tsv
 Output/mutation_cluster_db.tsv
 Output/mutation_cluster_long.tsv
 Output/radius_sweep.*
@@ -46,11 +51,16 @@ Output/prototype_hotspot_significance*.tsv
 Output/logs/download_report.tsv
 Output/logs/download_errors.tsv
 Output/logs/ptm_skipped.tsv
+Output/logs/psp_ptm_skipped.tsv
 Output/logs/mutation_cluster_skipped.tsv
 Output/logs/ptm_genes_without_cosmic_mutations.tsv
+Output/logs/psp_ptm_genes_without_cosmic_mutations.tsv
 Output/logs/pipeline_runtimes.json
 Output/logs/results_column_prefs.json
 
 
 #Throwaway temporary scripts
 combine_seed_coordinates.py
+
+#PhosphositePlus data files (downloaded from PhosphositePlus, not user-provided)
+phosphositeplus_downloads_2021-10-29

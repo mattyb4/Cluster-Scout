@@ -1,4 +1,6 @@
 """Unit tests for PolyPhen-2 annotation functions in scripts/4_annotate.py."""
+import re
+
 import pandas as pd
 import pytest
 from conftest import import_script
@@ -324,11 +326,11 @@ class TestRunPolyphenPhaseMutationCols:
         }])
         calls = []
 
-        def fake_fetch(gene, mut):
-            calls.append((gene, mut))
-            return "D", "0.99"
+        def fake_fetch(gene, muts, request_delay=0):
+            calls.extend((gene, mut) for mut in muts)
+            return {mut: ("D", "0.99") for mut in muts}
 
-        monkeypatch.setattr(mod, "fetch_polyphen", fake_fetch)
+        monkeypatch.setattr(mod, "fetch_polyphen_batch", fake_fetch)
 
         cache = mod.run_polyphen_phase(
             df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
@@ -356,7 +358,8 @@ class TestRunPolyphenPhaseMutationCols:
         ]).to_csv(mod._PP_CACHE_FILE, sep="\t", index=False)
         df = pd.DataFrame([{"gene": "TP53", "anchor_mutation": "R175H", "nearby_mutations": ""}])
         calls = []
-        monkeypatch.setattr(mod, "fetch_polyphen", lambda g, m: calls.append((g, m)))
+        monkeypatch.setattr(mod, "fetch_polyphen_batch",
+                            lambda g, muts, request_delay=0: calls.extend((g, m) for m in muts) or {})
 
         mod.run_polyphen_phase(
             df, mutation_cols=["nearby_mutations"], bare_mutation_cols=("anchor_mutation",),
@@ -369,7 +372,8 @@ class TestRunPolyphenPhaseMutationCols:
     def test_failed_fetch_is_not_cached_and_stays_available_for_retry(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "_PP_CACHE_FILE", tmp_path / "pp.tsv")
         df = pd.DataFrame([{"gene": "TP53", "nearby_mutations": "R175H-3.52Å(PAE:2.1)"}])
-        monkeypatch.setattr(mod, "fetch_polyphen", lambda g, m: None)  # simulates a transient failure
+        # simulates a transient failure
+        monkeypatch.setattr(mod, "fetch_polyphen_batch", lambda g, muts, request_delay=0: {m: None for m in muts})
 
         cache = mod.run_polyphen_phase(df, mutation_cols=["nearby_mutations"], request_delay=0)
 
@@ -381,4 +385,78 @@ class TestRunPolyphenPhaseMutationCols:
         assert "(PP:" not in df.iloc[0]["nearby_mutations"], (
             f"with no cached result, the entry should be left untagged rather than tagged "
             f"with a blank/garbage prediction, got {df.iloc[0]['nearby_mutations']!r}"
+        )
+
+
+def _record(ref, alt, positions, pred, score):
+    """A dbNSFP record as myvariant.info returns it (fields requested by the batch query)."""
+    return {"dbnsfp": {"aa": {"ref": ref, "alt": alt, "pos": positions},
+                       "polyphen2": {"hdiv": {"pred": pred, "score": score}}}}
+
+
+class _Resp:
+    def __init__(self, body, status=200):
+        self._body, self.status_code = body, status
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+
+class TestFetchPolyphenBatch:
+    def test_matches_ref_alt_and_any_transcript_position(self, monkeypatch):
+        records = [
+            _record("R", "H", [175, 136], "D", 0.999),     # R175H (canonical 175, other transcript 136)
+            _record("R", "C", 175, "P", 0.6),              # R175C -- different alt
+            _record("R", "H", [248, 175], "B", 0.1),       # another record listing 175 on a second transcript
+            _record("G", "S", 245, "D", 1.0),
+        ]
+        queries = []
+
+        def fake_get(url, params, timeout):
+            queries.append(params["q"])
+            return _Resp({"total": len(records), "hits": records})
+
+        monkeypatch.setattr(mod._pp_session, "get", fake_get)
+        result = mod.fetch_polyphen_batch("TP53", ["R175H", "R175C", "G245S", "R175*"], request_delay=0)
+        assert len(queries) == 1 and "dbnsfp.aa.pos:(175 OR 245)" in queries[0], (
+            f"all of a gene's positions go in one request, got {queries}"
+        )
+        assert result["R175H"] == ("D", "0.999"), (
+            "R175H gets every record whose ref/alt match and that lists 175 on any transcript "
+            f"(as the one-variant query does); the most severe wins -- got {result['R175H']}"
+        )
+        assert result["R175C"] == ("P", "0.600")
+        assert result["G245S"] == ("D", "1.000")
+        assert result["R175*"] == ("", ""), "stop codons get no prediction and no request"
+
+    def test_chunk_over_the_page_limit_is_split(self, monkeypatch):
+        monkeypatch.setattr(mod, "_PP_BATCH_MAX_HITS", 2)
+        queries = []
+
+        def fake_get(url, params, timeout):
+            queries.append(params["q"])
+            n = params["q"].count(" OR ") + 1
+            hits = [_record("A", "V", int(p), "B", 0.1) for p in re.findall(r"\d+", params["q"].split("pos:")[1])]
+            return _Resp({"total": n * 2, "hits": hits})  # pretend 2 records per position
+
+        monkeypatch.setattr(mod._pp_session, "get", fake_get)
+        result = mod.fetch_polyphen_batch("G", ["A1V", "A2V"], request_delay=0)
+        assert len(queries) == 3, f"2 positions (4 records) exceed a page of 2 -> split into 2, got {queries}"
+        assert result == {"A1V": ("B", "0.100"), "A2V": ("B", "0.100")}
+
+    def test_failed_request_marks_its_mutations_none(self, monkeypatch):
+        monkeypatch.setattr(mod._pp_session, "get", lambda url, params, timeout: _Resp({}, status=500))
+        monkeypatch.setattr(mod, "_PP_RATE_LIMIT_BACKOFF", 0)
+        assert mod.fetch_polyphen_batch("TP53", ["R175H"], request_delay=0) == {"R175H": None}, (
+            "a failed request must come back as None so the caller doesn't cache it"
+        )
+
+    def test_highest_score_within_the_most_severe_class(self):
+        hits = [_record("R", "H", 1, ["D", "D", "P"], [0.95, 0.999, 0.7])]
+        assert mod._pp_best_prediction(hits) == ("D", "0.999"), (
+            "within the winning class the highest score is reported, whatever order transcripts come in"
         )

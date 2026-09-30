@@ -20,18 +20,23 @@ from ui.common import (
     _GREEN,
     _INPUT_FOLDERS,
     _MODE_HELP,
+    _PSP_INPUT_FOLDER,
+    _PTM_SOURCE_BY_LABEL,
+    _PTM_SOURCE_OPTIONS,
     _RED,
     _YELLOW,
-    MUTATION_CLUSTERING_STEPS,
     OUTPUT_DIR,
     PROJECT_ROOT,
-    PTM_PROXIMITY_STEPS,
     add_resize_grip,
     color_swatch_button,
+    discover_psp_files,
     extract_uniprot_from_cif,
     help_icon,
     isolate_textbox_scroll,
+    pipeline_steps,
+    psp_folder_summary,
     resolve_input_file,
+    validate_psp_folder,
 )
 
 
@@ -97,9 +102,22 @@ class PipelineTabMixin:
             btn.grid(row=i, column=2, padx=12, pady=3, sticky="e")
             self._file_buttons[name] = btn
 
-        # Mode selection
-        mode_frame = ctk.CTkFrame(p)
-        mode_frame.grid(row=2, column=0, padx=24, pady=4, sticky="ew")
+        # PhosphoSitePlus is a folder of files, so it gets its own row and a
+        # folder picker instead of the single-file Browse above
+        psp_row = len(_INPUT_FOLDERS) + 1
+        self._psp_file_indicator = ctk.CTkLabel(self._file_frame, text="PhosphoSitePlus …", anchor="w")
+        self._psp_file_indicator.grid(row=psp_row, column=0, columnspan=2, padx=(12, 6), pady=3, sticky="ew")
+        ctk.CTkButton(
+            self._file_frame, text="Browse", width=70, height=26,
+            font=ctk.CTkFont(size=12), command=self._browse_psp_folder,
+        ).grid(row=psp_row, column=2, padx=12, pady=3, sticky="e")
+
+        # Mode selection, with PTM Proximity's PTM-source selector underneath
+        # (packed/unpacked in _rebuild_step_rows as the mode changes)
+        mode_area = ctk.CTkFrame(p, fg_color="transparent")
+        mode_area.grid(row=2, column=0, padx=24, pady=4, sticky="ew")
+        mode_frame = ctk.CTkFrame(mode_area)
+        mode_frame.pack(fill="x")
 
         ctk.CTkLabel(
             mode_frame, text="Mode:", font=ctk.CTkFont(weight="bold")
@@ -120,6 +138,25 @@ class PipelineTabMixin:
                 command=self._rebuild_step_rows,
             ).pack(side="left", padx=(8, 0), pady=10)
             help_icon(mode_frame, _MODE_HELP[value]).pack(side="left", padx=(4, 8), pady=10)
+
+        self._ptm_source_frame = ctk.CTkFrame(mode_area)
+        ctk.CTkLabel(
+            self._ptm_source_frame, text="PTM source:", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(12, 8), pady=8)
+        self._ptm_source_var = ctk.StringVar(value=_PTM_SOURCE_OPTIONS[0][0])
+        ctk.CTkSegmentedButton(
+            self._ptm_source_frame, values=[label for label, _ in _PTM_SOURCE_OPTIONS],
+            variable=self._ptm_source_var, command=lambda _v: self._rebuild_step_rows(),
+        ).pack(side="left", pady=8)
+        help_icon(
+            self._ptm_source_frame,
+            "Where PTM Proximity gets its PTM sites. PTMD: PTMD 2.0's "
+            "disease-associated PTMs. PhosphoSitePlus: every human site in a "
+            "PhosphoSitePlus download, with its LTP/HTP evidence counts and any "
+            "disease associations. Each source writes its own output files "
+            "(PhosphoSitePlus's start with psp_), so running one never "
+            "overwrites the other.",
+        ).pack(side="left", padx=(6, 8), pady=8)
 
         # Output folder selector
         out_frame = ctk.CTkFrame(p)
@@ -246,6 +283,47 @@ class PipelineTabMixin:
             variable=self._pp_probably_var,
             checkbox_width=18, checkbox_height=18,
         ).pack(side="left", padx=(8, 12), pady=8)
+
+        # PhosphoSitePlus site filters -- only shown for PTM Proximity with the
+        # PhosphoSitePlus source (see _rebuild_step_rows); applied in step 1
+        psp_frame = self._psp_filter_frame = ctk.CTkFrame(p)
+        psp_frame.grid(row=6, column=0, padx=24, pady=4, sticky="ew")
+
+        ctk.CTkLabel(
+            psp_frame, text="PhosphoSitePlus filters:", font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(12, 4), pady=8)
+
+        for kind, label, help_text in (
+            ("ltp", "LTP", "Keep only sites whose LTP count - literature records from "
+                           "low-throughput experiments aimed at the site itself - falls in "
+                           "this range. Leave the maximum blank for no upper limit."),
+            ("htp", "HTP", "Keep only sites whose HTP count - high-throughput mass-spec "
+                           "papers that detected the site - falls in this range. Leave the "
+                           "maximum blank for no upper limit."),
+        ):
+            ctk.CTkLabel(psp_frame, text=f"{label}:").pack(side="left", padx=(12, 4), pady=8)
+            help_icon(psp_frame, help_text).pack(side="left", padx=(0, 4), pady=8)
+            min_var = ctk.StringVar(value="0")
+            max_var = ctk.StringVar(value="")
+            setattr(self, f"_psp_min_{kind}_var", min_var)
+            setattr(self, f"_psp_max_{kind}_var", max_var)
+            ctk.CTkEntry(psp_frame, textvariable=min_var, width=50).pack(side="left", pady=8)
+            ctk.CTkLabel(psp_frame, text="to").pack(side="left", padx=4, pady=8)
+            ctk.CTkEntry(
+                psp_frame, textvariable=max_var, width=70, placeholder_text="no limit",
+            ).pack(side="left", padx=(0, 8), pady=8)
+
+        self._psp_disease_only_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            psp_frame, text="Disease-associated sites only",
+            variable=self._psp_disease_only_var,
+            checkbox_width=18, checkbox_height=18,
+        ).pack(side="left", padx=(12, 4), pady=8)
+        help_icon(
+            psp_frame,
+            "Keep only sites PhosphoSitePlus lists a disease association for "
+            "(needs the Disease-associated_sites file in the input folder).",
+        ).pack(side="left", padx=(0, 12), pady=8)
 
         # Steps panel
         self._steps_outer = ctk.CTkFrame(p)
@@ -391,6 +469,37 @@ class PipelineTabMixin:
             return OUTPUT_DIR / "coordinates"
         return OUTPUT_DIR
 
+    def _ptm_source(self) -> str:
+        """The selected PTM source as a --ptm-source value ("ptmd" or "psp")."""
+        return _PTM_SOURCE_BY_LABEL[self._ptm_source_var.get()]
+
+    def _psp_filter_args(self) -> tuple[list[str], list[str]]:
+        """Step-1 arguments for the PhosphoSitePlus filters, plus any problems
+        with the entered values (blank minimum = 0, blank maximum = no limit)."""
+        args: list[str] = []
+        problems: list[str] = []
+        for kind, label in (("ltp", "LTP"), ("htp", "HTP")):
+            lo_text = getattr(self, f"_psp_min_{kind}_var").get().strip() or "0"
+            hi_text = getattr(self, f"_psp_max_{kind}_var").get().strip()
+            try:
+                lo = int(lo_text)
+                hi = int(hi_text) if hi_text else None
+            except ValueError:
+                problems.append(f"{label} range must be whole numbers")
+                continue
+            if lo < 0 or (hi is not None and hi < 0):
+                problems.append(f"{label} range can't be negative")
+            elif hi is not None and hi < lo:
+                problems.append(f"{label} maximum ({hi}) is below its minimum ({lo})")
+            else:
+                if lo:
+                    args += [f"--psp-min-{kind}", str(lo)]
+                if hi is not None:
+                    args += [f"--psp-max-{kind}", str(hi)]
+        if self._psp_disease_only_var.get():
+            args.append("--psp-disease-only")
+        return args, problems
+
     def _sync_output_dir_section_for_mode(self) -> None:
         """Re-bind the Output folder entry/label to the active mode's own
         output-folder var and update its label text, so the section always
@@ -413,6 +522,14 @@ class PipelineTabMixin:
 
         mode = self._mode.get()
         self._sync_output_dir_section_for_mode()
+        if mode == "ptm-proximity":
+            self._ptm_source_frame.pack(fill="x", pady=(4, 0))
+        else:
+            self._ptm_source_frame.pack_forget()
+        if mode == "ptm-proximity" and self._ptm_source() == "psp":
+            self._psp_filter_frame.grid()
+        else:
+            self._psp_filter_frame.grid_remove()
 
         # Settings frame also applies to single-protein (accepted by
         # analyze_single_cif_nearby_mutations.py); PolyPhen filter feeds step 4 of
@@ -433,7 +550,7 @@ class PipelineTabMixin:
             self._build_ca_coordinates_panel()
             return
 
-        steps = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
+        steps = pipeline_steps(mode, self._ptm_source())
 
         ctk.CTkLabel(
             self._steps_outer,
@@ -1036,6 +1153,61 @@ class PipelineTabMixin:
                 lbl.configure(text=f"✗  {name}: no file", text_color=_RED)
             except RuntimeError:
                 lbl.configure(text=f"⚠  {name}: multiple files", text_color=_YELLOW)
+
+        psp_lbl = self._psp_file_indicator
+        if not discover_psp_files(_PSP_INPUT_FOLDER).site:
+            psp_lbl.configure(text="✗  PhosphoSitePlus: no site dataset files", text_color=_RED)
+        elif validate_psp_folder(_PSP_INPUT_FOLDER):
+            psp_lbl.configure(text="⚠  PhosphoSitePlus: problem with files (see Run check)",
+                              text_color=_YELLOW)
+        else:
+            psp_lbl.configure(text=f"✓  PhosphoSitePlus: {psp_folder_summary(_PSP_INPUT_FOLDER)}",
+                              text_color=_GREEN)
+
+    def _browse_psp_folder(self) -> None:
+        """Pick a PhosphoSitePlus download folder, validate it, then copy the
+        files the pipeline uses (site datasets + disease file, recognized by
+        their columns) into data/input/phosphositeplus/, replacing what's there.
+
+        Copies into a staging folder first and only swaps once every copy
+        succeeded, so a failed copy never leaves the input folder half-empty.
+        """
+        from tkinter import messagebox
+
+        path = filedialog.askdirectory(title="Select a PhosphoSitePlus download folder")
+        if not path:
+            return
+        src = Path(path).resolve()
+        dest = _PSP_INPUT_FOLDER.resolve()
+        if src == dest:
+            self._refresh_file_status()
+            return
+
+        problems = validate_psp_folder(src)
+        if problems:
+            messagebox.showerror(
+                "Invalid Folder",
+                f"{src.name} can't be used as PhosphoSitePlus input — nothing was "
+                f"copied (your existing files, if any, are untouched):\n\n"
+                + "\n".join(f"  • {p}" for p in problems),
+            )
+            return
+
+        found = discover_psp_files(src)
+        staging = dest.parent / f".browsing_{dest.name}"
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            staging.mkdir(parents=True)
+            for f in found.site + found.disease:
+                shutil.copy2(f, staging / f.name)
+        except OSError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            messagebox.showerror("Copy Failed", f"Could not copy PhosphoSitePlus files:\n\n{exc}")
+            return
+
+        shutil.rmtree(dest, ignore_errors=True)
+        staging.replace(dest)
+        self._refresh_file_status()
 
     def _browse_file(self, name: str, folder: Path, filetypes: list, validator) -> None:
         """Open a file dialog, validate the selected file's content, then swap it

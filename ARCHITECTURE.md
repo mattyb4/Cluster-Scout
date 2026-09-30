@@ -93,6 +93,17 @@ The two modes write to **separate** step-1 output files
 one mode to silently overwrite the other's data. Keep this separation if you
 add mode-specific columns.
 
+**PTM sources.** ptm-proximity takes its PTM sites from PTMD (default) or
+PhosphoSitePlus (`--ptm-source psp`, passed to steps 1, 3 and 4). Only step 1
+knows the difference: `scripts/psp_input.py` reads the PSP download
+(identifying files by their columns, so new releases drop in unchanged), and
+step 1 turns either source into the same per-protein columns
+(`ptms_on_protein`, `ptm_disease_pairs`), plus `psp_site_scores` for PSP.
+Steps 3 and 4 then run identically, with step 3 adding the PSP-only output
+columns. Each source has its own step-1 file and output files
+(`hotspots_tsv_path(root, mode, ptm_source)`, `ptm_output_paths()`), for the
+same no-overwrite reason as the modes.
+
 ### 3.4 `pipeline_utils.py` — shared backend utilities
 
 Central module imported by every pipeline script. Holds shared constants
@@ -229,7 +240,13 @@ pass `encoding="utf-16"` or they'll appear corrupt.
 
 ---
 
-## 8. Testing
+## 8. Scientific methods
+
+`docs/methods.md` records the analysis methods in enough detail for a paper's methods section: currently COSMIC-to-canonical mutation numbering (`scripts/cosmic_numbering.py`). When you change how the pipeline computes a result, update it alongside the code.
+
+---
+
+## 9. Testing
 
 Tests live in `tests/`, one file per pipeline step / tool, run with `pytest`
 (configured in `pyproject.toml`). The suite is large and is the best
@@ -240,7 +257,9 @@ standalone scripts.
 
 ---
 
-## 9. Conventions & gotchas
+## 10. Conventions & gotchas
+
+- **Kinase Library runs in its own environment.** `scripts/kinase_predictor.py` carries inline script metadata (`kinase-library==1.8.0`, locked in `kinase_predictor.py.lock`), and step 4 runs it via `uv run --script` in parallel subprocesses. Every kinase-library release pins numpy ~1.26 / pandas ~2.2, which conflicts with this project's pins. Installing it into the project env silently broke kinase predictions once, when a later `uv sync` removed it. Don't add it to `pyproject.toml`.
 
 - **Two shared-utility modules**, mirroring the two layers: `pipeline_utils.py`
   (backend) and `ui/common.py` (frontend). Don't import GUI code into the

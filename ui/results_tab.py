@@ -28,12 +28,16 @@ from ui.common import (
     _NEARBY_TV_COLS,
     _PP_LABEL,
     _PTM_COL_HELP,
+    _PTM_SOURCE_BY_LABEL,
+    _PTM_SOURCE_ONLY_COLS,
+    _PTM_SOURCE_OPTIONS,
     _PTM_TV_COLS,
     _RED,
     _YELLOW,
     _load_column_prefs,
     _save_column_prefs,
     help_icon,
+    ptm_output_paths,
 )
 
 _PTM_TV_SRC_IDS = [c[1] for c in _PTM_TV_COLS if c[1] != "#col"]
@@ -145,15 +149,30 @@ class ResultsTabMixin:
             tv.column(c, stretch=False)
 
     def _set_visible_columns(self, which: str, col_ids: list) -> None:
-        tv = getattr(self, f"_{which}_tv")
-        tv.configure(displaycolumns=col_ids)
-        self._disable_tv_stretch(tv)
         setattr(self, f"_{which}_visible_cols", col_ids)
+        self._apply_display_columns(which)
         _save_column_prefs(which, col_ids)
+
+    def _hidden_source_cols(self, which: str) -> set[str]:
+        """Columns of *which* table that only the PTM source NOT currently
+        shown fills in -- hidden so they don't sit there blank."""
+        shown = self._results_ptm_source()
+        by_source = _PTM_SOURCE_ONLY_COLS.get(which, {})
+        return set().union(*(cols for src, cols in by_source.items() if src != shown))
+
+    def _apply_display_columns(self, which: str) -> None:
+        tv = getattr(self, f"_{which}_tv")
+        hidden = self._hidden_source_cols(which)
+        tv.configure(displaycolumns=[c for c in getattr(self, f"_{which}_visible_cols") if c not in hidden])
+        self._disable_tv_stretch(tv)
 
     def _open_column_picker(self, which: str) -> None:
         registry, col_help, title, _filter_title = _TV_REGISTRY[which]
         current = set(getattr(self, f"_{which}_visible_cols"))
+        # The other PTM source's columns aren't offered, but keep their state
+        hidden = self._hidden_source_cols(which)
+        registry = [c for c in registry if c[1] not in hidden]
+        kept_hidden = [c for c in getattr(self, f"_{which}_visible_cols") if c in hidden]
 
         win = ctk.CTkToplevel(self)
         win.title(title)
@@ -186,8 +205,8 @@ class ResultsTabMixin:
                     vars_by_id[col_id].set(default)
 
         def _apply():
-            selected = {col_id for col_id, var in vars_by_id.items() if var.get()}
-            ordered = ["#col"] + [c[1] for c in registry if c[1] in selected]
+            selected = {col_id for col_id, var in vars_by_id.items() if var.get()} | set(kept_hidden)
+            ordered = ["#col"] + [c[1] for c in _TV_REGISTRY[which][0] if c[1] in selected]
             self._set_visible_columns(which, ordered)
             win.destroy()
 
@@ -460,7 +479,16 @@ class ResultsTabMixin:
     def _init_visible_cols(self, which: str, registry: list) -> list:
         known = {c[1] for c in registry}
         saved = _load_column_prefs(which)
-        return [c for c in saved if c in known] if saved else [c[1] for c in registry if c[4]]
+        if not saved:
+            return [c[1] for c in registry if c[4]]
+        visible = [c for c in saved if c in known]
+        # Column choices saved before the PhosphoSitePlus source existed have
+        # none of its columns -- show its defaults rather than hiding them all
+        psp_cols = _PTM_SOURCE_ONLY_COLS.get(which, {}).get("psp", set())
+        if psp_cols and not psp_cols & set(saved):
+            defaults = {c[1] for c in registry if c[4] and c[1] in psp_cols}
+            visible = [c[1] for c in registry if c[1] in set(visible) | defaults]
+        return visible
 
     def _build_results_tab(self, tab) -> None:
         import tkinter as tk
@@ -471,6 +499,9 @@ class ResultsTabMixin:
         self._cluster_df_wide = None
         self._cluster_df_long = None
         self._cluster_loaded_key = None
+        # Last "no output"/error message per mode, so the shared status line
+        # shows the right one for whichever mode is on screen
+        self._results_load_msg: dict[str, str | None] = {"ptm": None, "cluster": None}
         self._ptm_tv_all_rows: list = []
         self._mut_tv_all_rows: list = []
         self._anchor_tv_all_rows: list = []
@@ -512,6 +543,15 @@ class ResultsTabMixin:
             command=lambda: self._load_results(force=True),
         )
         self._refresh_button.pack(side=tk.RIGHT)
+        # PTM Proximity results come from either PTM source; each has its own
+        # output files, so both can be generated and switched between here
+        self._results_ptm_source_var = ctk.StringVar(value=_PTM_SOURCE_OPTIONS[0][0])
+        self._results_source_toggle = ctk.CTkSegmentedButton(
+            mode_row, values=[label for label, _ in _PTM_SOURCE_OPTIONS],
+            variable=self._results_ptm_source_var,
+            command=self._on_results_ptm_source_change,
+        )
+        self._results_source_toggle.pack(side=tk.LEFT, padx=(12, 0))
         self._results_status = ctk.CTkLabel(mode_row, text="",
                                              text_color="gray60",
                                              font=ctk.CTkFont(size=11))
@@ -587,6 +627,8 @@ class ResultsTabMixin:
         bot_frame.grid_columnconfigure(0, weight=1)
         self._mut_tv = self._make_treeview(bot_frame, _MUT_TV_COLS, self._mut_visible_cols)
         self._bind_treeview_zoom_override(self._mut_tv)
+        for which in ("ptm", "mut"):
+            self._apply_display_columns(which)
 
         # ── Mutation Clusters mode: Anchor Mutations / Nearby Mutations ──
         self._cluster_mode_frame = ctk.CTkFrame(outer, fg_color="transparent")
@@ -665,10 +707,24 @@ class ResultsTabMixin:
         if cluster:
             self._ptm_mode_frame.grid_remove()
             self._cluster_mode_frame.grid()
+            self._results_source_toggle.pack_forget()
         else:
             self._cluster_mode_frame.grid_remove()
             self._ptm_mode_frame.grid()
+            self._results_source_toggle.pack(side="left", padx=(12, 0), before=self._results_status)
         self._refresh_results_status()
+        self._load_results()
+
+    def _results_ptm_source(self) -> str:
+        """The PTM source whose results the PTM Proximity tables show ("ptmd"/"psp")."""
+        return _PTM_SOURCE_BY_LABEL[self._results_ptm_source_var.get()]
+
+    def _results_ptm_source_label(self) -> str:
+        return self._results_ptm_source_var.get()
+
+    def _on_results_ptm_source_change(self, _value: str = "") -> None:
+        for which in ("ptm", "mut"):
+            self._apply_display_columns(which)
         self._load_results()
 
     def _refresh_results_status(self) -> None:
@@ -678,6 +734,8 @@ class ResultsTabMixin:
         """
         if self._results_mode_var.get() == "PTM Proximity":
             if self._results_df_wide is None:
+                if self._results_load_msg["ptm"]:
+                    self._results_status.configure(text=self._results_load_msg["ptm"], text_color=_RED)
                 return
             n_sites = len(self._results_df_wide)
             n_proteins = (self._results_df_wide["UniProt"].nunique()
@@ -685,11 +743,14 @@ class ResultsTabMixin:
             long_note = (" · long format available" if self._results_df_long is not None
                          else " · enable long format for per-mutation detail")
             self._results_status.configure(
-                text=f"{n_sites} PTM sites · {n_proteins} proteins{long_note}",
+                text=f"{self._results_ptm_source_label()}: {n_sites} PTM sites · "
+                     f"{n_proteins} proteins{long_note}",
                 text_color="gray60",
             )
         else:
             if self._cluster_df_wide is None:
+                if self._results_load_msg["cluster"]:
+                    self._results_status.configure(text=self._results_load_msg["cluster"], text_color=_RED)
                 return
             n_anchors = len(self._cluster_df_wide)
             n_proteins = (self._cluster_df_wide["UniProt"].nunique()
@@ -789,7 +850,7 @@ class ResultsTabMixin:
         system's redraw events, so the placeholder wouldn't actually be
         painted to screen yet on some triggers (e.g. clicking Refresh).
         """
-        wide_path = self._output_dir / "ptm_mutation_proximity_db.tsv"
+        wide_path = ptm_output_paths(self._output_dir, self._results_ptm_source())["db"]
         cluster_wide_path = self._output_dir / "mutation_cluster_db.tsv"
         ptm_needs_load = force or self._mtime_key(wide_path) != self._results_loaded_key
         cluster_needs_load = force or self._mtime_key(cluster_wide_path) != self._cluster_loaded_key
@@ -821,12 +882,15 @@ class ResultsTabMixin:
     def _load_results_now(self) -> None:
         import pandas as pd
 
-        wide_path = self._output_dir / "ptm_mutation_proximity_db.tsv"
-        long_path = self._output_dir / "ptm_mutation_proximity_long.tsv"
+        ptm_paths = ptm_output_paths(self._output_dir, self._results_ptm_source())
+        wide_path = ptm_paths["db"]
+        long_path = ptm_paths["long"]
 
         if not wide_path.exists():
-            msg = f"No output found in {self._output_dir.name}/"
-            self._results_status.configure(text=msg, text_color=_RED)
+            source = self._results_ptm_source_label()
+            msg = (f"No {source} PTM Proximity output found in {self._output_dir.name}/ -- "
+                   f"run PTM Proximity with PTM source {source} to generate it")
+            self._results_load_msg["ptm"] = msg
             self._show_tv_message(self._ptm_tv, msg, _RED)
             self._show_tv_message(self._mut_tv, msg, _RED)
             self._results_df_wide = None
@@ -849,6 +913,7 @@ class ResultsTabMixin:
 
             self._results_df_wide = df_wide
             self._results_df_long = df_long
+            self._results_load_msg["ptm"] = None
             self._results_loaded_key = (wide_path, wide_path.stat().st_mtime)
 
             n_sites = len(df_wide)
@@ -856,7 +921,8 @@ class ResultsTabMixin:
             long_note = (" · long format available" if df_long is not None
                          else " · enable long format for per-mutation detail")
             self._results_status.configure(
-                text=f"{n_sites} PTM sites · {n_proteins} proteins{long_note}",
+                text=f"{self._results_ptm_source_label()}: {n_sites} PTM sites · "
+                     f"{n_proteins} proteins{long_note}",
                 text_color="gray60",
             )
             self._hide_tv_message(self._ptm_tv)
@@ -870,7 +936,7 @@ class ResultsTabMixin:
             self._results_df_long = None
             self._results_loaded_key = None
             msg = f"Error loading results: {exc}"
-            self._results_status.configure(text=msg, text_color=_RED)
+            self._results_load_msg["ptm"] = msg
             self._show_tv_message(self._ptm_tv, msg, _RED)
             self._show_tv_message(self._mut_tv, msg, _RED)
 
@@ -882,6 +948,7 @@ class ResultsTabMixin:
 
         if not wide_path.exists():
             msg = f"No Mutation Clustering output found in {self._output_dir.name}/"
+            self._results_load_msg["cluster"] = msg
             self._show_tv_message(self._anchor_tv, msg, _RED)
             self._show_tv_message(self._nearby_tv, msg, _RED)
             self._cluster_df_wide = None
@@ -904,6 +971,7 @@ class ResultsTabMixin:
 
             self._cluster_df_wide = df_wide
             self._cluster_df_long = df_long
+            self._results_load_msg["cluster"] = None
             self._cluster_loaded_key = (wide_path, wide_path.stat().st_mtime)
 
             self._hide_tv_message(self._anchor_tv)
@@ -917,46 +985,57 @@ class ResultsTabMixin:
             self._cluster_df_long = None
             self._cluster_loaded_key = None
             msg = f"Error loading Mutation Clustering results: {exc}"
+            self._results_load_msg["cluster"] = msg
             self._show_tv_message(self._anchor_tv, msg, _RED)
             self._show_tv_message(self._nearby_tv, msg, _RED)
+
+    @staticmethod
+    def _split_position_values(row) -> dict:
+        """Values for the ≤5 pos / >5 pos columns shared by the PTM Sites and
+        Anchor Mutations tables (both wide DBs use the same column names)."""
+        try:
+            near_pts = int(float(row.get("nearby_muts_total_patient_count", "") or "0"))
+            far_pts  = int(float(row.get("distant_muts_total_patient_count", "") or "0"))
+            total_pts: int | str = near_pts + far_pts
+        except ValueError:
+            near_pts = far_pts = ""
+            total_pts = ""
+        try:
+            near_unique = int(float(row.get("unique_mutation_position_count_within_5_positions", "") or "0"))
+            far_unique  = int(float(row.get("unique_mutation_position_count_more_than_5_positions", "") or "0"))
+            total_muts: int | str = near_unique + far_unique
+        except ValueError:
+            near_unique = far_unique = ""
+            total_muts = ""
+        linear_dists = [d for d in row.get("morethan5_linear_distance", "").split(",") if d.strip()]
+        try:
+            max_linear_dist: int | str = max(int(d) for d in linear_dists)
+        except ValueError:
+            max_linear_dist = ""
+        return {
+            "near": row.get("mutation_count_within_5_positions", ""),
+            "far": row.get("mutation_count_more_than_5_positions", ""),
+            "near_pts": near_pts,
+            "far_pts": far_pts,
+            "near_unique": near_unique,
+            "far_unique": far_unique,
+            "total": total_muts,
+            "pts": total_pts,
+            "maxlin": max_linear_dist,
+            "lin_dist_raw": row.get("morethan5_linear_distance", ""),
+        }
 
     def _populate_ptm_tv(self, df) -> None:
         tv = self._ptm_tv
         self._clear_treeview_fully(tv, self._ptm_tv_all_rows)
         rows = []
         for i, (_, row) in enumerate(df.iterrows(), 1):
-            try:
-                near_pts = int(float(row.get("nearby_muts_total_patient_count", "") or "0"))
-                far_pts  = int(float(row.get("distant_muts_total_patient_count", "") or "0"))
-                total_pts: int | str = near_pts + far_pts
-            except ValueError:
-                near_pts = far_pts = ""
-                total_pts = ""
-            try:
-                near_unique = int(float(row.get("unique_mutation_position_count_within_5_positions", "") or "0"))
-                far_unique  = int(float(row.get("unique_mutation_position_count_more_than_5_positions", "") or "0"))
-                total_muts: int | str = near_unique + far_unique
-            except ValueError:
-                near_unique = far_unique = ""
-                total_muts = ""
-            linear_dists = [d for d in row.get("morethan5_linear_distance", "").split(",") if d.strip()]
-            try:
-                max_linear_dist: int | str = max(int(d) for d in linear_dists)
-            except ValueError:
-                max_linear_dist = ""
             values_map = {
                 "uniprot": row.get("UniProt", ""),
                 "gene": row.get("gene", ""),
                 "site": row.get("ptm_site", ""),
                 "type": row.get("ptm_type", ""),
-                "near": row.get("mutation_count_within_5_positions", ""),
-                "far": row.get("mutation_count_more_than_5_positions", ""),
-                "near_pts": near_pts,
-                "far_pts": far_pts,
-                "near_unique": near_unique,
-                "far_unique": far_unique,
-                "total": total_muts,
-                "pts": total_pts,
+                **self._split_position_values(row),
                 "cosmic": row.get("total_cosmic_missense_patients", ""),
                 "atptm": row.get("mutation_at_ptm_site", ""),
                 "confirmed_disrupt": row.get("confirmed_disrupting_mutations", ""),
@@ -970,9 +1049,12 @@ class ResultsTabMixin:
                 "aiupred_bind": row.get("ptm_aiupred_binding", ""),
                 "disord": row.get("ptm_is_disordered", ""),
                 "bind": row.get("ptm_is_binding", ""),
-                "maxlin": max_linear_dist,
-                "lin_dist_raw": row.get("morethan5_linear_distance", ""),
                 "ptm_domain": row.get("ptm_domain", ""),
+                "psp_ltp": row.get("psp_ltp", ""),
+                "psp_htp": row.get("psp_htp", ""),
+                "psp_cst": row.get("psp_cst", ""),
+                "disease_assoc": row.get("disease_associated", ""),
+                "psp_diseases": row.get("psp_diseases", ""),
             }
             values = [i] + [values_map.get(c, "") for c in _PTM_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
@@ -1008,10 +1090,9 @@ class ResultsTabMixin:
                 "uniprot": row.get("UniProt", ""),
                 "gene": row.get("gene", ""),
                 "anchor": row.get("anchor_mutation", ""),
+                "anchor_cosmic": row.get("cosmic_anchor_mutation", ""),
                 "anchor_plddt": row.get("anchor_plddt", ""),
-                "near_count": row.get("nearby_mutation_count", ""),
-                "uniq_pos": row.get("unique_nearby_position_count", ""),
-                "near_pts": row.get("total_nearby_patient_count", ""),
+                **self._split_position_values(row),
                 "ppc": row.get("anchor_polyphen_class", ""),
                 "pps": row.get("anchor_polyphen_score", ""),
                 "isdis": row.get("anchor_is_disordered", ""),
@@ -1226,29 +1307,30 @@ class ResultsTabMixin:
 
         i = 0
         rows = []
-        for entry in (row.get("nearby_mutations", "") or "").split(", "):
-            entry = entry.strip()
-            if not entry:
-                continue
-            m = _MUT_ENTRY_RE.match(entry)
-            if not m:
-                continue
-            i += 1
-            mut_m   = _re.search(r"\d+", m.group(1))
-            mut_pos = int(mut_m.group()) if mut_m else None
-            seq_d   = abs(mut_pos - anchor_pos) if (mut_pos is not None and anchor_pos is not None) else ""
-            per_row = {
-                "mut": m.group(1),
-                "seqd": seq_d,
-                "dist": m.group(4),
-                "pae": m.group(5) or "",
-                "mpld": "",
-                "pts": "",
-                "ppc": _PP_LABEL.get(m.group(2) or "", ""),
-                "pps": m.group(3) or "",
-            }
-            values = [i] + [per_row.get(c, "") for c in _NEARBY_TV_SRC_IDS]
-            rows.append((str(i), values, "odd" if i % 2 else "even"))
+        for col_key in ("mutations_within_5_positions", "mutations_more_than_5_positions"):
+            for entry in (row.get(col_key, "") or "").split(", "):
+                entry = entry.strip()
+                if not entry:
+                    continue
+                m = _MUT_ENTRY_RE.match(entry)
+                if not m:
+                    continue
+                i += 1
+                mut_m   = _re.search(r"\d+", m.group(1))
+                mut_pos = int(mut_m.group()) if mut_m else None
+                seq_d   = abs(mut_pos - anchor_pos) if (mut_pos is not None and anchor_pos is not None) else ""
+                per_row = {
+                    "mut": m.group(1),
+                    "seqd": seq_d,
+                    "dist": m.group(4),
+                    "pae": m.group(5) or "",
+                    "mpld": "",
+                    "pts": "",
+                    "ppc": _PP_LABEL.get(m.group(2) or "", ""),
+                    "pps": m.group(3) or "",
+                }
+                values = [i] + [per_row.get(c, "") for c in _NEARBY_TV_SRC_IDS]
+                rows.append((str(i), values, "odd" if i % 2 else "even"))
 
         def _finish(tv) -> None:
             self._nearby_tv_all_rows = self._capture_tv_rows(tv)

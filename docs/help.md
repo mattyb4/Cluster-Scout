@@ -13,6 +13,8 @@ The pipeline requires two input data files. Use the **Browse** buttons on the Pi
 
 Each input folder should contain exactly **one** file. Browsing a new file replaces the previous one.
 
+**PhosphoSitePlus (optional):** PTM Proximity can use a PhosphoSitePlus download as its PTM sites instead of PTMD (see **PTM source** below). Click **Browse** next to PhosphoSitePlus and pick the download *folder*. The app finds the files it needs by their columns (not their names), checks them, and copies them in. The `*_site_dataset` files are required, and `Disease-associated_sites` is optional. A newer download can replace an older one the same way.
+
 A third input — the **14-3-3 confirmed interactors** spreadsheet — is bundled with the app rather than something you provide. It's small and rarely updated, so it isn't part of the Input Files section.
 
 Before a run starts, the app also checks that your chosen output files aren't locked (e.g. open in Excel) and that your COSMIC/PTMD files pass the same content checks as the Browse dialog — so problems are caught upfront rather than partway through a run.
@@ -23,7 +25,21 @@ Before a run starts, the app also checks that your chosen output files aren't lo
 
 ### PTM Proximity (default)
 
-Finds recurrent cancer mutations that cluster in 3D space near disease-associated post-translational modification (PTM) sites. Runs all 4 steps.
+Finds recurrent cancer mutations that cluster in 3D space near post-translational modification (PTM) sites. Runs all 4 steps.
+
+**PTM source:** a toggle under the mode selector picks where the PTM sites come from:
+
+- **PTMD** (default): PTMD 2.0's disease-associated PTM sites.
+- **PhosphoSitePlus**: every human site in your PhosphoSitePlus download, with each site's evidence counts (LTP, HTP, CST) and any disease associations. This is many more sites than PTMD, so runs take longer.
+
+Each source writes its own output files (PhosphoSitePlus's start with `psp_`), so running one never overwrites the other.
+
+**PhosphoSitePlus filters** (shown only when PhosphoSitePlus is selected) narrow which sites are used, before any other step runs:
+
+- **LTP** and **HTP**: inclusive ranges for each site's evidence counts. The default is 0 to no limit, which keeps every site; leave the maximum blank for no upper limit.
+- **Disease-associated sites only** (off by default): keeps only sites PhosphoSitePlus lists a disease for. Needs the `Disease-associated_sites` file.
+
+The run log records the filters used and how many sites they kept.
 
 ### Mutation Clustering
 
@@ -63,7 +79,7 @@ Both heatmaps can be on at once — they're written as separate scripts, since C
 
 ### Step 1: Filter and Merge Data
 
-Merges PTMD disease-associated PTM sites with COSMIC recurrent mutations. A mutation must appear in at least a minimum number of distinct samples (3 by default — configurable via the **Min samples** field) with confirmed somatic status to be included.
+Merges PTM sites (PTMD's disease-associated sites, or every PhosphoSitePlus site) with COSMIC recurrent mutations. A mutation must appear in at least a minimum number of distinct samples (3 by default — configurable via the **Min samples** field) with confirmed somatic status to be included.
 
 ### Step 2: Download Structures
 
@@ -79,7 +95,7 @@ In PTM Proximity mode, adds five types of annotations to each PTM site:
 
 - **14-3-3 binding predictions** — Queries the 14-3-3-Pred API and cross-references experimentally confirmed interactors (Ser/Thr sites only)
 - **PolyPhen-2 scores** — Queries myvariant.info for pathogenicity predictions on each mutation
-- **Kinase predictions** — Uses the Kinase Library to predict the top 5 upstream kinases for each phosphorylation site (Ser/Thr/Tyr sites only)
+- **Kinase predictions** — Uses the Kinase Library to predict the top 5 upstream kinases for each phosphorylation site (Ser/Thr/Tyr sites only). It runs in its own environment, which the first run sets up automatically (about a minute). If that fails, the log says why, and those sites are retried on the next run.
 - **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue
 - **InterPro functional domains** — Queries the InterPro REST API for curated domain/family/site entries on each protein, then reports which entry (if any) contains the PTM site's or mutation's specific residue position
 
@@ -95,7 +111,7 @@ All output TSVs (`ptm_mutation_proximity_db.tsv`, `mutation_cluster_db.tsv`, and
 
 ### Results Tab
 
-A **PTM Proximity / Mutation Clusters** toggle at the top switches which mode's results are shown. Each shows two linked tables: PTM Proximity mode shows **PTM Sites** (one row per PTM site) and **Mutation Details** (one row per nearby mutation, for whichever PTM site is selected above); Mutation Clustering mode shows the equivalent **Anchor Mutations** and **Nearby Mutations** tables. All four tables have far more columns than are shown by default; click **Columns** on any table to show/hide columns, and hover the **?** badge next to any column name for an explanation of exactly what it means and how it's computed. That in-app reference is the authoritative, up-to-date column list — it isn't duplicated here since column definitions change more often than this document does.
+A **PTM Proximity / Mutation Clusters** toggle at the top switches which mode's results are shown. In PTM Proximity, a second **PTMD / PhosphoSitePlus** toggle switches between the two PTM sources' results, if you've generated both. Columns only one source fills in (such as LTP/HTP for PhosphoSitePlus) are hidden while the other source is shown. Each shows two linked tables: PTM Proximity mode shows **PTM Sites** (one row per PTM site) and **Mutation Details** (one row per nearby mutation, for whichever PTM site is selected above); Mutation Clustering mode shows the equivalent **Anchor Mutations** and **Nearby Mutations** tables. All four tables have far more columns than are shown by default; click **Columns** on any table to show/hide columns, and hover the **?** badge next to any column name for an explanation of exactly what it means and how it's computed. That in-app reference is the authoritative, up-to-date column list — it isn't duplicated here since column definitions change more often than this document does.
 
 The **Export** button on the Mutation Details table writes exactly what's currently shown (respecting any active search/filter and sort order) to a TSV in the output folder, using the same UTF-16 encoding as the pipeline's own output files.
 
@@ -103,7 +119,7 @@ The **Export** button on the Mutation Details table writes exactly what's curren
 
 Mutations shown in the PTM Sites table's raw mutation-list columns include inline tags:
 
-- **(isoform?)** — The reference amino acid in COSMIC doesn't match the AlphaFold structure at this position, possibly due to isoform differences
+- **(isoform?)** — The mutation couldn't be placed on the canonical sequence AlphaFold models (it sits in sequence only another isoform has, or no isoform explains its reference residue), or its reference amino acid doesn't match the structure at this position. Mutations COSMIC numbers by a different isoform are otherwise moved to their canonical position automatically; the **COSMIC label** column shows COSMIC's own label for any mutation that was moved. The method is described in full in `docs/methods.md`.
 - **(PP:D,0.999)** — PolyPhen-2 prediction: **D** = Probably Damaging, **P** = Possibly Damaging, **B** = Benign. The number is the confidence score (0-1)
 - **(PAE:2.1)** — AlphaFold's Predicted Aligned Error for the residue pair. Lower = higher structural confidence
 
@@ -194,7 +210,7 @@ The pipeline caches data to speed up subsequent runs:
 | Cache | Location | Purpose |
 |-------|----------|---------|
 | Gene → UniProt mappings | `data/cache/uniprot_gene_mapping.tsv`, `data/cache/gene_to_uniprot_mapping.tsv` | Gene symbol / UniProt accession lookups |
-| Isoform safe lengths | `data/cache/isoform_safe_lengths.tsv` | Detects when COSMIC's numbering diverges from the canonical AlphaFold sequence |
+| Isoform sequences | `data/cache/uniprot_isoform_sequences.tsv` | Every UniProt isoform sequence per protein, used to put COSMIC's mutation numbering onto the canonical AlphaFold sequence |
 | CIF structures | `cif_models/` | AlphaFold structure and PAE files |
 | 14-3-3 predictions | `data/cache/1433pred/` | Per-protein API responses |
 | PolyPhen-2 scores | `data/cache/polyphen.tsv` | Per-mutation pathogenicity |

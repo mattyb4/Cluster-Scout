@@ -10,6 +10,8 @@ Output/ptm_mutation_proximity_db.tsv. --mode mutation-clustering runs the
 same 4 steps against a different Step 1 input/output pair and writes
 Output/mutation_cluster_db.tsv instead -- see pipeline_utils.PTM_PROXIMITY_STEPS
 /MUTATION_CLUSTERING_STEPS for the exact step labels used in each mode.
+--ptm-source psp takes ptm-proximity's PTM sites from PhosphoSitePlus instead
+of PTMD, writing Output/psp_ptm_mutation_proximity_db.tsv.
 """
 from __future__ import annotations
 
@@ -20,7 +22,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
-from pipeline_utils import MUTATION_CLUSTERING_STEPS, PTM_PROXIMITY_STEPS, hotspots_tsv_path  # noqa: E402
+from pipeline_utils import (  # noqa: E402
+    DEFAULT_PTM_SOURCE,
+    PTM_SOURCES,
+    hotspots_tsv_path,
+    pipeline_steps,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
@@ -66,17 +73,48 @@ def main() -> None:
             "space without any PTM requirement."
         ),
     )
+    parser.add_argument(
+        "--ptm-source",
+        choices=PTM_SOURCES,
+        default=DEFAULT_PTM_SOURCE,
+        help=(
+            "PTM site data for ptm-proximity mode: 'ptmd' (default, PTMD 2.0 "
+            "disease-associated PTMs) or 'psp' (every PhosphoSitePlus site, with "
+            "LTP/HTP evidence counts)."
+        ),
+    )
+    for kind, label in (("ltp", "LTP (low-throughput literature)"), ("htp", "HTP (high-throughput mass-spec)")):
+        parser.add_argument(f"--psp-min-{kind}", type=int, default=None,
+                            help=f"--ptm-source psp only: minimum {label} count (default: 0)")
+        parser.add_argument(f"--psp-max-{kind}", type=int, default=None,
+                            help=f"--ptm-source psp only: maximum {label} count (default: no limit)")
+    parser.add_argument("--psp-disease-only", action="store_true",
+                        help="--ptm-source psp only: keep only sites with a PhosphoSitePlus disease association")
     args = parser.parse_args()
     mode = args.mode
+    ptm_source = args.ptm_source
+    source_args = ["--ptm-source", ptm_source] if mode == "ptm-proximity" else []
 
-    STEPS = PTM_PROXIMITY_STEPS if mode == "ptm-proximity" else MUTATION_CLUSTERING_STEPS
-    INPUT_TSV = hotspots_tsv_path(PROJECT_ROOT, mode)
+    # PSP site filters apply in step 1; step 1 validates the values itself
+    psp_filter_args: list[str] = []
+    if mode == "ptm-proximity" and ptm_source == "psp":
+        for name in ("min_ltp", "max_ltp", "min_htp", "max_htp"):
+            value = getattr(args, f"psp_{name}")
+            if value is not None:
+                psp_filter_args += [f"--psp-{name.replace('_', '-')}", str(value)]
+        if args.psp_disease_only:
+            psp_filter_args.append("--psp-disease-only")
+
+    STEPS = pipeline_steps(mode, ptm_source)
+    INPUT_TSV = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
 
     print()
     print(_bar("═"))
     print("       Bio465 Capstone Pipeline")
     print(_bar("═"))
     print(f"  Mode         : {mode}")
+    if mode == "ptm-proximity":
+        print(f"  PTM source   : {ptm_source}")
     print(f"  Project root : {PROJECT_ROOT}")
     print(f"  Input TSV    : {INPUT_TSV}")
     print(f"  Models dir   : {MODELS_DIR}")
@@ -90,7 +128,7 @@ def main() -> None:
 
     python_exe = sys.executable
 
-    step1_cmd = [python_exe, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode]
+    step1_cmd = [python_exe, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode, *source_args, *psp_filter_args]
 
     step2_cmd = [
         python_exe,
@@ -104,7 +142,7 @@ def main() -> None:
         "--logs_dir", str(PROJECT_ROOT / "Output" / "logs"),
     ]
 
-    step3_cmd = [python_exe, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode]
+    step3_cmd = [python_exe, str(SCRIPTS_DIR / "3_find_nearby_mutations.py"), "--mode", mode, *source_args]
     if RUN_ONLY_UNIPROT:
         step3_cmd.extend(["--uniprot", RUN_ONLY_UNIPROT])
 
@@ -114,7 +152,7 @@ def main() -> None:
     t2 = run_step(STEPS[1][1], 2, len(STEPS), step2_cmd)
     t3 = run_step(STEPS[2][1], 3, len(STEPS), step3_cmd)
 
-    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate.py")]
+    step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate.py"), *source_args]
 
     if mode == "ptm-proximity":
         t4 = run_step(STEPS[3][1], 4, len(STEPS), step4_cmd)
