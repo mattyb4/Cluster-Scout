@@ -764,15 +764,19 @@ class PipelineTabMixin:
         from export_ca_coordinates import (
             MUTATION_DEFAULT_HIGH_COLOR,
             MUTATION_DEFAULT_LOW_COLOR,
+            MUTATION_DEFAULT_MID_COLOR,
             MUTATION_MARKER_DEFAULT_COLOR,
             PLDDT_DEFAULT_HIGH_COLOR,
             PLDDT_DEFAULT_LOW_COLOR,
+            PLDDT_DEFAULT_MID_COLOR,
             PTM_MARKER_DEFAULT_COLOR,
         )
         if not hasattr(self, "_ca_mutation_low_var"):
             self._ca_mutation_low_var = ctk.StringVar(value=MUTATION_DEFAULT_LOW_COLOR)
+            self._ca_mutation_mid_var = ctk.StringVar(value=MUTATION_DEFAULT_MID_COLOR)
             self._ca_mutation_high_var = ctk.StringVar(value=MUTATION_DEFAULT_HIGH_COLOR)
             self._ca_plddt_low_var = ctk.StringVar(value=PLDDT_DEFAULT_LOW_COLOR)
+            self._ca_plddt_mid_var = ctk.StringVar(value=PLDDT_DEFAULT_MID_COLOR)
             self._ca_plddt_high_var = ctk.StringVar(value=PLDDT_DEFAULT_HIGH_COLOR)
             self._ca_ptm_marker_color_var = ctk.StringVar(value=PTM_MARKER_DEFAULT_COLOR)
             self._ca_mutation_marker_color_var = ctk.StringVar(value=MUTATION_MARKER_DEFAULT_COLOR)
@@ -805,11 +809,13 @@ class PipelineTabMixin:
             "using a sequential red palette. Single-fragment proteins only.",
         ).pack(side="left", padx=(4, 0))
 
-        # Mutation heatmap colors (low/high swatches)
+        # Mutation heatmap colors (low/middle/high swatches)
         mut_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
         mut_colors_frame.grid(row=5, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
         ctk.CTkLabel(mut_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
         color_swatch_button(mut_colors_frame, self._ca_mutation_low_var).pack(side="left")
+        ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
+        color_swatch_button(mut_colors_frame, self._ca_mutation_mid_var).pack(side="left")
         ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
         color_swatch_button(mut_colors_frame, self._ca_mutation_high_var).pack(side="left")
         ctk.CTkButton(
@@ -817,14 +823,16 @@ class PipelineTabMixin:
             fg_color="gray30", hover_color="gray40",
             command=lambda: _reset_colors(
                 (self._ca_mutation_low_var, MUTATION_DEFAULT_LOW_COLOR),
+                (self._ca_mutation_mid_var, MUTATION_DEFAULT_MID_COLOR),
                 (self._ca_mutation_high_var, MUTATION_DEFAULT_HIGH_COLOR),
             ),
         ).pack(side="left", padx=(6, 0))
         help_icon(
             mut_colors_frame,
-            "Low/high ends of the mutation heatmap's color scale (few nearby "
-            "patients to many). Click a swatch to choose a color; ↺ resets "
-            "both back to the default red scale shown above.",
+            "Low, middle and high colors of the mutation heatmap's scale (no "
+            "nearby patients, half the protein's highest count, and the "
+            "highest count). Click a swatch to choose a color; ↺ resets all "
+            "three back to the default red scale.",
         ).pack(side="left", padx=(4, 0))
 
         # Log-scale (mutation heatmap only)
@@ -892,11 +900,13 @@ class PipelineTabMixin:
             "Single-fragment proteins only.",
         ).pack(side="left", padx=(4, 0))
 
-        # pLDDT heatmap colors (low/high swatches)
+        # pLDDT heatmap colors (low/middle/high swatches)
         plddt_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
         plddt_colors_frame.grid(row=9, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
         ctk.CTkLabel(plddt_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
         color_swatch_button(plddt_colors_frame, self._ca_plddt_low_var).pack(side="left")
+        ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
+        color_swatch_button(plddt_colors_frame, self._ca_plddt_mid_var).pack(side="left")
         ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
         color_swatch_button(plddt_colors_frame, self._ca_plddt_high_var).pack(side="left")
         ctk.CTkButton(
@@ -904,14 +914,15 @@ class PipelineTabMixin:
             fg_color="gray30", hover_color="gray40",
             command=lambda: _reset_colors(
                 (self._ca_plddt_low_var, PLDDT_DEFAULT_LOW_COLOR),
+                (self._ca_plddt_mid_var, PLDDT_DEFAULT_MID_COLOR),
                 (self._ca_plddt_high_var, PLDDT_DEFAULT_HIGH_COLOR),
             ),
         ).pack(side="left", padx=(6, 0))
         help_icon(
             plddt_colors_frame,
-            "Low/high ends of the pLDDT heatmap's color scale (low "
-            "confidence to high). Click a swatch to choose a color; ↺ "
-            "resets both back to AlphaFold's own color scheme shown above.",
+            "Low, middle and high colors of the pLDDT heatmap's scale "
+            "(pLDDT 0, 50 and 100). Click a swatch to choose a color; ↺ "
+            "resets all three back to AlphaFold's own color scheme.",
         ).pack(side="left", padx=(4, 0))
 
         # Mark PTM sites (independent marker, not a heatmap)

@@ -217,15 +217,23 @@ class VisualizationTabMixin:
         self._viz_stack_legend_labels["site_marker"].configure(
             text="★ Anchor mutation" if cluster else "★ PTM site",
         )
-        # Loads the target data source if not already loaded.
+        # Loads the target data source if not already loaded -- in the
+        # background, so fill the selectors once it's in
         self._load_results()
+        if self._results_loading:
+            if self._show_viz_data_source not in self._results_on_loaded:
+                self._results_on_loaded.append(self._show_viz_data_source)
+            return
+        self._show_viz_data_source()
+
+    def _show_viz_data_source(self) -> None:
         self._viz_search_var.set("")
         labels = self._viz_active_labels()
-        self._viz_combo.configure(values=labels)
+        self._viz_combo.configure(values=self._viz_dropdown_values(labels))
         self._viz_combo.set(labels[0] if labels else "")
         self._viz_protein_search_var.set("")
         plabels = self._viz_active_protein_labels()
-        self._viz_protein_combo.configure(values=plabels)
+        self._viz_protein_combo.configure(values=self._viz_dropdown_values(plabels))
         self._viz_protein_combo.set(plabels[0] if plabels else "")
         self._generate_current_view()
 
@@ -259,75 +267,80 @@ class VisualizationTabMixin:
 
     # ── Visualization: PTM / protein selection ──────────────────────────────
 
-    def _refresh_viz_selector(self, df) -> None:
-        """(Re)populate the PTM-site and protein selectors from loaded results."""
-        self._viz_ptm_rows = {}
+    # A dropdown with every row of a ~200k-anchor run takes seconds to build
+    # and to open, so it lists at most this many; the search box above it
+    # still searches every label.
+    _VIZ_DROPDOWN_MAX = 500
+
+    def _viz_dropdown_values(self, labels: list) -> list:
+        return labels[:self._VIZ_DROPDOWN_MAX]
+
+    @staticmethod
+    def _viz_selector_data(df, anchor_col: str) -> tuple:
+        """(rows, labels, protein_rows, protein_labels) for a selector: label ->
+        df index, and protein label -> df indexes. No Tk calls, so it can run
+        off the UI thread."""
+        def _col(name):
+            return df[name] if name in df.columns else ["?"] * len(df)
+
+        rows: dict = {}
         labels: list[str] = []
-        self._viz_protein_rows = {}
+        protein_rows: dict = {}
         protein_labels: list[str] = []
-        for idx, row in df.iterrows():
-            gene = row.get("gene", "?")
-            site = row.get("ptm_site", "?")
-            uid = row.get("UniProt", "?")
-            label = f"{gene}  {site}  ({uid})"
+        for idx, gene, anchor, uid in zip(df.index, _col("gene"), _col(anchor_col), _col("UniProt")):
+            label = f"{gene}  {anchor}  ({uid})"
             labels.append(label)
-            self._viz_ptm_rows[label] = idx
+            rows[label] = idx
 
             plabel = f"{gene} ({uid})"
-            if plabel not in self._viz_protein_rows:
+            if plabel not in protein_rows:
                 protein_labels.append(plabel)
-                self._viz_protein_rows[plabel] = []
-            self._viz_protein_rows[plabel].append(idx)
+                protein_rows[plabel] = []
+            protein_rows[plabel].append(idx)
+        return rows, labels, protein_rows, protein_labels
+
+    def _refresh_viz_selector(self, df, data: tuple | None = None) -> None:
+        """(Re)populate the PTM-site and protein selectors from loaded results.
+        *data* is _viz_selector_data's result when already built."""
+        rows, labels, protein_rows, protein_labels = data or self._viz_selector_data(df, "ptm_site")
+        self._viz_ptm_rows = rows
+        self._viz_protein_rows = protein_rows
 
         self._viz_all_labels = labels
         current = self._viz_combo.get()
-        self._viz_combo.configure(values=labels)
-        if labels and current not in labels:
+        self._viz_combo.configure(values=self._viz_dropdown_values(labels))
+        if labels and current not in rows:
             self._viz_combo.set(labels[0])
         elif not labels:
             self._viz_combo.set("")
 
         self._viz_all_protein_labels = protein_labels
         pcurrent = self._viz_protein_combo.get()
-        self._viz_protein_combo.configure(values=protein_labels)
-        if protein_labels and pcurrent not in protein_labels:
+        self._viz_protein_combo.configure(values=self._viz_dropdown_values(protein_labels))
+        if protein_labels and pcurrent not in protein_rows:
             self._viz_protein_combo.set(protein_labels[0])
         elif not protein_labels:
             self._viz_protein_combo.set("")
 
-    def _refresh_cluster_viz_selector(self, df) -> None:
+    def _refresh_cluster_viz_selector(self, df, data: tuple | None = None) -> None:
         """Cluster-mode counterpart of _refresh_viz_selector."""
-        self._viz_cluster_rows = {}
-        labels: list[str] = []
-        self._viz_cluster_protein_rows = {}
-        protein_labels: list[str] = []
-        for idx, row in df.iterrows():
-            gene = row.get("gene", "?")
-            anchor = row.get("anchor_mutation", "?")
-            uid = row.get("UniProt", "?")
-            label = f"{gene}  {anchor}  ({uid})"
-            labels.append(label)
-            self._viz_cluster_rows[label] = idx
-
-            plabel = f"{gene} ({uid})"
-            if plabel not in self._viz_cluster_protein_rows:
-                protein_labels.append(plabel)
-                self._viz_cluster_protein_rows[plabel] = []
-            self._viz_cluster_protein_rows[plabel].append(idx)
+        rows, labels, protein_rows, protein_labels = data or self._viz_selector_data(df, "anchor_mutation")
+        self._viz_cluster_rows = rows
+        self._viz_cluster_protein_rows = protein_rows
 
         self._viz_all_cluster_labels = labels
         self._viz_all_cluster_protein_labels = protein_labels
         if self._viz_is_cluster():
             current = self._viz_combo.get()
-            self._viz_combo.configure(values=labels)
-            if labels and current not in labels:
+            self._viz_combo.configure(values=self._viz_dropdown_values(labels))
+            if labels and current not in rows:
                 self._viz_combo.set(labels[0])
             elif not labels:
                 self._viz_combo.set("")
 
             pcurrent = self._viz_protein_combo.get()
-            self._viz_protein_combo.configure(values=protein_labels)
-            if protein_labels and pcurrent not in protein_labels:
+            self._viz_protein_combo.configure(values=self._viz_dropdown_values(protein_labels))
+            if protein_labels and pcurrent not in protein_rows:
                 self._viz_protein_combo.set(protein_labels[0])
             elif not protein_labels:
                 self._viz_protein_combo.set("")
@@ -339,7 +352,7 @@ class VisualizationTabMixin:
             [label for label in all_labels if query in label.lower()]
             if query else all_labels
         )
-        self._viz_combo.configure(values=filtered)
+        self._viz_combo.configure(values=self._viz_dropdown_values(filtered))
         if filtered and self._viz_combo.get() not in filtered:
             self._viz_combo.set(filtered[0])
 
@@ -350,7 +363,7 @@ class VisualizationTabMixin:
             [label for label in all_labels if query in label.lower()]
             if query else all_labels
         )
-        self._viz_protein_combo.configure(values=filtered)
+        self._viz_protein_combo.configure(values=self._viz_dropdown_values(filtered))
         if filtered and self._viz_protein_combo.get() not in filtered:
             self._viz_protein_combo.set(filtered[0])
 

@@ -20,13 +20,13 @@ scripts (skipped, with a warning, for multi-fragment proteins):
                           the cartoon by it (the built-in "Reds" palette by
                           default, auto-scaled to the attribute's true
                           min/max, or log1p-scaled if requested; see
-                          mutation_low_color/mutation_high_color below for
+                          mutation_low/mid/high_color below for
                           overriding the scale), with an on-screen color key
                           labeled with the real patient-count values
   plddt_view.cxc     — opens the CIF and colors the cartoon by AlphaFold's
                        own per-residue confidence (pLDDT), using ChimeraX's
                        built-in "alphafold" palette by default (see
-                       plddt_low_color/plddt_high_color below for
+                       plddt_low/mid/high_color below for
                        overriding it), with a matching color key
   markers_view.cxc   — opens the CIF with a plain (uncolored) cartoon; only
                        produced when mark_ptm_sites/mark_mutations are on
@@ -98,16 +98,19 @@ PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
 NEARBY_PATIENT_RADIUS_A = 10.0
 
-# Sentinel default colors for each customizable heatmap/marker. As long as a
-# caller's low/high color kwargs still equal these exact defaults, run_export
-# keeps using the real named ChimeraX palette ("Reds"/"alphafold") it always
-# used before color customization existed -- these hex pairs only ever appear
-# on screen as a swatch preview (app) or once the *user* has actually chosen
-# them again; the moment either differs, run_export switches that heatmap to
-# an explicit custom two-color gradient built from the current pair.
+# Sentinel default colors for each customizable heatmap/marker. Each heatmap
+# scale has three colors -- low, middle (the scale's midpoint) and high. As
+# long as a caller's three color kwargs still equal these exact defaults,
+# run_export keeps using the real named ChimeraX palette ("Reds"/"alphafold")
+# it always used before color customization existed -- these hex values only
+# ever appear on screen as a swatch preview (app) and in the color key; the
+# moment any of the three differs, run_export switches that heatmap to an
+# explicit custom three-color gradient built from the current colors.
 MUTATION_DEFAULT_LOW_COLOR = "#FFFFFF"
+MUTATION_DEFAULT_MID_COLOR = "#FB6A4A"
 MUTATION_DEFAULT_HIGH_COLOR = "#B30000"
 PLDDT_DEFAULT_LOW_COLOR = "#FF7D45"
+PLDDT_DEFAULT_MID_COLOR = "#FFDB13"
 PLDDT_DEFAULT_HIGH_COLOR = "#0053D6"
 PTM_MARKER_DEFAULT_COLOR = "green"
 MUTATION_MARKER_DEFAULT_COLOR = "orange"
@@ -612,12 +615,15 @@ def write_chimerax_script(
 _MUTATION_KEY_PALETTE = "Reds"  # write_chimerax_script's own default -- the real 3D coloring, unaffected by the key
 
 
-def build_mutation_key_lines(max_val: float, log_scale: bool, low_color: str, high_color: str) -> list[str]:
+def build_mutation_key_lines(
+    max_val: float, log_scale: bool, low_color: str, mid_color: str, high_color: str,
+) -> list[str]:
     """Build ChimeraX `key`/`2dlabels` command lines for the mutation
-    heatmap's on-screen color key: a simple 2-color gradient from
-    *low_color* (labeled "0") to *high_color* (labeled the true max).
+    heatmap's on-screen color key: a 3-color gradient from *low_color*
+    (labeled "0") through *mid_color* (labeled the scale's midpoint) to
+    *high_color* (labeled the true max).
 
-    Always built from an explicit 2-color list -- never a named palette,
+    Always built from an explicit color list -- never a named palette,
     even when the heatmap's actual 3D coloring is using the default "Reds"
     palette unmodified (see run_export). An earlier version named the
     palette directly and gave its 3 middle color:label pairs blank labels
@@ -627,29 +633,35 @@ def build_mutation_key_lines(max_val: float, log_scale: bool, low_color: str, hi
     intended blanks (root cause unconfirmed: it did NOT reproduce on every
     protein tested, so it may be a rendering/spacing quirk tied to specific
     label lengths or key-box sizing rather than the blank-label syntax
-    itself being unsupported). Regardless of the exact cause, only ever
-    requesting 2 labels total -- placed far apart at the key's own two
-    ends, with nothing else for ChimeraX to lay out in between -- removes
-    the failure mode entirely rather than depending on a syntax whose
-    behavior wasn't fully verified.
+    itself being unsupported). Regardless of the exact cause, every stop
+    here gets a real label (no blanks), and there are only 3 of them, spread
+    evenly across the key.
 
     *max_val* is the true max of whichever column got colored (`color
     byattribute` auto-scales to it, since no explicit --range is ever
     passed in write_chimerax_script); when *log_scale* is set it's already
     log1p-transformed, so the label is converted back to a raw patient
     count via expm1 so the key reads in the same units as the data instead
-    of exposing the log transform to the viewer.
+    of exposing the log transform to the viewer. The middle label is the
+    count at the scale's midpoint -- half the max on a linear scale, and
+    expm1(half the log max) on a log scale.
     """
     title = "Patients within 10 Å (log scale)" if log_scale else "Patients within 10 Å"
-    hi_label = f"{round(float(np.expm1(max_val))):g}" if log_scale else f"{max_val:g}"
+    if log_scale:
+        hi_label = f"{round(float(np.expm1(max_val))):g}"
+        mid_label = f"{round(float(np.expm1(max_val / 2))):g}"
+    else:
+        hi_label = f"{max_val:g}"
+        mid_label = f"{round(max_val / 2, 1):g}"
     return [
-        f"key {low_color}:0 {high_color}:{hi_label}",
+        f"key {low_color}:0 {mid_color}:{mid_label} {high_color}:{hi_label}",
         f'2dlabels text "{title}" xpos 0.7 ypos 0.135 size 14',
     ]
 
 
 def write_plddt_chimerax_script(
     cif_path: Path, out_path: Path, palette: str = "alphafold", extra_lines: list[str] = (),
+    value_range: tuple[float, float] | None = None,
 ) -> Path:
     """Write a ChimeraX command script (.cxc) that opens *cif_path* and colors
     the cartoon by pLDDT confidence.
@@ -659,8 +671,14 @@ def write_plddt_chimerax_script(
     `color bfactor`.
 
     *palette* defaults to ChimeraX's own built-in "alphafold" palette (the
-    same scheme the AlphaFold DB itself uses); pass a custom "low:high"
-    color pair instead to override it (see run_export).
+    same scheme the AlphaFold DB itself uses); pass a custom "low:mid:high"
+    color list instead to override it (see run_export).
+
+    *value_range*, if given, pins the palette's ends to those values instead
+    of the structure's own lowest/highest pLDDT -- run_export passes (0, 100)
+    with a custom palette, so its colors mean the same on every protein and
+    match the key's 0/50/100 labels. (The named "alphafold" palette carries
+    its own fixed values.)
 
     *extra_lines*, if given, are inserted after the coloring command and
     before the final lighting command -- see write_chimerax_script.
@@ -669,7 +687,8 @@ def write_plddt_chimerax_script(
         f'open "{cif_path}"',
         "hide atoms",
         "cartoon",
-        f"color bfactor #1 palette {palette}",
+        f"color bfactor #1 palette {palette}"
+        + (f" range {value_range[0]:g},{value_range[1]:g}" if value_range else ""),
         *extra_lines,
         "lighting soft",
     ]
@@ -680,22 +699,21 @@ def write_plddt_chimerax_script(
 _PLDDT_KEY_PALETTE = "alphafold"  # write_plddt_chimerax_script's own default -- the real 3D coloring, unaffected by the key
 
 
-def build_plddt_key_lines(low_color: str, high_color: str) -> list[str]:
+def build_plddt_key_lines(low_color: str, mid_color: str, high_color: str) -> list[str]:
     """Build ChimeraX `key`/`2dlabels` command lines for the pLDDT heatmap's
-    on-screen color key: a simple 2-color gradient from *low_color*
-    (labeled "0") to *high_color* (labeled "100") -- pLDDT's fixed full
-    range.
+    on-screen color key: a 3-color gradient from *low_color* (labeled "0")
+    through *mid_color* ("50") to *high_color* ("100") -- pLDDT's fixed
+    full range.
 
-    Always built from an explicit 2-color list -- never the named
+    Always built from an explicit color list -- never the named
     "alphafold" palette, even when the heatmap's actual 3D coloring is
     using it unmodified (see run_export). See build_mutation_key_lines's
     docstring for why: a named-palette key with blank middle labels was
     observed to render garbled overlapping digits on at least one protein.
-    Only ever requesting 2 labels, placed at the key's own two ends,
-    removes that failure mode regardless of its exact cause.
+    Every stop here gets a real label, and there are only 3.
     """
     return [
-        f"key {low_color}:0 {high_color}:100",
+        f"key {low_color}:0 {mid_color}:50 {high_color}:100",
         '2dlabels text "AlphaFold confidence (pLDDT)" xpos 0.7 ypos 0.135 size 14',
     ]
 
@@ -729,8 +747,10 @@ def run_export(
     log_scale: bool = False,
     dim_low_confidence: bool = False,
     mutation_low_color: str = MUTATION_DEFAULT_LOW_COLOR,
+    mutation_mid_color: str = MUTATION_DEFAULT_MID_COLOR,
     mutation_high_color: str = MUTATION_DEFAULT_HIGH_COLOR,
     plddt_low_color: str = PLDDT_DEFAULT_LOW_COLOR,
+    plddt_mid_color: str = PLDDT_DEFAULT_MID_COLOR,
     plddt_high_color: str = PLDDT_DEFAULT_HIGH_COLOR,
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
@@ -780,17 +800,19 @@ def run_export(
     build_confidence_dim_lines's docstring. Only affects the mutation
     heatmap; has no effect if *mutation_heatmap* is False.
 
-    *mutation_low_color*/*mutation_high_color* and *plddt_low_color*/
-    *plddt_high_color* customize each heatmap's color scale. As long as a
-    pair still equals its MUTATION_DEFAULT_*/PLDDT_DEFAULT_* sentinel, that
-    heatmap keeps using ChimeraX's real named "Reds"/"alphafold" palette
-    exactly as before; the moment either color in a pair differs, that
-    heatmap switches to an explicit two-color gradient built from the
-    current pair, in both the 3D coloring and its on-screen key.
+    *mutation_low/mid/high_color* and *plddt_low/mid/high_color* customize
+    each heatmap's three-color scale (the middle color sits at the scale's
+    midpoint). As long as all three still equal their MUTATION_DEFAULT_*/
+    PLDDT_DEFAULT_* sentinels, that heatmap keeps using ChimeraX's real named
+    "Reds"/"alphafold" palette exactly as before; the moment any of them
+    differs, that heatmap switches to an explicit three-color gradient built
+    from the current colors, in both the 3D coloring and its on-screen key,
+    with the scale pinned to 0-max patients (mutation) or 0-100 (pLDDT) so
+    the key's labels are exact.
     *ptm_marker_color*/*mutation_marker_color* similarly override the
     PTM-site sphere / mutation-position stick colors (default green/orange)
     -- any ChimeraX-valid color spec (name or "#RRGGBB" hex) works for all
-    six.
+    eight.
 
     Raises ValueError if neither uniprot nor gene is given, if a gene-only
     lookup can't be resolved to a UniProt accession, or if no AlphaFold
@@ -945,11 +967,13 @@ def run_export(
     else:
         cif_path = cif_files[0].resolve()
 
-        mutation_customized = (mutation_low_color, mutation_high_color) != (
-            MUTATION_DEFAULT_LOW_COLOR, MUTATION_DEFAULT_HIGH_COLOR,
+        mutation_colors = (mutation_low_color, mutation_mid_color, mutation_high_color)
+        plddt_colors = (plddt_low_color, plddt_mid_color, plddt_high_color)
+        mutation_customized = mutation_colors != (
+            MUTATION_DEFAULT_LOW_COLOR, MUTATION_DEFAULT_MID_COLOR, MUTATION_DEFAULT_HIGH_COLOR,
         )
-        plddt_customized = (plddt_low_color, plddt_high_color) != (
-            PLDDT_DEFAULT_LOW_COLOR, PLDDT_DEFAULT_HIGH_COLOR,
+        plddt_customized = plddt_colors != (
+            PLDDT_DEFAULT_LOW_COLOR, PLDDT_DEFAULT_MID_COLOR, PLDDT_DEFAULT_HIGH_COLOR,
         )
 
         marker_lines: list[str] = []
@@ -995,20 +1019,24 @@ def run_export(
                     dim_lines = build_confidence_dim_lines(get_plddt_map(chain))
                     log_cb(f"  Dimming {len(dim_lines)} residue(s) by confidence on the mutation heatmap")
 
-            mutation_palette = (
-                f"{mutation_low_color}:{mutation_high_color}" if mutation_customized else _MUTATION_KEY_PALETTE
-            )
+            heatmap_max = float(heatmap_df[heatmap_attr].max())
+            mutation_palette = ":".join(mutation_colors) if mutation_customized else _MUTATION_KEY_PALETTE
+            # A custom palette spreads its colors evenly over the range; pin
+            # that range to 0-max so the middle color sits exactly at the
+            # key's middle label, even for a protein with no 0-count residue
+            mutation_range = (0.0, heatmap_max) if mutation_customized and heatmap_max > 0 else None
             key_lines = build_mutation_key_lines(
-                float(heatmap_df[heatmap_attr].max()), log_scale,
-                low_color=mutation_low_color, high_color=mutation_high_color,
+                heatmap_max, log_scale,
+                low_color=mutation_low_color, mid_color=mutation_mid_color, high_color=mutation_high_color,
             )
             if mutation_customized:
-                log_cb(f"  Mutation heatmap colors: {mutation_low_color} (low) -> {mutation_high_color} (high)")
+                log_cb(f"  Mutation heatmap colors: {mutation_low_color} (low) -> "
+                       f"{mutation_mid_color} (middle) -> {mutation_high_color} (high)")
 
             write_defattr_file(heatmap_df, mutation_defattr_out, attr_name=heatmap_attr)
             write_chimerax_script(
                 cif_path, mutation_defattr_out.resolve(), mutation_chimerax_script_out,
-                attr_name=heatmap_attr, palette=mutation_palette,
+                attr_name=heatmap_attr, palette=mutation_palette, value_range=mutation_range,
                 extra_lines=dim_lines + marker_lines + key_lines,
                 # "soft" lighting's depth cues come entirely from ambient
                 # shadowing, which breaks once any part of the model is
@@ -1022,12 +1050,14 @@ def run_export(
 
         if plddt_heatmap:
             plddt_chimerax_script_out = output_dir / "plddt_view.cxc"
-            plddt_palette = f"{plddt_low_color}:{plddt_high_color}" if plddt_customized else _PLDDT_KEY_PALETTE
+            plddt_palette = ":".join(plddt_colors) if plddt_customized else _PLDDT_KEY_PALETTE
             if plddt_customized:
-                log_cb(f"  pLDDT heatmap colors: {plddt_low_color} (low) -> {plddt_high_color} (high)")
+                log_cb(f"  pLDDT heatmap colors: {plddt_low_color} (low) -> "
+                       f"{plddt_mid_color} (middle) -> {plddt_high_color} (high)")
             write_plddt_chimerax_script(
                 cif_path, plddt_chimerax_script_out, palette=plddt_palette,
-                extra_lines=marker_lines + build_plddt_key_lines(plddt_low_color, plddt_high_color),
+                value_range=(0, 100) if plddt_customized else None,
+                extra_lines=marker_lines + build_plddt_key_lines(*plddt_colors),
             )
             log_cb(f"  pLDDT heatmap script (open this in ChimeraX) : {plddt_chimerax_script_out}")
 
@@ -1066,8 +1096,10 @@ def run_batch_export(
     log_scale: bool = False,
     dim_low_confidence: bool = False,
     mutation_low_color: str = MUTATION_DEFAULT_LOW_COLOR,
+    mutation_mid_color: str = MUTATION_DEFAULT_MID_COLOR,
     mutation_high_color: str = MUTATION_DEFAULT_HIGH_COLOR,
     plddt_low_color: str = PLDDT_DEFAULT_LOW_COLOR,
+    plddt_mid_color: str = PLDDT_DEFAULT_MID_COLOR,
     plddt_high_color: str = PLDDT_DEFAULT_HIGH_COLOR,
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
@@ -1111,8 +1143,10 @@ def run_batch_export(
             mutation_heatmap=mutation_heatmap, plddt_heatmap=plddt_heatmap,
             mark_ptm_sites=mark_ptm_sites, mark_mutations=mark_mutations,
             log_scale=log_scale, dim_low_confidence=dim_low_confidence,
-            mutation_low_color=mutation_low_color, mutation_high_color=mutation_high_color,
-            plddt_low_color=plddt_low_color, plddt_high_color=plddt_high_color,
+            mutation_low_color=mutation_low_color, mutation_mid_color=mutation_mid_color,
+            mutation_high_color=mutation_high_color,
+            plddt_low_color=plddt_low_color, plddt_mid_color=plddt_mid_color,
+            plddt_high_color=plddt_high_color,
             ptm_marker_color=ptm_marker_color, mutation_marker_color=mutation_marker_color,
             log_cb=log_cb,
         )
@@ -1211,9 +1245,14 @@ def main() -> None:
         "--mutation-low-color", default=MUTATION_DEFAULT_LOW_COLOR,
         help=f"Color (ChimeraX name or #RRGGBB hex) for the mutation heatmap's "
              f"low end (default: {MUTATION_DEFAULT_LOW_COLOR}, i.e. the built-in "
-             f"'Reds' palette). Only takes effect together with "
-             f"--mutation-high-color -- if either is left at its default while "
-             f"the other is changed, this still uses 'Reds'.",
+             f"'Reds' palette). Changing any of the three mutation colors "
+             f"switches from 'Reds' to a custom low -> middle -> high "
+             f"gradient; any left unchanged keep their default.",
+    )
+    parser.add_argument(
+        "--mutation-mid-color", default=MUTATION_DEFAULT_MID_COLOR,
+        help=f"Color for the middle of the mutation heatmap's scale (half the "
+             f"max) (default: {MUTATION_DEFAULT_MID_COLOR}). See --mutation-low-color.",
     )
     parser.add_argument(
         "--mutation-high-color", default=MUTATION_DEFAULT_HIGH_COLOR,
@@ -1224,7 +1263,12 @@ def main() -> None:
         "--plddt-low-color", default=PLDDT_DEFAULT_LOW_COLOR,
         help=f"Color for the pLDDT heatmap's low-confidence end (default: "
              f"{PLDDT_DEFAULT_LOW_COLOR}, i.e. the built-in 'alphafold' "
-             f"palette). See --mutation-low-color for the pairing rule.",
+             f"palette). See --mutation-low-color for how the three colors combine.",
+    )
+    parser.add_argument(
+        "--plddt-mid-color", default=PLDDT_DEFAULT_MID_COLOR,
+        help=f"Color for pLDDT 50, the middle of the pLDDT heatmap's scale "
+             f"(default: {PLDDT_DEFAULT_MID_COLOR}).",
     )
     parser.add_argument(
         "--plddt-high-color", default=PLDDT_DEFAULT_HIGH_COLOR,
@@ -1259,8 +1303,10 @@ def main() -> None:
             log_scale=args.log_scale,
             dim_low_confidence=args.dim_low_confidence,
             mutation_low_color=args.mutation_low_color,
+            mutation_mid_color=args.mutation_mid_color,
             mutation_high_color=args.mutation_high_color,
             plddt_low_color=args.plddt_low_color,
+            plddt_mid_color=args.plddt_mid_color,
             plddt_high_color=args.plddt_high_color,
             ptm_marker_color=args.ptm_marker_color,
             mutation_marker_color=args.mutation_marker_color,
@@ -1291,8 +1337,10 @@ def main() -> None:
             log_scale=args.log_scale,
             dim_low_confidence=args.dim_low_confidence,
             mutation_low_color=args.mutation_low_color,
+            mutation_mid_color=args.mutation_mid_color,
             mutation_high_color=args.mutation_high_color,
             plddt_low_color=args.plddt_low_color,
+            plddt_mid_color=args.plddt_mid_color,
             plddt_high_color=args.plddt_high_color,
             ptm_marker_color=args.ptm_marker_color,
             mutation_marker_color=args.mutation_marker_color,

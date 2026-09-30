@@ -696,13 +696,30 @@ class TestWriteChimeraxScript:
 
 
 class TestBuildMutationKeyLines:
-    def test_produces_a_two_stop_zero_to_max_key(self):
-        lines = mod.build_mutation_key_lines(40.0, log_scale=False, low_color="#111111", high_color="#eeeeee")
-        key_line = lines[0]
-        assert key_line == "key #111111:0 #eeeeee:40", (
-            f"the key should always be built from an explicit 2-color list, labeled 0 and "
-            f"the true max, got {key_line!r}"
+    def test_produces_a_three_stop_zero_mid_max_key(self):
+        lines = mod.build_mutation_key_lines(
+            40.0, log_scale=False, low_color="#111111", mid_color="#777777", high_color="#eeeeee",
         )
+        key_line = lines[0]
+        assert key_line == "key #111111:0 #777777:20 #eeeeee:40", (
+            f"the key should always be built from an explicit 3-color list, labeled 0, "
+            f"the midpoint and the true max, got {key_line!r}"
+        )
+
+    def test_odd_max_midpoint_label_keeps_one_decimal(self):
+        lines = mod.build_mutation_key_lines(
+            915.0, log_scale=False, low_color="white", mid_color="orange", high_color="red",
+        )
+        assert lines[0] == "key white:0 orange:457.5 red:915", f"got {lines[0]!r}"
+
+    def test_every_stop_has_a_label(self):
+        # Blank middle labels were observed to render garbled digits (see
+        # build_mutation_key_lines's docstring), so no stop may be unlabeled.
+        lines = mod.build_mutation_key_lines(
+            12.0, log_scale=False, low_color="white", mid_color="orange", high_color="red",
+        )
+        stops = lines[0].split()[1:]
+        assert len(stops) == 3 and all(stop.split(":", 1)[1] for stop in stops), f"got {lines[0]!r}"
 
     def test_never_names_a_palette(self):
         # A named-palette key with blank middle labels (e.g. "key Reds :0 : : : :40")
@@ -710,13 +727,15 @@ class TestBuildMutationKeyLines:
         # protein -- so the key must never reference a palette by name, even when
         # the heatmap's real 3D coloring is using the default "Reds" unmodified.
         lines = mod.build_mutation_key_lines(
-            40.0, log_scale=False,
-            low_color=mod.MUTATION_DEFAULT_LOW_COLOR, high_color=mod.MUTATION_DEFAULT_HIGH_COLOR,
+            40.0, log_scale=False, low_color=mod.MUTATION_DEFAULT_LOW_COLOR,
+            mid_color=mod.MUTATION_DEFAULT_MID_COLOR, high_color=mod.MUTATION_DEFAULT_HIGH_COLOR,
         )
         assert "Reds" not in lines[0], f"the key must not name the 'Reds' palette, got {lines[0]!r}"
 
     def test_includes_a_title_label(self):
-        lines = mod.build_mutation_key_lines(10.0, log_scale=False, low_color="white", high_color="red")
+        lines = mod.build_mutation_key_lines(
+            10.0, log_scale=False, low_color="white", mid_color="orange", high_color="red",
+        )
         assert any(l.startswith("2dlabels text") and "Patients within 10" in l for l in lines), (
             f"a title label should accompany the key so a screenshot is self-explanatory, got {lines}"
         )
@@ -724,15 +743,20 @@ class TestBuildMutationKeyLines:
     def test_log_scale_high_label_shows_real_patient_count_not_log_value(self):
         # log1p(9) == log(10) ~= 2.302585 -- if the key were built from the raw
         # (pre-transform) value, the high label would be 2.302585 instead of 9.
-        lines = mod.build_mutation_key_lines(np.log1p(9), log_scale=True, low_color="white", high_color="red")
+        lines = mod.build_mutation_key_lines(
+            np.log1p(99), log_scale=True, low_color="white", mid_color="orange", high_color="red",
+        )
         key_line = lines[0]
-        assert key_line == "key white:0 red:9", (
-            f"the log-space max should be converted back to a real patient count via expm1 "
-            f"for display, not left as a log1p value, got {key_line!r}"
+        # The log scale's midpoint is log1p(99)/2 = log(10), i.e. 9 patients
+        assert key_line == "key white:0 orange:9 red:99", (
+            f"the log-space midpoint and max should be converted back to real patient counts "
+            f"via expm1 for display, not left as log1p values, got {key_line!r}"
         )
 
     def test_log_scale_title_notes_the_log_scale(self):
-        lines = mod.build_mutation_key_lines(1.0, log_scale=True, low_color="white", high_color="red")
+        lines = mod.build_mutation_key_lines(
+            1.0, log_scale=True, low_color="white", mid_color="orange", high_color="red",
+        )
         title_line = next(l for l in lines if l.startswith("2dlabels"))
         assert "log scale" in title_line.lower(), (
             f"the title should flag that the underlying scale is logarithmic, got {title_line!r}"
@@ -740,28 +764,31 @@ class TestBuildMutationKeyLines:
 
     def test_zero_max_produces_a_valid_key(self):
         # e.g. a protein with zero nearby mutations everywhere.
-        lines = mod.build_mutation_key_lines(0.0, log_scale=False, low_color="white", high_color="red")
-        assert lines[0] == "key white:0 red:0", f"got {lines[0]!r}"
+        lines = mod.build_mutation_key_lines(
+            0.0, log_scale=False, low_color="white", mid_color="orange", high_color="red",
+        )
+        assert lines[0] == "key white:0 orange:0 red:0", f"got {lines[0]!r}"
 
 
 class TestBuildPlddtKeyLines:
-    def test_produces_a_two_stop_0_to_100_key(self):
-        lines = mod.build_plddt_key_lines(low_color="orange", high_color="blue")
-        assert lines[0] == "key orange:0 blue:100", (
-            f"the key should always be built from an explicit 2-color list, labeled 0 and "
-            f"100 (pLDDT's fixed full range), got {lines[0]!r}"
+    def test_produces_a_three_stop_0_50_100_key(self):
+        lines = mod.build_plddt_key_lines(low_color="orange", mid_color="yellow", high_color="blue")
+        assert lines[0] == "key orange:0 yellow:50 blue:100", (
+            f"the key should always be built from an explicit 3-color list, labeled 0, 50 "
+            f"and 100 (pLDDT's fixed full range), got {lines[0]!r}"
         )
 
     def test_never_names_a_palette(self):
         # See TestBuildMutationKeyLines.test_never_names_a_palette -- same failure
         # mode applies to a named "alphafold" palette key.
         lines = mod.build_plddt_key_lines(
-            low_color=mod.PLDDT_DEFAULT_LOW_COLOR, high_color=mod.PLDDT_DEFAULT_HIGH_COLOR,
+            low_color=mod.PLDDT_DEFAULT_LOW_COLOR, mid_color=mod.PLDDT_DEFAULT_MID_COLOR,
+            high_color=mod.PLDDT_DEFAULT_HIGH_COLOR,
         )
         assert "alphafold" not in lines[0], f"the key must not name the 'alphafold' palette, got {lines[0]!r}"
 
     def test_includes_a_title_label(self):
-        lines = mod.build_plddt_key_lines(low_color="orange", high_color="blue")
+        lines = mod.build_plddt_key_lines(low_color="orange", mid_color="yellow", high_color="blue")
         assert any("pLDDT" in l for l in lines if l.startswith("2dlabels")), (
             f"a title label should accompany the key so a screenshot is self-explanatory, got {lines}"
         )
@@ -1362,49 +1389,74 @@ class TestRunExportColors:
         )
 
     def test_default_colors_key_never_names_a_palette(self, tmp_path, monkeypatch):
-        # The key is always an explicit 2-color list (see build_mutation_key_lines's
+        # The key is always an explicit 3-color list (see build_mutation_key_lines's
         # docstring) even when the 3D coloring above uses the real named palette --
         # a named-palette key was observed to render garbled overlapping numbers.
         kwargs = self._kwargs(tmp_path, monkeypatch)
         result = mod.run_export(mutation_heatmap=True, plddt_heatmap=True, **kwargs)
         mut_text = result.mutation_chimerax_script_out.read_text()
         plddt_text = result.plddt_chimerax_script_out.read_text()
-        assert f"key {mod.MUTATION_DEFAULT_LOW_COLOR}:0 {mod.MUTATION_DEFAULT_HIGH_COLOR}:" in mut_text, (
+        assert (f"key {mod.MUTATION_DEFAULT_LOW_COLOR}:0 {mod.MUTATION_DEFAULT_MID_COLOR}:"
+                in mut_text and f" {mod.MUTATION_DEFAULT_HIGH_COLOR}:" in mut_text), (
             f"got:\n{mut_text}"
         )
-        assert f"key {mod.PLDDT_DEFAULT_LOW_COLOR}:0 {mod.PLDDT_DEFAULT_HIGH_COLOR}:100" in plddt_text, (
+        assert (f"key {mod.PLDDT_DEFAULT_LOW_COLOR}:0 {mod.PLDDT_DEFAULT_MID_COLOR}:50 "
+                f"{mod.PLDDT_DEFAULT_HIGH_COLOR}:100") in plddt_text, (
             f"got:\n{plddt_text}"
         )
 
     def test_customized_mutation_colors_switch_to_custom_gradient(self, tmp_path, monkeypatch):
         kwargs = self._kwargs(tmp_path, monkeypatch)
         result = mod.run_export(
-            mutation_heatmap=True, mutation_low_color="#000000", mutation_high_color="#ffff00", **kwargs,
+            mutation_heatmap=True, mutation_low_color="#000000", mutation_mid_color="#00ff00",
+            mutation_high_color="#ffff00", **kwargs,
         )
         text = result.mutation_chimerax_script_out.read_text()
-        assert "palette #000000:#ffff00" in text, (
-            f"customized low/high colors should build a 'low:high' custom palette instead "
+        assert "palette #000000:#00ff00:#ffff00" in text, (
+            f"customized colors should build a 'low:mid:high' custom palette instead "
             f"of 'Reds', got:\n{text}"
         )
-        assert "key #000000:" in text and "#ffff00:" in text, (
+        assert "key #000000:0 #00ff00:" in text and "#ffff00:" in text, (
             f"the key should also switch to the same custom colors, got:\n{text}"
         )
         assert "palette Reds" not in text
+
+    def test_customized_mutation_colors_pin_the_range_to_zero_through_max(self, tmp_path, monkeypatch):
+        # A custom palette spreads its colors evenly over the colored range, so
+        # the range must start at 0 for the middle color to sit at the key's
+        # middle label (half the max).
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, mutation_mid_color="#00ff00", **kwargs)
+        coloring = next(l for l in result.mutation_chimerax_script_out.read_text().splitlines()
+                        if l.startswith("color byattribute"))
+        max_val = result.all_ca_df["patients_within_10A"].max()
+        assert coloring.endswith(f" range 0,{float(max_val):g}"), f"got {coloring!r}"
+
+    def test_default_mutation_colors_keep_autoscaling(self, tmp_path, monkeypatch):
+        kwargs = self._kwargs(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, **kwargs)
+        coloring = next(l for l in result.mutation_chimerax_script_out.read_text().splitlines()
+                        if l.startswith("color byattribute"))
+        assert " range " not in coloring, f"the default 'Reds' coloring should be unchanged, got {coloring!r}"
 
     def test_customized_plddt_colors_switch_to_custom_gradient(self, tmp_path, monkeypatch):
         kwargs = self._kwargs(tmp_path, monkeypatch)
         result = mod.run_export(
             mutation_heatmap=False, plddt_heatmap=True,
-            plddt_low_color="purple", plddt_high_color="cyan", **kwargs,
+            plddt_low_color="purple", plddt_mid_color="white", plddt_high_color="cyan", **kwargs,
         )
         text = result.plddt_chimerax_script_out.read_text()
-        assert "palette purple:cyan" in text, (
-            f"customized pLDDT low/high colors should build a 'low:high' custom palette "
-            f"instead of 'alphafold', got:\n{text}"
+        assert "palette purple:white:cyan range 0,100" in text, (
+            f"customized pLDDT colors should build a 'low:mid:high' custom palette over "
+            f"pLDDT's fixed 0-100 range instead of 'alphafold', got:\n{text}"
         )
-        assert "key purple:0 cyan:100" in text, (
-            f"the pLDDT key should switch to the same custom colors at the fixed 0/100 "
+        assert "key purple:0 white:50 cyan:100" in text, (
+            f"the pLDDT key should switch to the same custom colors at the fixed 0/50/100 "
             f"range, got:\n{text}"
+        )
+        default = mod.run_export(mutation_heatmap=False, plddt_heatmap=True, **kwargs)
+        assert "palette alphafold\n" in default.plddt_chimerax_script_out.read_text(), (
+            "the default 'alphafold' palette carries its own values and should get no range"
         )
 
     def test_changing_only_one_color_still_activates_the_custom_gradient(self, tmp_path, monkeypatch):
@@ -1418,9 +1470,10 @@ class TestRunExportColors:
             mutation_heatmap=True, mutation_low_color="#123456", **kwargs,
         )
         text = result.mutation_chimerax_script_out.read_text()
-        assert f"palette #123456:{mod.MUTATION_DEFAULT_HIGH_COLOR}" in text, (
+        assert (f"palette #123456:{mod.MUTATION_DEFAULT_MID_COLOR}:{mod.MUTATION_DEFAULT_HIGH_COLOR}"
+                in text), (
             f"changing just the low color should still switch away from 'Reds', using the "
-            f"still-default high color as the other end of the gradient, got:\n{text}"
+            f"still-default middle and high colors for the rest of the gradient, got:\n{text}"
         )
         assert "palette Reds" not in text
 

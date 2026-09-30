@@ -259,6 +259,8 @@ standalone scripts.
 
 ## 10. Conventions & gotchas
 
+- **Step 4's phases run concurrently.** `_run_phases` in `4_annotate.py` runs 14-3-3, PolyPhen, kinase, AIUPred and InterPro on threads at once. Each works on its own copy of just the columns it reads, and its columns are merged back in the fixed phase order, so output is byte-identical to a sequential run. Progress is the average of the phases' own progress. Don't give two phases a shared mutable input or cache file.
+- **14-3-3 prefetch.** `4_annotate.py --prefetch-1433 --ptm-source X` fills `data/cache/1433pred/` for the step-1 table's proteins with Ser/Thr sites. The GUI runner and `main.py` start it after step 1 of a PTM-proximity run, suspend or resume it on pause and resume, and terminate it on cancel or when step 3 finishes. Cache files are written to a temporary file and renamed, so stopping it at any point can't leave a partial file.
 - **Kinase Library runs in its own environment.** `scripts/kinase_predictor.py` carries inline script metadata (`kinase-library==1.8.0`, locked in `kinase_predictor.py.lock`), and step 4 runs it via `uv run --script` in parallel subprocesses. Every kinase-library release pins numpy ~1.26 / pandas ~2.2, which conflicts with this project's pins. Installing it into the project env silently broke kinase predictions once, when a later `uv sync` removed it. Don't add it to `pyproject.toml`.
 
 - **Two shared-utility modules**, mirroring the two layers: `pipeline_utils.py`

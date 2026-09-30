@@ -8,6 +8,7 @@ direct method call.
 """
 from __future__ import annotations
 
+import os
 import platform
 import queue
 import re
@@ -53,6 +54,8 @@ from ui.common import (
 
 
 class PipelineRunnerMixin:
+    _prefetch_proc: subprocess.Popen | None = None  # background 14-3-3 prefetch (see _start_1433_prefetch)
+
     def _tick(self) -> None:
         if not self._running or self._pipeline_start is None:
             return
@@ -395,6 +398,8 @@ class PipelineRunnerMixin:
                 actually_suspended = True
             except psutil.NoSuchProcess:
                 pass
+            if actually_suspended:
+                self._signal_1433_prefetch("suspend")
         self._stop_btn.configure(state="disabled", fg_color="gray30")
         if actually_suspended:
             self._paused_elapsed = time.time() - self._pipeline_start
@@ -431,6 +436,7 @@ class PipelineRunnerMixin:
             except psutil.NoSuchProcess:
                 pass
             self._suspended = False
+            self._signal_1433_prefetch("resume")
         if hasattr(self, "_cancel_btn_ref"):
             self._cancel_btn_ref.destroy()
             del self._cancel_btn_ref
@@ -455,6 +461,7 @@ class PipelineRunnerMixin:
                     pass
                 self._suspended = False
             proc.terminate()
+        self._stop_1433_prefetch()
         if hasattr(self, "_cancel_btn_ref"):
             self._cancel_btn_ref.destroy()
             del self._cancel_btn_ref
@@ -580,7 +587,7 @@ class PipelineRunnerMixin:
 
         # Step 4: annotation caches. PolyPhen/AIUPred/InterPro run for both modes
         # (mutation/position-level); 14-3-3/Kinase are ptm-proximity-only (PTM-site-level).
-        step4_est = 0
+        step4_est: float = 0
         if mode in ("ptm-proximity", "mutation-clustering"):
             # PolyPhen
             pp_cache = cache_dir / "polyphen.tsv"
@@ -616,10 +623,10 @@ class PipelineRunnerMixin:
             # mutation-clustering scores nearly every hotspot mutation, not just ~2/protein
             pp_target = n_mutations if mode == "mutation-clustering" and n_mutations else n_proteins * 2
 
-            step4_est = (max(0, pp_target - cached_pp) * self._TIME_PER_PP_FETCH
-                         + uncached_aiupred * self._TIME_PER_AIUPRED_FETCH
-                         + uncached_interpro * self._TIME_PER_INTERPRO_FETCH
-                         + self._TIME_STEP4_BASE)
+            # Step 4's phases run concurrently, so it takes about as long as the slowest
+            phase_ests = [max(0, pp_target - cached_pp) * self._TIME_PER_PP_FETCH,
+                          uncached_aiupred * self._TIME_PER_AIUPRED_FETCH,
+                          uncached_interpro * self._TIME_PER_INTERPRO_FETCH]
             log_msg = (f"Step 4: {cached_pp} PolyPhen pairs cached, "
                        f"{cached_aiupred}/{n_proteins} AIUPred cached, "
                        f"{cached_interpro}/{n_proteins} InterPro cached")
@@ -639,13 +646,15 @@ class PipelineRunnerMixin:
                     except Exception:
                         pass
 
-                step4_est += (uncached_1433 * self._TIME_PER_1433_FETCH
-                             + max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT)
+                # 14-3-3 is prefetched in the background during steps 2-3
+                phase_ests += [max(0.0, uncached_1433 * self._TIME_PER_1433_FETCH - step2_est - step3_est),
+                               max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT]
                 log_msg = (f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
                            f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
                            f"{cached_aiupred}/{n_proteins} AIUPred cached, "
                            f"{cached_interpro}/{n_proteins} InterPro cached")
 
+            step4_est = max(phase_ests) + self._TIME_STEP4_BASE
             self._q("log", log_msg)
 
         total_est = step1_est + step2_est + step3_est + step4_est
@@ -744,6 +753,12 @@ class PipelineRunnerMixin:
                     cancelled = True
                     break
 
+                if ok and i == 0 and mode == "ptm-proximity":
+                    self._start_1433_prefetch([*python, str(SCRIPTS_DIR / "4_annotate.py"),
+                                               "--prefetch-1433", *source_args])
+                if ok and i == 2:
+                    self._stop_1433_prefetch()  # step 4 fetches whatever is left
+
                 if ok:
                     step_times.append(elapsed)
                     self._q("progress", i, 1.0, "Done")
@@ -782,9 +797,53 @@ class PipelineRunnerMixin:
             restore_ok = False
             self._q("log", f"Pipeline error: {exc}")
         finally:
+            self._stop_1433_prefetch()
             if restore_ok:
                 self._remove_backups(backups)
             self._q("finished")
+
+    # ── 14-3-3 prefetch ─────────────────────────────────────────────────────
+    # 14-3-3-Pred takes ~7.5 s per protein, so a large first run spends most of
+    # step 4 waiting on it. The protein list is known after step 1, so a
+    # background process fills the 14-3-3 cache during steps 2-3 and is
+    # stopped when step 4 starts; step 4 fetches whatever it didn't reach.
+    # Its cache writes are atomic, so stopping it at any point is safe.
+
+    def _start_1433_prefetch(self, cmd: list[str]) -> None:
+        try:
+            self._prefetch_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            self._q("log", "Fetching 14-3-3 predictions in the background during steps 2-3")
+        except OSError as exc:
+            self._prefetch_proc = None
+            self._q("log", f"Couldn't start the 14-3-3 prefetch ({exc}); step 4 will fetch them instead")
+
+    def _stop_1433_prefetch(self) -> None:
+        proc = self._prefetch_proc
+        self._prefetch_proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            psutil.Process(proc.pid).resume()  # a suspended process can't act on terminate
+        except psutil.NoSuchProcess:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def _signal_1433_prefetch(self, action: str) -> None:
+        """Suspend or resume the prefetch along with the pipeline (action: "suspend"/"resume")."""
+        proc = self._prefetch_proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            getattr(psutil.Process(proc.pid), action)()
+        except psutil.NoSuchProcess:
+            pass
 
     def _run_single_protein(self):
         """Run the single-protein CIF analysis in the background thread."""
@@ -996,8 +1055,10 @@ class PipelineRunnerMixin:
             log_scale=self._ca_log_scale_var.get(),
             dim_low_confidence=self._ca_dim_confidence_var.get(),
             mutation_low_color=self._ca_mutation_low_var.get(),
+            mutation_mid_color=self._ca_mutation_mid_var.get(),
             mutation_high_color=self._ca_mutation_high_var.get(),
             plddt_low_color=self._ca_plddt_low_var.get(),
+            plddt_mid_color=self._ca_plddt_mid_var.get(),
             plddt_high_color=self._ca_plddt_high_var.get(),
             ptm_marker_color=self._ca_ptm_marker_color_var.get(),
             mutation_marker_color=self._ca_mutation_marker_color_var.get(),
@@ -1144,7 +1205,7 @@ class PipelineRunnerMixin:
 
     def _stream_cmd(self, cmd: list[str], step_idx: int) -> bool:
         """Run a subprocess, parsing tqdm output for progress bar updates."""
-        env = {**__import__("os").environ, "PYTHONIOENCODING": "utf-8"}
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         self._current_proc = proc
         buf = b""

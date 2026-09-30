@@ -28,9 +28,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -46,6 +49,7 @@ from pipeline_utils import (  # noqa: E402
     SITE_RE,
     find_canonical_cif,
     fmt_time,
+    hotspots_tsv_path,
     input_dir,
     load_first_chain,
     project_root,
@@ -60,10 +64,43 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "Output"
 _NUM_PHASES = 5
 
 
+# Each phase's own progress (0-100), by phase index. Phases run concurrently
+# (see _run_phases), so overall progress is their average rather than
+# "phases before this one are done".
+_phase_progress: dict[int, float] = {}
+_progress_lock = threading.Lock()
+
+
 def _emit_progress(phase: int, phase_pct: float, desc: str, num_phases: int = _NUM_PHASES) -> None:
     """Print overall progress for the app to parse. phase is 0-indexed, phase_pct is 0-100."""
-    overall = int((phase * 100 + phase_pct) / num_phases)
-    print(f"\r##PROGRESS## {overall} {desc}", end="", flush=True)
+    with _progress_lock:
+        _phase_progress[phase] = phase_pct
+        overall = int(sum(_phase_progress.get(i, 0.0) for i in range(num_phases)) / num_phases)
+        print(f"\r##PROGRESS## {overall} {desc}", end="", flush=True)
+
+
+def _run_phases(phases: dict[str, tuple[int, int, Callable[[], Any]]]) -> dict[str, Any]:
+    """Run annotation phases at the same time and return {name: result}.
+
+    *phases* maps a name to (phase index, number of phases, callable). The
+    phases wait on different web services (or, for kinases, local helper
+    processes), so running them together makes step 4 about as long as its
+    slowest phase instead of the sum -- without sending any one service more
+    requests than before. Each callable must work on its own copy of the data
+    it needs; the caller merges results back in a fixed order, so output is
+    the same as running them one after another.
+    """
+    _phase_progress.clear()
+    results: dict[str, Any] = {}
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=len(phases)) as pool:
+        futures = {pool.submit(fn): (name, idx, total) for name, (idx, total, fn) in phases.items()}
+        for future in as_completed(futures):
+            name, idx, total = futures[future]
+            results[name] = future.result()
+            _emit_progress(idx, 100, f"{name} done", total)
+            print(f"\n  {name} finished after {fmt_time(time.time() - started)}")
+    return results
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 1: 14-3-3-Pred binding-site predictions + confirmed interactors
@@ -93,9 +130,62 @@ def fetch_1433pred(uniprot_id: str) -> list[dict] | None:
     if not isinstance(data, list):
         return None
     _1433_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with cache_file.open("w", encoding="utf-8") as f:
+    # Write-then-rename, so a fetch stopped mid-write (the prefetch that runs
+    # during steps 2-3 is stopped when step 4 starts) never leaves a partial file
+    tmp_file = cache_file.with_name(f"{cache_file.name}.{threading.get_ident()}.tmp")
+    with tmp_file.open("w", encoding="utf-8") as f:
         json.dump(data, f)
+    os.replace(tmp_file, cache_file)
     return data
+
+
+def proteins_with_st_sites(uniprots, sites) -> list[str]:
+    """The proteins (in first-seen order) that have at least one Ser/Thr PTM
+    site -- the only residues 14-3-3-Pred scores, so the only proteins whose
+    14-3-3 request can change the output."""
+    wanted: dict[str, None] = {}
+    for uid, site in zip(uniprots, sites):
+        m = SITE_RE.match(str(site or "").strip())
+        if uid and m and m.group(1) in ("S", "T"):
+            wanted.setdefault(uid, None)
+    return list(wanted)
+
+
+def fetch_1433_for(uniprots: list[str], progress=None) -> dict[str, dict[int, float]]:
+    """{uniprot: {position: consensus score}} for *uniprots*, fetched with
+    _1433_MAX_WORKERS concurrent requests (cached ones read from disk)."""
+    score_maps: dict[str, dict[int, float]] = {}
+    with ThreadPoolExecutor(max_workers=_1433_MAX_WORKERS) as pool:
+        futures = {pool.submit(fetch_1433pred, uid): uid for uid in uniprots}
+        done = 0
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Fetching 14-3-3-Pred data"):
+            uid = futures[future]
+            data = future.result()
+            if data is not None:
+                score_maps[uid] = build_site_score_map(data)
+            done += 1
+            if progress:
+                progress(done, len(futures))
+    return score_maps
+
+
+def prefetch_1433(step1_file: Path) -> None:
+    """Fetch 14-3-3-Pred results into the cache for a step-1 table's
+    proteins with Ser/Thr PTM sites. Run in the background during steps 2-3
+    (the protein list is known after step 1), so step 4 finds most of them
+    cached; stopping it partway is safe."""
+    table = pd.read_csv(step1_file, sep="\t", dtype=str, keep_default_na=False)
+    uniprots, sites = [], []
+    for uid, field in zip(table["uniprot_id"], table["ptms_on_protein"]):
+        for token in field.split(";"):
+            uniprots.append(uid)
+            sites.append(token.strip().split(":", 1)[0])
+    wanted = proteins_with_st_sites(uniprots, sites)
+    missing = [u for u in wanted if not (_1433_CACHE_DIR / f"{u}.json").exists()]
+    print(f"14-3-3 prefetch: {len(wanted) - len(missing)}/{len(wanted)} proteins with Ser/Thr sites cached; "
+          f"fetching {len(missing)}", flush=True)
+    fetch_1433_for(missing)
+    print("14-3-3 prefetch finished", flush=True)
 
 
 def build_site_score_map(data: list[dict]) -> dict[int, float]:
@@ -173,26 +263,18 @@ def run_1433_phase(df: pd.DataFrame) -> tuple[dict, dict]:
         confirmed_sites = {}
         print("No 14-3-3 interactors file found — skipping confirmed-site annotation")
 
-    unique_uniprots = df["UniProt"].dropna().unique().tolist()
+    # Only proteins with a Ser/Thr site get 14-3-3 values, so only they need a request
+    unique_uniprots = proteins_with_st_sites(df["UniProt"], df["ptm_site"])
     already_cached = sum(
         1 for uid in unique_uniprots if (_1433_CACHE_DIR / f"{uid}.json").exists()
     )
-    print(f"{already_cached}/{len(unique_uniprots)} UniProt IDs already cached; "
+    print(f"{already_cached}/{len(unique_uniprots)} proteins with Ser/Thr sites already cached; "
           f"fetching {len(unique_uniprots) - already_cached} new...")
 
-    score_maps: dict[str, dict[int, float]] = {}
-    with ThreadPoolExecutor(max_workers=_1433_MAX_WORKERS) as pool:
-        futures = {pool.submit(fetch_1433pred, uid): uid for uid in unique_uniprots}
-        done = 0
-        total = len(futures)
-        for future in tqdm(as_completed(futures), total=total,
-                           desc="Fetching 14-3-3-Pred data"):
-            uid = futures[future]
-            data = future.result()
-            if data is not None:
-                score_maps[uid] = build_site_score_map(data)
-            done += 1
-            _emit_progress(0, done / total * 100, f"14-3-3 predictions: {done}/{total}")
+    score_maps = fetch_1433_for(
+        unique_uniprots,
+        progress=lambda done, total: _emit_progress(0, done / total * 100, f"14-3-3 predictions: {done}/{total}"),
+    )
 
     binding_sites, consensus_scores = [], []
     confirmed_col, confirmed_pmid_col = [], []
@@ -1350,21 +1432,30 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
                      keep_default_na=False)
     print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
 
-    t0 = time.time()
-    score_maps, confirmed_sites = run_1433_phase(df)
-    print(f"  Phase 1 (14-3-3) completed in {fmt_time(time.time() - t0)}")
+    # The five phases run concurrently, each on its own copy of the columns it
+    # reads; their new/updated columns are merged back below in the original
+    # phase order, so the output matches running them one after another.
+    df_1433 = df[["UniProt", "ptm_site"]].copy()
+    df_pp = df[["gene", *[c for c in _MUTATION_COLS if c in df.columns]]].copy()
+    df_kin = df[["UniProt", "ptm_site", "ptm_type"]].copy()
+    results = _run_phases({
+        "Phase 1 (14-3-3)": (0, _NUM_PHASES, lambda: run_1433_phase(df_1433)),
+        "Phase 2 (PolyPhen-2)": (1, _NUM_PHASES, lambda: run_polyphen_phase(df_pp)),
+        "Phase 3 (Kinase)": (2, _NUM_PHASES, lambda: run_kinase_phase(df_kin)),
+        "Phase 4 (AIUPred)": (3, _NUM_PHASES, lambda: run_aiupred_phase(df[["UniProt"]].copy())),
+        "Phase 5 (InterPro)": (4, _NUM_PHASES, lambda: run_interpro_phase(df[["UniProt"]].copy())),
+    })
+    score_maps, confirmed_sites = results["Phase 1 (14-3-3)"]
+    for col in ("1433pred_binding_site", "1433pred_consensus", "1433_confirmed_site", "1433_confirmed_pmid"):
+        df[col] = df_1433[col]
+    pp_cache = results["Phase 2 (PolyPhen-2)"]
+    for col in _MUTATION_COLS:
+        if col in df_pp.columns:
+            df[col] = df_pp[col]
+    seq_maps, kin_cache = results["Phase 3 (Kinase)"]
+    df["kinase_predictions"] = df_kin["kinase_predictions"]
 
-    t0 = time.time()
-    pp_cache = run_polyphen_phase(df)
-    print(f"  Phase 2 (PolyPhen-2) completed in {fmt_time(time.time() - t0)}")
-
-    t0 = time.time()
-    seq_maps, kin_cache = run_kinase_phase(df)
-    print(f"  Phase 3 (Kinase) completed in {fmt_time(time.time() - t0)}")
-
-    t0 = time.time()
-    disorder_maps = run_aiupred_phase(df)
-    print(f"  Phase 4 (AIUPred) completed in {fmt_time(time.time() - t0)}")
+    disorder_maps = results["Phase 4 (AIUPred)"]
     for atype in ("general", "binding"):
         col_vals = []
         for _, row in df.iterrows():
@@ -1382,9 +1473,7 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
         lambda v: "yes" if v and float(v) > 0.5 else "no"
     )
 
-    t0 = time.time()
-    domain_maps = run_interpro_phase(df)
-    print(f"  Phase 5 (InterPro) completed in {fmt_time(time.time() - t0)}")
+    domain_maps = results["Phase 5 (InterPro)"]
     col_vals = []
     for _, row in df.iterrows():
         uid = str(row.get("UniProt", "") or "")
@@ -1430,11 +1519,18 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
                      keep_default_na=False)
     print(f"{len(df)} rows, {df['UniProt'].nunique()} unique proteins\n")
 
-    t0 = time.time()
-    pp_cache = run_polyphen_phase(
-        df, bare_mutation_cols=("anchor_mutation",),
-        phase_idx=0, num_phases=3,
-    )
+    # PolyPhen, AIUPred and InterPro run concurrently -- see _annotate_ptm_proximity
+    df_pp = df[["gene", "anchor_mutation", *[c for c in _MUTATION_COLS if c in df.columns]]].copy()
+    results = _run_phases({
+        "Phase 2 (PolyPhen-2)": (0, 3, lambda: run_polyphen_phase(
+            df_pp, bare_mutation_cols=("anchor_mutation",), phase_idx=0, num_phases=3)),
+        "Phase 4 (AIUPred)": (1, 3, lambda: run_aiupred_phase(df[["UniProt"]].copy(), phase_idx=1, num_phases=3)),
+        "Phase 5 (InterPro)": (2, 3, lambda: run_interpro_phase(df[["UniProt"]].copy(), phase_idx=2, num_phases=3)),
+    })
+    pp_cache = results["Phase 2 (PolyPhen-2)"]
+    for col in _MUTATION_COLS:
+        if col in df_pp.columns:
+            df[col] = df_pp[col]
     anchor_classes, anchor_scores = [], []
     for _, row in df.iterrows():
         pred, score = _pp_lookup_single(row.get("anchor_mutation", ""), row.get("gene", ""), pp_cache)
@@ -1442,11 +1538,8 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
         anchor_scores.append(score)
     df["anchor_polyphen_class"] = anchor_classes
     df["anchor_polyphen_score"] = anchor_scores
-    print(f"  Phase 2 (PolyPhen-2) completed in {fmt_time(time.time() - t0)}")
 
-    t0 = time.time()
-    disorder_maps = run_aiupred_phase(df, phase_idx=1, num_phases=3)
-    print(f"  Phase 4 (AIUPred) completed in {fmt_time(time.time() - t0)}")
+    disorder_maps = results["Phase 4 (AIUPred)"]
     for atype in ("general", "binding"):
         col_vals = []
         for _, row in df.iterrows():
@@ -1466,9 +1559,7 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
         lambda v: "yes" if v and float(v) > 0.5 else "no"
     )
 
-    t0 = time.time()
-    domain_maps = run_interpro_phase(df, phase_idx=2, num_phases=3)
-    print(f"  Phase 5 (InterPro) completed in {fmt_time(time.time() - t0)}")
+    domain_maps = results["Phase 5 (InterPro)"]
     col_vals = []
     for _, row in df.iterrows():
         uid = str(row.get("UniProt", "") or "")
@@ -1538,7 +1629,17 @@ def main() -> None:
         metavar="CLASS",
         help="Exclude mutations with these PolyPhen-2 classes from the output",
     )
+    parser.add_argument(
+        "--prefetch-1433",
+        action="store_true",
+        help="Only fetch 14-3-3-Pred results into the cache for the ptm-proximity step-1 table's proteins "
+             "(run in the background during steps 2-3), then exit",
+    )
     args = parser.parse_args()
+
+    if args.prefetch_1433:
+        prefetch_1433(hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity", args.ptm_source))
+        return
 
     output_dir = Path(args.output_dir)
     if args.mode == "mutation-clustering":

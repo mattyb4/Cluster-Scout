@@ -64,14 +64,14 @@ Each protein's output goes in its own `Output/coordinates/{gene}_{UniProt}/` fol
 - **Mutation heatmap** (off by default) — colors the structure by COSMIC patient count near each residue, a red heatmap. Two sub-options apply only to this heatmap: **Log-scale** (compresses heavily skewed patient counts so lower-count regions stay visible instead of being crushed toward one flat color) and **Dim low-confidence residues** (fades each residue in proportion to how low its AlphaFold confidence is, so a hotspot in a poorly-modeled region reads as less certain than an equally hot one in a well-modeled region).
 - **pLDDT heatmap** — colors the structure by AlphaFold's own per-residue confidence score, using the same color scheme AlphaFold DB itself uses.
 
-Both heatmaps can be on at once — they're written as separate scripts, since ChimeraX can only show one coloring at a time on a single open structure. Each heatmap script also draws an on-screen color key with a title label, so a screenshot of the view is self-explanatory. Only the two ends of the scale are labeled — 0 and the true maximum — with nothing in between, as a simple two-color gradient (approximating the default red/AlphaFold scheme when colors haven't been customized): the mutation heatmap's high label is the protein's actual maximum patient count (already converted back from the log scale, if enabled), and the pLDDT heatmap's key always spans 0-100.
+Both heatmaps can be on at once — they're written as separate scripts, since ChimeraX can only show one coloring at a time on a single open structure. Each heatmap script also draws an on-screen color key with a title label, so a screenshot of the view is self-explanatory. The key is a three-color gradient (low → middle → high), approximating the default red/AlphaFold scheme when colors haven't been customized, with a label at each color. For the mutation heatmap the labels are 0, half the maximum, and the protein's actual maximum patient count. With the log scale on, the middle label is the count at the log scale's midpoint, and all labels are real counts. The pLDDT key always reads 0, 50 and 100.
 
 **Markers** — layered on top of whichever heatmap(s) are generated (or a plain, uncolored structure if neither is), without overwriting the heatmap's own color at that residue:
 
 - **Mark PTM sites** — a small sphere (green by default) at each known PTM site's position. Requires PTM Proximity mode's Step 1 to have been run at least once, since that's where PTM position data comes from.
 - **Show mutation markers** — a colored stick (orange by default) at each COSMIC mutation position.
 
-**Colors** — every heatmap's low/high scale and every marker's flat color can be changed. Click a color swatch (next to each option above) to open the OS color picker; the swatch always shows the current selection, and a **↺** button next to it resets that color (or color pair) back to its default. A heatmap keeps using ChimeraX's real named palette — exactly as before this option existed — until you actually change one of its two colors; only then does it switch to a custom scale built from your chosen endpoints.
+**Colors** — every heatmap's three scale colors (low → middle → high) and every marker's flat color can be changed. Click a color swatch (next to each option above) to open the OS color picker; the swatch always shows the current selection, and a **↺** button next to it resets that color (or a heatmap's three colors) back to the defaults. A heatmap keeps using ChimeraX's real named palette until you change any of its three colors. Only then does it switch to a custom scale built from your chosen colors, running from 0 to the maximum patient count (mutation heatmap) or from 0 to 100 (pLDDT), with the middle color at the halfway point.
 
 ---
 
@@ -101,6 +101,8 @@ In PTM Proximity mode, adds five types of annotations to each PTM site:
 
 Mutation Clustering mode also runs this step, applying the PolyPhen-2, AIUPred, and InterPro annotations above to the anchor mutation and its nearby mutations — 14-3-3 and kinase predictions are skipped, since both require a curated PTM site that this mode has no concept of.
 
+These annotations run at the same time rather than one after another, so step 4 takes about as long as its slowest annotation. Its progress bar shows their average. The 14-3-3 predictions are the slowest to fetch (about 7.5 seconds per protein, and only proteins with a Ser/Thr site are requested). In PTM Proximity mode they're fetched in the background during steps 2–3, and step 4 fetches whatever wasn't reached. Pausing or cancelling the pipeline pauses or stops that background fetch too.
+
 ---
 
 ## Understanding the Output
@@ -113,7 +115,9 @@ All output TSVs (`ptm_mutation_proximity_db.tsv`, `mutation_cluster_db.tsv`, and
 
 A **PTM Proximity / Mutation Clusters** toggle at the top switches which mode's results are shown. In PTM Proximity, a second **PTMD / PhosphoSitePlus** toggle switches between the two PTM sources' results, if you've generated both. Columns only one source fills in (such as LTP/HTP for PhosphoSitePlus) are hidden while the other source is shown. Each shows two linked tables: PTM Proximity mode shows **PTM Sites** (one row per PTM site) and **Mutation Details** (one row per nearby mutation, for whichever PTM site is selected above); Mutation Clustering mode shows the equivalent **Anchor Mutations** and **Nearby Mutations** tables. All four tables have far more columns than are shown by default; click **Columns** on any table to show/hide columns, and hover the **?** badge next to any column name for an explanation of exactly what it means and how it's computed. That in-app reference is the authoritative, up-to-date column list — it isn't duplicated here since column definitions change more often than this document does.
 
-The **Export** button on the Mutation Details table writes exactly what's currently shown (respecting any active search/filter and sort order) to a TSV in the output folder, using the same UTF-16 encoding as the pipeline's own output files.
+Large tables are shown 2,000 rows at a time, with ◀ / ▶ page buttons below them. A Mutation Clustering run with Min samples 1, for example, can produce over 200,000 anchor mutations. Search, filters and column sorting always cover every row, not just the page on screen. Results load in the background, so the app stays usable while a large run's files are read.
+
+The **Export** button on the Mutation Details table writes every row matching the active search and filters, in the current sort order and across all pages, to a TSV in the output folder. It uses the same UTF-16 encoding as the pipeline's own output files.
 
 ### Mutation Tags
 
@@ -138,7 +142,7 @@ A 0-1 score; above 0.5 is treated as "yes" for the corresponding Disordered?/Bin
 
 ### Visualization Tab
 
-Selecting a PTM site (or anchor mutation, in Mutation Clustering mode) in the Results tab and clicking **Visualize** draws a lollipop (needle) plot of its nearby mutations here, colored by PolyPhen-2 classification — or pick one directly via the tab's own search/dropdown. A **Data** toggle switches between PTM Proximity and Mutation Clusters results, independent of whichever mode the Results tab is currently showing.
+Selecting a PTM site (or anchor mutation, in Mutation Clustering mode) in the Results tab and clicking **Visualize** draws a lollipop (needle) plot of its nearby mutations here, colored by PolyPhen-2 classification — or pick one directly via the tab's own search/dropdown. The dropdowns list at most 500 entries, so for a large run, type in the search box to narrow them down. A **Data** toggle switches between PTM Proximity and Mutation Clusters results, independent of whichever mode the Results tab is currently showing.
 
 - **View: Single PTM / Whole protein** — Single PTM shows one site's lollipop plot; Whole protein stacks every PTM site/anchor mutation on that protein into one scrollable view, each with its own domain map.
 - **Show: All mutations / Unique per position** — All mutations lists every substitution individually; Unique per position collapses same-residue substitutions into one merged lollipop (colored by the most severe PolyPhen class among them).

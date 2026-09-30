@@ -149,8 +149,23 @@ def main() -> None:
     pipeline_start = time.time()
 
     t1 = run_step(STEPS[0][1], 1, len(STEPS), step1_cmd)
-    t2 = run_step(STEPS[1][1], 2, len(STEPS), step2_cmd)
-    t3 = run_step(STEPS[2][1], 3, len(STEPS), step3_cmd)
+    # 14-3-3-Pred is slow (~7.5 s per protein) and step 1 has fixed the protein
+    # list, so fill its cache in the background during steps 2-3. It's stopped
+    # when step 4 starts (step 4 fetches whatever is left); stopping is safe.
+    prefetch = None
+    if mode == "ptm-proximity":
+        prefetch = subprocess.Popen(
+            [python_exe, str(SCRIPTS_DIR / "4_annotate.py"), "--prefetch-1433", *source_args],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        print("  Fetching 14-3-3 predictions in the background during steps 2-3")
+    try:
+        t2 = run_step(STEPS[1][1], 2, len(STEPS), step2_cmd)
+        t3 = run_step(STEPS[2][1], 3, len(STEPS), step3_cmd)
+    finally:
+        if prefetch is not None and prefetch.poll() is None:
+            prefetch.terminate()
+            prefetch.wait()
 
     step4_cmd = [python_exe, str(SCRIPTS_DIR / "4_annotate.py"), *source_args]
 

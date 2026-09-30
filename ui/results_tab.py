@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import re
+import threading
 
 import customtkinter as ctk
 
@@ -125,6 +126,22 @@ class ResultsTabMixin:
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
+        # Page controls, shown only when the (searched/filtered) rows don't fit
+        # on one page -- see _render_tv_page
+        pager = tk.Frame(frame, bg="#2b2b2b")
+        pager.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        prev_btn = ctk.CTkButton(pager, text="◀", width=30, height=22,
+                                 command=lambda: self._turn_tv_page(tv, -1))
+        prev_btn.pack(side=tk.LEFT)
+        label = ctk.CTkLabel(pager, text="", font=ctk.CTkFont(size=11), text_color="gray60")
+        label.pack(side=tk.LEFT, padx=8)
+        next_btn = ctk.CTkButton(pager, text="▶", width=30, height=22,
+                                 command=lambda: self._turn_tv_page(tv, 1))
+        next_btn.pack(side=tk.LEFT)
+        pager.grid_remove()
+        self._tv_state[tv] = {"view": [], "page": 0, "sort": None, "hay": None,
+                              "pager": (pager, label, prev_btn, next_btn)}
+
         return tv
 
     def _bind_treeview_zoom_override(self, tv) -> None:
@@ -217,57 +234,84 @@ class ResultsTabMixin:
         ctk.CTkButton(btn_row, text="Apply", width=80,
                       command=_apply).pack(side="right", padx=(0, 6))
 
-    def _sort_tv(self, tv, col: str, reverse: bool) -> None:
-        def _key(v: str):
-            try:
-                return (0, float(v))
-            except (ValueError, TypeError):
-                return (1, str(v).lower())
+    # Tables hold (iid, values, tag) rows in Python and give Tk only the page
+    # on screen. Search, filters and sorting work on the Python rows, so they
+    # cover every row, not just the page. Moving/inserting rows one Tk call at
+    # a time gets slower as the table grows, and with ~200k rows (a Mutation
+    # Clustering run with Min samples 1) it froze the app for minutes.
+    # iids stay each row's 1-based position in its source dataframe, which
+    # the selection handlers rely on.
 
-        rows = [(tv.set(k, col), k) for k in tv.get_children("")]
-        rows.sort(key=lambda x: _key(x[0]), reverse=reverse)
-        for idx, (_, k) in enumerate(rows):
-            tv.move(k, "", idx)
-        if "#col" in tv["columns"]:
-            for idx, k in enumerate(tv.get_children(""), 1):
-                tv.set(k, "#col", idx)
+    _TV_PAGE_SIZE = 2000
+
+    def _sort_tv(self, tv, col: str, reverse: bool) -> None:
+        state = self._tv_state[tv]
+        state["sort"] = (col, reverse)
+        self._sort_tv_view(tv)
+        state["page"] = 0
+        self._render_tv_page(tv)
         tv.heading(col, command=lambda: self._sort_tv(tv, col, not reverse))
 
-    def _clear_treeview_fully(self, tv, all_rows: list) -> None:
-        """Delete every row a treeview has ever held, including ones currently
-        hidden by a search filter (plain tv.delete(*tv.get_children()) would
-        miss detached rows, leaking them and causing iid collisions on reinsert).
-        """
-        all_iids = set(tv.get_children("")) | {iid for iid, _, _ in all_rows}
-        if all_iids:
-            tv.delete(*all_iids)
+    def _sort_tv_view(self, tv) -> None:
+        state = self._tv_state[tv]
+        if state["sort"] is None:
+            return
+        col, reverse = state["sort"]
+        if col == "#col":
+            # Row numbers are display positions, so sort by source order instead
+            state["view"].sort(key=lambda r: int(r[0]), reverse=reverse)
+            return
+        idx = list(tv["columns"]).index(col)
 
-    _TV_INSERT_CHUNK_SIZE = 200
+        def _key(row):
+            v = row[1][idx]
+            try:
+                return (0, float(v), "")
+            except (ValueError, TypeError):
+                return (1, 0.0, str(v).lower())
 
-    def _insert_tv_chunked(self, tv, rows: list, on_done) -> None:
-        """Insert (iid, values, tag) rows into *tv* in batches via self.after()
-        instead of one synchronous loop.
+        state["view"].sort(key=_key, reverse=reverse)
 
-        Each tv.insert() is its own blocking Tcl call; on macOS's Aqua Tk
-        backend, a multi-thousand-row table can pin the main thread long
-        enough that clicks get dropped rather than delayed. Yielding back to
-        the event loop between batches keeps queued input responsive.
-        """
-        token = object()
-        self._tv_insert_tokens[tv] = token
+    def _clear_treeview_fully(self, tv, all_rows: list | None = None) -> None:
+        """Empty *tv* and its row model, and drop any sort, before it's repopulated."""
+        state = self._tv_state[tv]
+        state.update(view=[], page=0, sort=None, hay=None)
+        self._render_tv_page(tv)
 
-        def _step(start: int) -> None:
-            if self._tv_insert_tokens.get(tv) is not token or not tv.winfo_exists():
-                return
-            end = start + self._TV_INSERT_CHUNK_SIZE
-            for iid, values, tag in rows[start:end]:
-                tv.insert("", "end", iid=iid, values=values, tags=(tag,))
-            if end < len(rows):
-                self.after(1, _step, end)
-            else:
-                on_done(tv)
+    def _turn_tv_page(self, tv, step: int) -> None:
+        self._tv_state[tv]["page"] += step
+        self._render_tv_page(tv)
 
-        _step(0)
+    def _render_tv_page(self, tv) -> None:
+        """Show the current page of *tv*'s searched/filtered/sorted rows."""
+        state = self._tv_state[tv]
+        view = state["view"]
+        size = self._TV_PAGE_SIZE
+        n_pages = max(1, -(-len(view) // size))
+        page = min(max(state["page"], 0), n_pages - 1)
+        state["page"] = page
+        first = page * size
+        children = tv.get_children("")
+        if children:
+            tv.delete(*children)
+        for n, (iid, values, _tag) in enumerate(view[first:first + size], first + 1):
+            tv.insert("", "end", iid=iid, values=(n, *values[1:]), tags=("odd" if n % 2 else "even",))
+        tv.yview_moveto(0)
+
+        pager, label, prev_btn, next_btn = state["pager"]
+        if n_pages > 1:
+            label.configure(text=f"Rows {first + 1:,}–{min(first + size, len(view)):,} of {len(view):,}"
+                                 "  ·  search, filters and sorting cover all rows")
+            prev_btn.configure(state="normal" if page > 0 else "disabled")
+            next_btn.configure(state="normal" if page < n_pages - 1 else "disabled")
+            pager.grid()
+        else:
+            pager.grid_remove()
+
+    @staticmethod
+    def _tv_haystacks(rows: list) -> list[str]:
+        """Lower-cased search text per row (built once per populate, not per keystroke)."""
+        return [" ".join(str(v) for v in values[1:]).lower() for _iid, values, _tag in rows]
 
     def _tv_overlay(self, tv):
         """Lazily create (and cache) a centered message label floating over *tv*,
@@ -293,40 +337,32 @@ class ResultsTabMixin:
         if label is not None:
             label.place_forget()
 
-    def _capture_tv_rows(self, tv) -> list:
-        """Snapshot (iid, values, tags) for every row, to filter against later.
-
-        Must be called immediately after a full (unfiltered) populate, while
-        every row is still attached.
-        """
-        return [(iid, tv.item(iid, "values"), tv.item(iid, "tags")) for iid in tv.get_children("")]
-
     _NUMERIC_FILTER_OPS = (">", ">=", "<", "<=", "=", "≠")
     _TEXT_FILTER_OPS = ("contains", "does not contain", "equals")
 
     def _filter_treeview(self, tv, all_rows: list, query: str, filters: list | None = None) -> None:
         """Show only rows matching the search *query* (substring, case-insensitive)
-        AND every rule in *filters* (col_id/op/value dicts — all must match, AND).
-
-        Uses detach()/move() rather than delete(), so hidden rows keep their
-        iid and can reappear — this preserves the iid-as-dataframe-position
-        scheme that selection handlers rely on.
+        AND every rule in *filters* (col_id/op/value dicts — all must match, AND),
+        keeping the current sort, from the first page.
         """
+        state = self._tv_state[tv]
         query = query.strip().lower()
-        col_ids = list(tv["columns"])
-        attached = set(tv.get_children(""))
-        shown = 0
-        for iid, values, _tags in all_rows:
-            haystack = " ".join(str(v) for v in values).lower()
-            text_ok = not query or query in haystack
-            rules_ok = not filters or all(
-                self._eval_filter_rule(values, col_ids, rule) for rule in filters
-            )
-            if text_ok and rules_ok:
-                tv.move(iid, "", shown)
-                shown += 1
-            elif iid in attached:
-                tv.detach(iid)
+        if not query and not filters:
+            view = list(all_rows)
+        else:
+            if query and (state["hay"] is None or state["hay"][0] is not all_rows):
+                state["hay"] = (all_rows, self._tv_haystacks(all_rows))
+            hay = state["hay"][1] if query else None
+            col_ids = list(tv["columns"])
+            view = [
+                row for i, row in enumerate(all_rows)
+                if (not query or query in hay[i])
+                and (not filters or all(self._eval_filter_rule(row[1], col_ids, rule) for rule in filters))
+            ]
+        state["view"] = view
+        self._sort_tv_view(tv)
+        state["page"] = 0
+        self._render_tv_page(tv)
 
     def _eval_filter_rule(self, values, col_ids: list, rule: dict) -> bool:
         try:
@@ -506,7 +542,10 @@ class ResultsTabMixin:
         self._mut_tv_all_rows: list = []
         self._anchor_tv_all_rows: list = []
         self._nearby_tv_all_rows: list = []
-        self._tv_insert_tokens: dict = {}
+        self._tv_state: dict = {}  # per table: row model, page, sort -- see _render_tv_page
+        self._results_loading = False
+        self._results_reload_after = False
+        self._results_on_loaded: list = []
         self._tv_placeholder_labels: dict = {}
         self._ptm_filters: list = []
         self._mut_filters: list = []
@@ -781,8 +820,8 @@ class ResultsTabMixin:
         pipeline's own output files, so it opens correctly if double-clicked.
         """
         tv = self._mut_tv
-        shown_iids = tv.get_children("")
-        if not shown_iids:
+        shown = self._tv_state[tv]["view"]
+        if not shown:
             self._flash_results_status("No Mutation Details rows to export.", _YELLOW)
             return
 
@@ -805,11 +844,10 @@ class ResultsTabMixin:
         with out_path.open("w", encoding="utf-16", newline="") as handle:
             writer = csv.writer(handle, delimiter="\t")
             writer.writerow(headers)
-            for iid in shown_iids:
-                values = tv.item(iid, "values")
+            for _iid, values, _tag in shown:
                 writer.writerow([values[col_index[c]] for c in data_cols])
 
-        self._flash_results_status(f"Exported {len(shown_iids)} rows to {out_path}", _GREEN)
+        self._flash_results_status(f"Exported {len(shown)} rows to {out_path}", _GREEN)
 
     def _filter_anchor_tv(self, *_args) -> None:
         self._filter_treeview(self._anchor_tv, self._anchor_tv_all_rows,
@@ -835,7 +873,7 @@ class ResultsTabMixin:
             return (path, None)
 
     def _load_results(self, force: bool = False) -> None:
-        """Show a 'Loading data…' placeholder immediately, then read/populate --
+        """Show a 'Loading data…' placeholder and load results in the background --
         unless *force* is False and neither output file changed since its last
         load, in which case this is a no-op.
 
@@ -845,48 +883,105 @@ class ResultsTabMixin:
         tab's selectors are always populated without a separate load. The
         "↺ Refresh" button passes force=True to bypass the mtime cache.
 
-        Calls `update()`, not just `update_idletasks()`, before the blocking
-        pandas read: idletasks flushes Tk's geometry queue but not the window
-        system's redraw events, so the placeholder wouldn't actually be
-        painted to screen yet on some triggers (e.g. clicking Refresh).
+        Files are read and table rows built on a worker thread (a Mutation
+        Clustering run with Min samples 1 is ~1 GB of output), so the window
+        stays responsive; _finish_results_load shows them. Callers that need
+        the data afterwards register a callback in _results_on_loaded when
+        _results_loading is set.
         """
-        wide_path = ptm_output_paths(self._output_dir, self._results_ptm_source())["db"]
-        cluster_wide_path = self._output_dir / "mutation_cluster_db.tsv"
-        ptm_needs_load = force or self._mtime_key(wide_path) != self._results_loaded_key
-        cluster_needs_load = force or self._mtime_key(cluster_wide_path) != self._cluster_loaded_key
+        if self._results_loading:
+            # e.g. the PTM source was switched mid-load: check again afterwards
+            self._results_reload_after = True
+            return
+        ptm_paths = ptm_output_paths(self._output_dir, self._results_ptm_source())
+        cluster_paths = {"db": self._output_dir / "mutation_cluster_db.tsv",
+                         "long": self._output_dir / "mutation_cluster_long.tsv"}
+        ptm_needs_load = force or self._mtime_key(ptm_paths["db"]) != self._results_loaded_key
+        cluster_needs_load = force or self._mtime_key(cluster_paths["db"]) != self._cluster_loaded_key
         if not ptm_needs_load and not cluster_needs_load:
             return
 
+        jobs = {}
         if ptm_needs_load:
+            jobs["ptm"] = ptm_paths
             for tv, attr in ((self._ptm_tv, "_ptm_tv_all_rows"), (self._mut_tv, "_mut_tv_all_rows")):
                 self._clear_treeview_fully(tv, getattr(self, attr))
                 setattr(self, attr, [])
                 self._show_tv_message(tv, "Loading data…")
         if cluster_needs_load:
+            jobs["cluster"] = cluster_paths
             for tv, attr in ((self._anchor_tv, "_anchor_tv_all_rows"), (self._nearby_tv, "_nearby_tv_all_rows")):
                 self._clear_treeview_fully(tv, getattr(self, attr))
                 setattr(self, attr, [])
                 self._show_tv_message(tv, "Loading data…")
         self._results_status.configure(text="Loading data…", text_color="gray60")
         self._refresh_button.configure(state="disabled")
-        self.update()
-        try:
-            if ptm_needs_load:
-                self._load_results_now()
-            if cluster_needs_load:
-                self._load_cluster_results_now()
-        finally:
-            self._refresh_button.configure(state="normal")
-            self._refresh_results_status()
+        self._results_loading = True
+        results: dict = {}
+        threading.Thread(target=self._read_results_worker, args=(jobs, results), daemon=True).start()
+        self.after(100, self._poll_results_load, results)
 
-    def _load_results_now(self) -> None:
+    def _read_results_worker(self, jobs: dict, results: dict) -> None:
+        """Worker thread: read each job's files and build its rows. No Tk calls."""
         import pandas as pd
 
-        ptm_paths = ptm_output_paths(self._output_dir, self._results_ptm_source())
-        wide_path = ptm_paths["db"]
-        long_path = ptm_paths["long"]
+        def _read(path):
+            return pd.read_csv(path, sep="\t", encoding="utf-16", dtype=str, keep_default_na=False)
 
-        if not wide_path.exists():
+        for kind, paths in jobs.items():
+            wide_path, long_path = paths["db"], paths["long"]
+            if not wide_path.exists():
+                results[kind] = {"missing": True}
+                continue
+            try:
+                df_wide = _read(wide_path)
+                df_long = None
+                if long_path.exists():
+                    try:
+                        df_long = _read(long_path)
+                    except Exception:
+                        pass
+                if kind == "ptm":
+                    rows = self._ptm_tv_rows(df_wide)
+                    viz = self._viz_selector_data(df_wide, "ptm_site")
+                else:
+                    rows = self._anchor_tv_rows(df_wide)
+                    viz = self._viz_selector_data(df_wide, "anchor_mutation")
+                results[kind] = {"wide": df_wide, "long": df_long, "rows": rows,
+                                 "hay": self._tv_haystacks(rows), "viz": viz,
+                                 "key": (wide_path, wide_path.stat().st_mtime)}
+            except Exception as exc:
+                results[kind] = {"error": exc}
+        results["done"] = True
+
+    def _poll_results_load(self, results: dict) -> None:
+        if not results.get("done"):
+            self.after(100, self._poll_results_load, results)
+            return
+        self._finish_results_load(results)
+
+    def _finish_results_load(self, results: dict) -> None:
+        try:
+            if "ptm" in results:
+                self._show_ptm_results(results["ptm"])
+            if "cluster" in results:
+                self._show_cluster_results(results["cluster"])
+        finally:
+            self._results_loading = False
+            self._refresh_button.configure(state="normal")
+            self._refresh_results_status()
+        if self._results_reload_after:
+            self._results_reload_after = False
+            self._load_results()
+        if not self._results_loading:
+            callbacks, self._results_on_loaded = self._results_on_loaded, []
+            for callback in callbacks:
+                callback()
+
+    def _show_ptm_results(self, result: dict) -> None:
+        import pandas as pd
+
+        if result.get("missing"):
             source = self._results_ptm_source_label()
             msg = (f"No {source} PTM Proximity output found in {self._output_dir.name}/ -- "
                    f"run PTM Proximity with PTM source {source} to generate it")
@@ -898,55 +993,30 @@ class ResultsTabMixin:
             self._results_loaded_key = None
             self._refresh_viz_selector(pd.DataFrame(columns=["gene", "ptm_site", "UniProt"]))
             return
-
-        try:
-            df_wide = pd.read_csv(wide_path, sep="\t", encoding="utf-16",
-                                   dtype=str, keep_default_na=False)
-
-            df_long = None
-            if long_path.exists():
-                try:
-                    df_long = pd.read_csv(long_path, sep="\t", encoding="utf-16",
-                                           dtype=str, keep_default_na=False)
-                except Exception:
-                    pass
-
-            self._results_df_wide = df_wide
-            self._results_df_long = df_long
-            self._results_load_msg["ptm"] = None
-            self._results_loaded_key = (wide_path, wide_path.stat().st_mtime)
-
-            n_sites = len(df_wide)
-            n_proteins = df_wide["UniProt"].nunique() if "UniProt" in df_wide.columns else "?"
-            long_note = (" · long format available" if df_long is not None
-                         else " · enable long format for per-mutation detail")
-            self._results_status.configure(
-                text=f"{self._results_ptm_source_label()}: {n_sites} PTM sites · "
-                     f"{n_proteins} proteins{long_note}",
-                text_color="gray60",
-            )
-            self._hide_tv_message(self._ptm_tv)
-            self._hide_tv_message(self._mut_tv)
-            self._populate_ptm_tv(df_wide)
-            self._clear_treeview_fully(self._mut_tv, self._mut_tv_all_rows)
-            self._mut_tv_all_rows = []
-            self._refresh_viz_selector(df_wide)
-        except Exception as exc:
+        if "error" in result:
             self._results_df_wide = None
             self._results_df_long = None
             self._results_loaded_key = None
-            msg = f"Error loading results: {exc}"
+            msg = f"Error loading results: {result['error']}"
             self._results_load_msg["ptm"] = msg
             self._show_tv_message(self._ptm_tv, msg, _RED)
             self._show_tv_message(self._mut_tv, msg, _RED)
+            return
 
-    def _load_cluster_results_now(self) -> None:
+        self._results_df_wide = result["wide"]
+        self._results_df_long = result["long"]
+        self._results_load_msg["ptm"] = None
+        self._results_loaded_key = result["key"]
+        self._hide_tv_message(self._ptm_tv)
+        self._hide_tv_message(self._mut_tv)
+        self._populate_ptm_tv(result["wide"], result["rows"])
+        self._tv_state[self._ptm_tv]["hay"] = (self._ptm_tv_all_rows, result["hay"])
+        self._refresh_viz_selector(result["wide"], result["viz"])
+
+    def _show_cluster_results(self, result: dict) -> None:
         import pandas as pd
 
-        wide_path = self._output_dir / "mutation_cluster_db.tsv"
-        long_path = self._output_dir / "mutation_cluster_long.tsv"
-
-        if not wide_path.exists():
+        if result.get("missing"):
             msg = f"No Mutation Clustering output found in {self._output_dir.name}/"
             self._results_load_msg["cluster"] = msg
             self._show_tv_message(self._anchor_tv, msg, _RED)
@@ -956,38 +1026,25 @@ class ResultsTabMixin:
             self._cluster_loaded_key = None
             self._refresh_cluster_viz_selector(pd.DataFrame(columns=["gene", "anchor_mutation", "UniProt"]))
             return
-
-        try:
-            df_wide = pd.read_csv(wide_path, sep="\t", encoding="utf-16",
-                                   dtype=str, keep_default_na=False)
-
-            df_long = None
-            if long_path.exists():
-                try:
-                    df_long = pd.read_csv(long_path, sep="\t", encoding="utf-16",
-                                           dtype=str, keep_default_na=False)
-                except Exception:
-                    pass
-
-            self._cluster_df_wide = df_wide
-            self._cluster_df_long = df_long
-            self._results_load_msg["cluster"] = None
-            self._cluster_loaded_key = (wide_path, wide_path.stat().st_mtime)
-
-            self._hide_tv_message(self._anchor_tv)
-            self._hide_tv_message(self._nearby_tv)
-            self._populate_anchor_tv(df_wide)
-            self._clear_treeview_fully(self._nearby_tv, self._nearby_tv_all_rows)
-            self._nearby_tv_all_rows = []
-            self._refresh_cluster_viz_selector(df_wide)
-        except Exception as exc:
+        if "error" in result:
             self._cluster_df_wide = None
             self._cluster_df_long = None
             self._cluster_loaded_key = None
-            msg = f"Error loading Mutation Clustering results: {exc}"
+            msg = f"Error loading Mutation Clustering results: {result['error']}"
             self._results_load_msg["cluster"] = msg
             self._show_tv_message(self._anchor_tv, msg, _RED)
             self._show_tv_message(self._nearby_tv, msg, _RED)
+            return
+
+        self._cluster_df_wide = result["wide"]
+        self._cluster_df_long = result["long"]
+        self._results_load_msg["cluster"] = None
+        self._cluster_loaded_key = result["key"]
+        self._hide_tv_message(self._anchor_tv)
+        self._hide_tv_message(self._nearby_tv)
+        self._populate_anchor_tv(result["wide"], result["rows"])
+        self._tv_state[self._anchor_tv]["hay"] = (self._anchor_tv_all_rows, result["hay"])
+        self._refresh_cluster_viz_selector(result["wide"], result["viz"])
 
     @staticmethod
     def _split_position_values(row) -> dict:
@@ -1025,11 +1082,16 @@ class ResultsTabMixin:
             "lin_dist_raw": row.get("morethan5_linear_distance", ""),
         }
 
-    def _populate_ptm_tv(self, df) -> None:
+    def _populate_ptm_tv(self, df, rows: list | None = None) -> None:
         tv = self._ptm_tv
         self._clear_treeview_fully(tv, self._ptm_tv_all_rows)
+        self._ptm_tv_all_rows = self._ptm_tv_rows(df) if rows is None else rows
+        self._filter_ptm_tv()
+
+    def _ptm_tv_rows(self, df) -> list:
+        """PTM Sites table rows for *df*. No Tk calls, so it can run off the UI thread."""
         rows = []
-        for i, (_, row) in enumerate(df.iterrows(), 1):
+        for i, row in enumerate(df.to_dict("records"), 1):
             values_map = {
                 "uniprot": row.get("UniProt", ""),
                 "gene": row.get("gene", ""),
@@ -1058,12 +1120,7 @@ class ResultsTabMixin:
             }
             values = [i] + [values_map.get(c, "") for c in _PTM_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
-
-        def _finish(tv) -> None:
-            self._ptm_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_ptm_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        return rows
 
     def _on_ptm_select(self, *_) -> None:
         sel = self._ptm_tv.selection()
@@ -1081,11 +1138,16 @@ class ResultsTabMixin:
         else:
             self._populate_mut_tv_wide(row)
 
-    def _populate_anchor_tv(self, df) -> None:
+    def _populate_anchor_tv(self, df, rows: list | None = None) -> None:
         tv = self._anchor_tv
         self._clear_treeview_fully(tv, self._anchor_tv_all_rows)
+        self._anchor_tv_all_rows = self._anchor_tv_rows(df) if rows is None else rows
+        self._filter_anchor_tv()
+
+    def _anchor_tv_rows(self, df) -> list:
+        """Anchor Mutations table rows for *df*. No Tk calls, so it can run off the UI thread."""
         rows = []
-        for i, (_, row) in enumerate(df.iterrows(), 1):
+        for i, row in enumerate(df.to_dict("records"), 1):
             values_map = {
                 "uniprot": row.get("UniProt", ""),
                 "gene": row.get("gene", ""),
@@ -1103,12 +1165,7 @@ class ResultsTabMixin:
             }
             values = [i] + [values_map.get(c, "") for c in _ANCHOR_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
-
-        def _finish(tv) -> None:
-            self._anchor_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_anchor_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        return rows
 
     def _on_anchor_select(self, *_) -> None:
         sel = self._anchor_tv.selection()
@@ -1197,15 +1254,12 @@ class ResultsTabMixin:
         tv = self._mut_tv
         self._clear_treeview_fully(tv, self._mut_tv_all_rows)
         rows = []
-        for i, (_, r) in enumerate(df.iterrows(), 1):
+        for i, r in enumerate(df.to_dict("records"), 1):
             values = [i] + [r.get(_MUT_LONG_SRC_MAP[c], "") for c in _MUT_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
 
-        def _finish(tv) -> None:
-            self._mut_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_mut_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        self._mut_tv_all_rows = rows
+        self._filter_mut_tv()
 
     def _populate_mut_tv_wide(self, row) -> None:
         """Populate the Mutation Details tv from a wide-format PTM row.
@@ -1265,25 +1319,19 @@ class ResultsTabMixin:
                 values = [i] + [per_row.get(c, "") for c in _MUT_TV_SRC_IDS]
                 rows.append((str(i), values, "odd" if i % 2 else "even"))
 
-        def _finish(tv) -> None:
-            self._mut_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_mut_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        self._mut_tv_all_rows = rows
+        self._filter_mut_tv()
 
     def _populate_nearby_tv_long(self, df) -> None:
         tv = self._nearby_tv
         self._clear_treeview_fully(tv, self._nearby_tv_all_rows)
         rows = []
-        for i, (_, r) in enumerate(df.iterrows(), 1):
+        for i, r in enumerate(df.to_dict("records"), 1):
             values = [i] + [r.get(_CLUSTER_LONG_SRC_MAP[c], "") for c in _NEARBY_TV_SRC_IDS]
             rows.append((str(i), values, "odd" if i % 2 else "even"))
 
-        def _finish(tv) -> None:
-            self._nearby_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_nearby_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        self._nearby_tv_all_rows = rows
+        self._filter_nearby_tv()
 
     def _populate_nearby_tv_wide(self, row) -> None:
         """Populate the Nearby Mutations tv from a wide-format anchor row.
@@ -1332,8 +1380,5 @@ class ResultsTabMixin:
                 values = [i] + [per_row.get(c, "") for c in _NEARBY_TV_SRC_IDS]
                 rows.append((str(i), values, "odd" if i % 2 else "even"))
 
-        def _finish(tv) -> None:
-            self._nearby_tv_all_rows = self._capture_tv_rows(tv)
-            self._filter_nearby_tv()
-
-        self._insert_tv_chunked(tv, rows, _finish)
+        self._nearby_tv_all_rows = rows
+        self._filter_nearby_tv()
