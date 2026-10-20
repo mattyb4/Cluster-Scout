@@ -233,6 +233,61 @@ class TestDownload:
         )
 
 
+# ── rate limiting / API-drift resilience ───────────────────────────────────────
+
+class TestThrottleHandling:
+    def test_429_is_retried_then_succeeds(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(mod, "_LIMITER", mod.RateLimiter(0.0))
+        session = FakeSession([
+            FakeHTTPResponse(status_code=429),
+            FakeHTTPResponse(status_code=200, json_data={"ok": True}),
+        ])
+        assert mod.fetch_prediction("P04637", session, retries=3) == {"ok": True}, (
+            "AFDB answers bursts with HTTP 429; that must be retried, not treated as a failure"
+        )
+
+    def test_throttle_pauses_all_threads_and_widens_interval(self, mod):
+        lim = mod.RateLimiter(4.0)
+        base = lim.interval
+        cooldown = lim.throttled(retry_after=7)
+        assert cooldown >= 7 and lim.interval > base, (
+            "a 429 must impose a shared cool-down (honouring Retry-After) and slow the pacing"
+        )
+
+    def test_unretryable_status_fails_fast(self, mod, monkeypatch):
+        monkeypatch.setattr(mod, "_LIMITER", mod.RateLimiter(0.0))
+        session = FakeSession(FakeHTTPResponse(status_code=418))
+        with pytest.raises(RuntimeError):
+            mod.fetch_prediction("P04637", session, retries=5)
+        assert len(session.calls) == 1, "a non-transient error status should not be retried"
+
+    def test_html_body_on_200_is_not_saved_as_structure(self, mod, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(mod, "_LIMITER", mod.RateLimiter(0.0))
+        outpath = tmp_path / "model.cif"
+        session = FakeSession(FakeHTTPResponse(chunks=[b"<!doctype html><title>403</title>"]))
+        with pytest.raises(RuntimeError):
+            mod.download("https://example.org/model.cif", outpath, session, retries=2)
+        assert not outpath.exists(), "an HTML error page must never be written out as a .cif"
+
+
+class TestSchemaDrift:
+    def test_canonical_matches_on_new_or_old_id_field(self, mod):
+        assert mod.is_canonical_record({"modelEntityId": "AF-P11362-F1"}, "P11362")
+        assert mod.is_canonical_record({"entryId": "AF-P11362-F1"}, "P11362")
+        assert not mod.is_canonical_record({"modelEntityId": "AF-P11362-9-F1"}, "P11362"), (
+            "isoform models must not be mistaken for the canonical one"
+        )
+
+    def test_pick_urls_rebuilds_urls_when_url_fields_vanish(self, mod):
+        rec = {"modelEntityId": "AF-P04637-F1", "latestVersion": 6}
+        urls = mod.pick_urls(rec)
+        assert urls["structure_url"].endswith("AF-P04637-F1-model_v6.cif"), (
+            "if AFDB drops its *Url fields, the documented file naming scheme is the fallback"
+        )
+
+
 # ── _cached_version / _remove_stale_version ────────────────────────────────────
 
 class TestCachedVersion:

@@ -479,8 +479,9 @@ class PipelineRunnerMixin:
     # Per-item time estimates (seconds) for runtime calculation. For steps backed
     # by a ThreadPoolExecutor, the raw per-request time is divided by that worker
     # count so the estimate reflects concurrent, not sequential, execution.
-    _CIF_DOWNLOAD_WORKERS = 6           # scripts/2_download_structures.py: _DOWNLOAD_MAX_WORKERS
-    _TIME_PER_CIF_DOWNLOAD = 2.5 / _CIF_DOWNLOAD_WORKERS
+    # Step 2 is request-rate-bound: ~3 requests per protein (metadata + CIF + PAE) at
+    # scripts/2_download_structures.py's _DEFAULT_MAX_RPS (2/s).
+    _TIME_PER_CIF_DOWNLOAD = 1.6
     _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
     _TIME_PER_ISOFORM_BATCH = 3.0       # ~25 proteins per batch, sequential (cosmic_numbering.py)
     _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
