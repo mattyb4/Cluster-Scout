@@ -73,7 +73,8 @@ class TestNumberProtein:
         assert result.labels == {m: m for m in muts}
         assert result.unmapped == []
 
-    def test_reference_residue_matching_nowhere_is_unmapped(self):
+    def test_reference_residue_matching_nowhere_is_unmapped(self, monkeypatch):
+        monkeypatch.setattr(cn, "MIN_NUMBERING_FIT", 0.5)   # isolate the per-mutation rule from the protein-level gate
         wrong = "W3A"                              # position 3 is T in every isoform
         result = cn.number_protein("P12345", ISOFORMS, [wrong, label(CANONICAL, 25)])
         assert result.unmapped == [wrong]
@@ -88,6 +89,51 @@ class TestPositionMap:
         pmap = cn.position_map(ISOFORM, CANONICAL)
         assert pmap[5] == 5 and pmap[26] == 20
         assert all(p not in pmap for p in range(11, 17)), "the inserted exon has no canonical position"
+
+
+class TestAmbiguousPlacement:
+    # Canonical has a 4-residue repeat "GSGS"; the isoform lacks one unit, so the
+    # gap can sit in either unit at the same score and positions after it are
+    # unaffected, but residues inside the repeat are placed ambiguously.
+    CANON = "MKTAYIAKQR" + "GSGSGSGS" + "NLVPDEHWFC"
+    ISO = "MKTAYIAKQR" + "GSGS" + "NLVPDEHWFC"
+
+    def test_gap_in_repeat_is_ambiguous_but_flanks_are_not(self):
+        pmap, ambiguous = cn.position_map_with_ambiguity(self.ISO, self.CANON)
+        assert ambiguous and ambiguous <= set(range(11, 15))
+        assert pmap[5] == 5 and pmap[15] == 19 and not {5, 15} & ambiguous
+
+    def test_unambiguous_alignment_has_no_ambiguous_positions(self):
+        _, ambiguous = cn.position_map_with_ambiguity(ISOFORM, CANONICAL)
+        assert ambiguous == set()
+
+    def test_mutation_in_ambiguous_region_is_not_moved(self):
+        isoforms = {"P1": self.CANON, "P1-2": self.ISO}
+        in_repeat = label(self.ISO, 12)             # the S at canonical 12, 14 or 16 -- the alignments disagree
+        after = "N15A"                               # canonical 19 -- reliable
+        result = cn.number_protein("P1", isoforms, [in_repeat, after, "Y5A", "N15A", "L16A"])
+        assert in_repeat in result.ambiguous and in_repeat in result.unmapped
+        assert result.labels[in_repeat] == in_repeat
+        assert result.labels["N15A"] == "N19A"
+
+
+class TestPoorFit:
+    def test_protein_no_isoform_explains_is_entirely_unmapped(self):
+        # 30 mutations fit the isoform, 20 fit nothing: COSMIC numbered on a transcript
+        # UniProt doesn't have, so even the fitting ones are unreliable
+        good = [label(ISOFORM, p) for p in range(20, 40)]
+        junk = [f"{'W' if CANONICAL[p - 1] != 'W' else 'A'}{p}A" for p in range(1, 21)]
+        result = cn.number_protein("P12345", ISOFORMS, good + junk)
+        assert result.poor_fit and result.isoform == ""
+        assert result.unmapped == good + junk and result.labels == {m: m for m in good + junk}
+
+    def test_good_fit_is_not_gated(self):
+        result = cn.number_protein("P12345", ISOFORMS, [label(ISOFORM, 26), label(ISOFORM, 30)])
+        assert not result.poor_fit
+
+    def test_numbering_fit(self):
+        assert cn.numbering_fit(CANONICAL, [label(CANONICAL, 3), "W3A"]) == 0.5
+        assert cn.numbering_fit(CANONICAL, ["bogus"]) != cn.numbering_fit(CANONICAL, ["bogus"])  # NaN
 
 
 class TestFetchIsoformSequences:

@@ -348,7 +348,9 @@ def apply_canonical_numbering(table):
                                 label, for every mutation that moved
       unmapped_mutations        COSMIC labels with no canonical position (in
                                 isoform-only sequence, or no isoform explains
-                                the reference residue); step 3 tags these
+                                the reference residue, equally good alignments place
+                                it differently, or no isoform explains the protein's
+                                mutations at all); step 3 tags these
                                 (isoform?)
     """
     isoforms = fetch_isoform_sequences(
@@ -356,7 +358,7 @@ def apply_canonical_numbering(table):
         progress=lambda pct, desc: _emit_progress(1, pct, desc),
     )
     rewritten, isoform_col, labels_col, unmapped_col = [], [], [], []
-    n_moved = n_unmapped = 0
+    n_moved = n_unmapped = n_ambiguous = n_poor_fit = 0
     for uniprot, field in zip(table["uniprot_id"], table["mutations_on_protein"]):
         entries = []
         for token in str(field).split(";"):
@@ -371,6 +373,8 @@ def apply_canonical_numbering(table):
         unmapped_col.append("; ".join(numbering.unmapped))
         n_moved += len(moved)
         n_unmapped += len(numbering.unmapped)
+        n_ambiguous += len(numbering.ambiguous)
+        n_poor_fit += numbering.poor_fit
 
     table = table.copy()
     table["mutations_on_protein"] = rewritten
@@ -380,7 +384,7 @@ def apply_canonical_numbering(table):
     n_renumbered = sum(1 for iso in isoform_col if iso)
     print(f"  {n_renumbered} proteins use a non-canonical isoform's numbering in COSMIC: "
           f"{n_moved} mutations moved to canonical positions, {n_unmapped} couldn't be placed "
-          f"(kept with COSMIC's label, tagged (isoform?) in step 3)")
+          f"({n_ambiguous} of them because equally good alignments disagree, and all of the mutations of {n_poor_fit} proteins no UniProt isoform explains; kept with COSMIC's label, tagged (isoform?) in step 3)")
     return table
 
 

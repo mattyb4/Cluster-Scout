@@ -83,6 +83,8 @@ Isoforms of one gene are nearly identical sequences broken up by whole inserted 
 - **Mapped position checks out:** if *p* maps to canonical position *q* and the canonical residue at *q* is *X*, the mutation is **moved** to *q*.
 - **Original position already fits:** otherwise, if the canonical residue at *p* itself is *X*, the mutation **keeps position *p***. The residue check is treated as stronger evidence than the alignment. In testing this applied to 2 of 413 mutations that already matched the canonical sequence.
 - **Neither:** the mutation is **unmapped**. It lies in isoform-only sequence, or no isoform explains its reference residue.
+- **Poor-fit protein:** checked before everything else, per protein. If even the best-fitting isoform leaves more than 1% of the protein's COSMIC reference residues unmatched, COSMIC numbered on a transcript UniProt doesn't hold. Every mutation of that protein is **unmapped** and keeps COSMIC's label, whether or not its own residue happens to match (see "Validation of the isoform choice" below).
+- **Ambiguous placement:** checked next. If equally scoring optimal alignments (up to 256 are compared) put the mutation's isoform position on different canonical positions, or in a gap in some of them, the mutation is **unmapped** and also recorded as ambiguous. This happens where a gap can slide because the residues at its edges match, or where a repeat lets the gap fall in a different unit at the same score. The residue check cannot catch these: the wrong position holds the same residue as the right one.
 
 The residue check in the first two cases makes a wrong move unlikely. A mutation only moves if the residue it claims to mutate is actually at its new position.
 
@@ -108,6 +110,42 @@ These figures come from the PTMD-based PTM Proximity results (COSMIC Mutant Cens
 - **Fit of the chosen isoform:** among the proteins with tagged mutations, the chosen isoform matched *every* COSMIC reference residue for 72 of 88.
 
 Example: SGK1, where COSMIC's numbering follows a longer isoform. COSMIC's C144W is canonical C49W, 3.9 Å from the K50 PTM site. Before this method it was measured as if it were residue 144.
+
+### Validation of the alignment against UniProt's isoform annotation
+
+`scripts/validate_numbering.py` builds an alignment-free ground truth. UniProt records each isoform as a list of "Alternative sequence" (VAR_SEQ) edits with exact canonical coordinates. Applying them to the canonical sequence gives an isoform → canonical position map. Positions inside a replaced block have no unambiguous truth and are excluded. Run on the 1,504 isoforms of the 527 proteins in the isoform cache (every isoform rebuilt exactly from its edits):
+
+| | Positions |
+|---|---|
+| With unambiguous truth | 1,183,161 |
+| Alignment agrees | 1,182,834 (99.9724%) |
+| Alignment disagrees | 327, in 189 isoforms |
+| ...placed on a wrong canonical position | 280 |
+| ...left unmapped (safe) | 47 |
+
+All 280 wrong placements land on a canonical residue identical to the true one, so the reference-residue check would not catch them, and they sit in repeat-like regions (the largest cluster is Q9NNX6). The ambiguity check above flags all 280, and 586 correctly placed positions as well. In every one of the 189 isoforms the aligner's score exceeds that of UniProt's layout, so these are consequences of the scoring model, not implementation errors, and tuning the scores would not remove them.
+
+Applied to the COSMIC mutations in proteins renumbered by a non-canonical isoform, the check withholds 38 of 39,473 mutations (0.1%) in the full COSMIC table, and 2 of 4,432 in the PTMD-based table.
+
+What this does not test: whether the *chosen isoform* is the one COSMIC used. That is supported by the reference-residue fit above and needs a spot-check against COSMIC's own transcript annotation.
+
+### Validation of the isoform choice against COSMIC's own transcript
+
+Every gene in the Mutant Census v104 file is numbered on a single Ensembl transcript (756 of 756 genes), which confirms the one-numbering-per-gene assumption. `scripts/validate_isoform_choice.py` fetches each gene's Ensembl protein (current version only) and renumbers the same mutations with it as the sole candidate, then compares the labels with the pipeline's. Of 745 proteins, 681 could be compared; 51 had no Ensembl or UniProt sequence and 13 had an Ensembl sequence that no longer fits COSMIC's residues (version drift), so 64 (8.6%) are unvalidated.
+
+| | |
+|---|---|
+| Proteins where the chosen sequence is identical to COSMIC's protein | 660 of 681, with **no** label disagreements |
+| Proteins where COSMIC's protein is not any UniProt isoform | 21, of which 15 have mutations placed differently |
+| Mutations compared | 257,968 |
+| Same label | 250,810 (97.23%) |
+| Both unmapped | 2,269 (0.88%) |
+| Placed by Ensembl's numbering but unmapped by the pipeline | 4,889 (1.90%) |
+| Placed at a different position than Ensembl's numbering | **0** |
+
+When a UniProt isoform matches COSMIC's protein, the method is right every time. The failures are all in the 15 proteins whose COSMIC protein has no UniProt counterpart (for example AFDN, PTPRT, RUNX1T1, GNAS). Before the poor-fit rule, 316 mutations in 12 of these proteins were placed at a different position than Ensembl's numbering. They passed the reference-residue check at both positions, so that check could not catch them. The proteins are identifiable without Ensembl: the chosen numbering explains only 2-92% of their mutations' reference residues (median 18%), against at least 99% for all but 2 of the other 666 proteins (a threshold of 0.99 flags 17 proteins and catches all 15). That is the basis of the poor-fit rule: with it, no mutation is placed differently from Ensembl's numbering. The cost is that mutations Ensembl's sequence could place stay unmapped (up from 2,806 to 4,889 of the 257,968 compared), tagged `(isoform?)` in step 3 rather than excluded.
+
+In the full COSMIC table the rule applies to 27 proteins and 11,743 of 280,845 mutations (4.2%); in the PTMD-based table, 26 proteins and 1,388 of 34,167 mutations (4.1%); in the PSP-based table, 32 proteins and 1,888 of 35,067 (5.4%). Every one of these has a best-fitting isoform explaining at most 93% of its residues, including the 10 not compared against Ensembl (best fit at most 59%), so none looks like a borderline case.
 
 ### Limitations
 

@@ -11,7 +11,10 @@ COSMIC's reference residues is taken as COSMIC's numbering. That isoform is
 then aligned to the canonical sequence, and each mutation is moved to its
 aligned canonical position -- but only if the canonical residue there is the
 mutation's reference residue. Mutations that can't be placed that way keep
-their COSMIC label and are reported as unmapped.
+their COSMIC label and are reported as unmapped -- as are mutations whose
+position equally good alignments place differently (gaps sliding, repeats) --
+and every mutation of a protein that no isoform's numbering explains (>1% of
+reference residues unmatched).
 
 The full methodology, with rationale, validation figures and limitations, is
 in docs/methods.md -- keep it in sync with any change here.
@@ -21,6 +24,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 
 import pandas as pd
@@ -34,6 +38,15 @@ MUTATION_RE = re.compile(r"^([A-Z])(\d+)([A-Z*])$")
 _ALIGNER = PairwiseAligner(mode="global", match_score=2, mismatch_score=-3,
                            open_gap_score=-5, extend_gap_score=-0.1)
 
+# A protein whose best numbering sequence still leaves more than 1% of COSMIC's
+# reference residues unexplained is numbered on a transcript UniProt doesn't have
+# (docs/methods.md); its mutations can't be placed reliably
+MIN_NUMBERING_FIT = 0.99
+
+# Equally-scored alignments examined when looking for positions whose canonical
+# partner isn't pinned down (see ambiguous_positions)
+_MAX_ALIGNMENTS = 256
+
 _UNIPROT_STREAM_URL = "https://rest.uniprot.org/uniprotkb/stream"
 _BATCH_SIZE = 25
 CACHE_COLUMNS = ["query_accession", "accession", "sequence"]
@@ -45,6 +58,8 @@ class ProteinNumbering:
     isoform: str = ""                                   # isoform COSMIC numbers by; "" = canonical
     labels: dict[str, str] = field(default_factory=dict)   # COSMIC label -> label used in outputs
     unmapped: list[str] = field(default_factory=list)       # COSMIC labels with no canonical position
+    ambiguous: list[str] = field(default_factory=list)      # subset of unmapped: equal-scoring alignments disagree
+    poor_fit: bool = False                                  # no isoform explains the reference residues: all unmapped
 
 
 def parse_fasta(text: str) -> dict[str, str]:
@@ -171,15 +186,48 @@ def choose_numbering_isoform(canonical: str, isoforms: dict[str, str], mutations
     return best
 
 
-def position_map(isoform_seq: str, canonical_seq: str) -> dict[int, int]:
-    """1-based isoform position -> 1-based canonical position, for every
-    aligned (not gapped) column of the global alignment."""
-    alignment = _ALIGNER.align(isoform_seq, canonical_seq)[0]
+def _alignment_map(alignment) -> dict[int, int]:
     mapping = {}
     for (i0, i1), (c0, _c1) in zip(*alignment.aligned):
         for k in range(i1 - i0):
             mapping[i0 + k + 1] = c0 + k + 1
     return mapping
+
+
+def numbering_fit(seq: str, mutations: list[str]) -> float:
+    """Fraction of the mutations' reference residues found at their stated
+    positions in *seq* (NaN if no label parses)."""
+    parsed = [(m.group(1), int(m.group(2))) for m in map(MUTATION_RE.match, mutations) if m]
+    return sum(_matches(seq, ref, pos) for ref, pos in parsed) / len(parsed) if parsed else float("nan")
+
+
+def numbering_fit(seq: str, mutations: list[str]) -> float:
+    """Fraction of the mutations' reference residues found at their stated
+    positions in *seq* (NaN if no label parses)."""
+    parsed = [(m.group(1), int(m.group(2))) for m in map(MUTATION_RE.match, mutations) if m]
+    return sum(_matches(seq, ref, pos) for ref, pos in parsed) / len(parsed) if parsed else float("nan")
+
+
+def position_map(isoform_seq: str, canonical_seq: str) -> dict[int, int]:
+    """1-based isoform position -> 1-based canonical position, for every
+    aligned (not gapped) column of the global alignment."""
+    return _alignment_map(_ALIGNER.align(isoform_seq, canonical_seq)[0])
+
+
+def position_map_with_ambiguity(isoform_seq: str, canonical_seq: str) -> tuple[dict[int, int], set[int]]:
+    """position_map plus the isoform positions that equally good alignments
+    place differently (or place in a gap in some and not others).
+
+    A gap can slide when the residues at its edges match, and in repeats it
+    can land in a different unit at the same score. A mutation there passes
+    the reference-residue check at either canonical position, so the check
+    can't catch a wrong move -- only comparing optimal alignments can. At most
+    _MAX_ALIGNMENTS optimal alignments are compared."""
+    alignments = _ALIGNER.align(isoform_seq, canonical_seq)
+    maps = [_alignment_map(a) for a in islice(alignments, _MAX_ALIGNMENTS)]
+    first = maps[0]
+    ambiguous = {p for m in maps[1:] for p in first.keys() | m.keys() if first.get(p) != m.get(p)}
+    return first, ambiguous
 
 
 def number_protein(canonical: str, isoforms: dict[str, str], mutations: list[str]) -> ProteinNumbering:
@@ -192,7 +240,16 @@ def number_protein(canonical: str, isoforms: dict[str, str], mutations: list[str
         return result
 
     chosen = choose_numbering_isoform(canonical, isoforms, mutations)
-    pmap = position_map(isoforms[chosen], canonical_seq) if chosen != canonical else None
+    if numbering_fit(isoforms[chosen], mutations) < MIN_NUMBERING_FIT:
+        # Even the best isoform leaves COSMIC's residues unexplained, so COSMIC numbered on
+        # a transcript UniProt doesn't hold. A residue can still match by chance at a wrong
+        # position, and the residue check can't tell -- keep every label, flag every one
+        result.poor_fit = True
+        result.labels = {m: m for m in mutations}
+        result.unmapped = list(mutations)
+        return result
+    pmap, ambiguous = (position_map_with_ambiguity(isoforms[chosen], canonical_seq)
+                       if chosen != canonical else (None, set()))
     if pmap is not None:
         result.isoform = chosen
 
@@ -203,7 +260,13 @@ def number_protein(canonical: str, isoforms: dict[str, str], mutations: list[str
             continue
         ref, pos, alt = m.group(1), int(m.group(2)), m.group(3)
         mapped = pmap.get(pos) if pmap is not None else pos
-        if mapped is not None and _matches(canonical_seq, ref, mapped):
+        if pos in ambiguous:
+            # Equal-scoring alignments disagree on where this residue goes, and the
+            # residue check can't tell them apart: don't guess, keep COSMIC's label
+            result.labels[label] = label
+            result.unmapped.append(label)
+            result.ambiguous.append(label)
+        elif mapped is not None and _matches(canonical_seq, ref, mapped):
             result.labels[label] = f"{ref}{mapped}{alt}"
         elif _matches(canonical_seq, ref, pos):
             # Already right in canonical numbering (the alignment disagrees,
