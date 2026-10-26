@@ -4,7 +4,7 @@ parameters, a Run trigger, status/progress/log feedback, and the result plots.
 Shares the app's single background-run slot with the Pipeline tab
 (`self._running`); `_poll_queue` (pipeline_runner.py) routes queue messages
 here instead of the Pipeline tab's widgets whenever `self._at_run_active` is
-set. `_style_dark_figure` calls `self._style_lollipop_axis` (VisualizationTabMixin).
+set. `_style_themed_figure` calls `self._style_lollipop_axis` (VisualizationTabMixin).
 """
 from __future__ import annotations
 
@@ -15,10 +15,16 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
+from ui import theme
 from ui.common import (
+    _BTN2,
+    _BTN2_HOVER,
+    _CHIP,
+    _CHIP_HOVER,
     _CIF_VARIANCE_HELP,
     _GRAY,
     _GREEN,
+    _PLOT_BG,
     _RADIUS_SWEEP_HELP,
     _RED,
     _YELLOW,
@@ -26,23 +32,44 @@ from ui.common import (
     add_resize_grip,
     help_icon,
     isolate_textbox_scroll,
+    section_header,
 )
+
+_SIDE_W = 340  # px; fixed width of the parameters panel
 
 
 class AnalysisToolsTabMixin:
-    def _style_dark_figure(self, fig) -> None:
-        """Apply the app's dark theme to every axes of a Figure built by an external script."""
-        fig.patch.set_facecolor("#2b2b2b")
+    def _style_themed_figure(self, fig) -> None:
+        """Apply the current light/dark theme to every axes of a Figure built by an external script."""
+        fig.patch.set_facecolor(theme.c("plot_bg"))
         for ax in fig.axes:
             self._style_lollipop_axis(ax)
             if ax.get_title():
-                ax.title.set_color("#dcdcdc")
+                ax.title.set_color(theme.c("plot_fg"))
             legend = ax.get_legend()
             if legend is not None:
-                legend.get_frame().set_facecolor("#3a3a3a")
-                legend.get_frame().set_edgecolor("#555555")
+                legend.get_frame().set_facecolor(theme.c("plot_legend_bg"))
+                legend.get_frame().set_edgecolor(theme.c("plot_legend_edge"))
                 for text in legend.get_texts():
-                    text.set_color("#dcdcdc")
+                    text.set_color(theme.c("plot_fg"))
+
+    def _retheme_analysis(self) -> None:
+        """Redraw any finished Radius Sweep / CIF Variance plot in the new theme."""
+        for fig, canvas, result, draw in (
+            (self._radius_sweep_fig, self._radius_sweep_canvas,
+             self._radius_sweep_result, self._draw_radius_sweep_plot),
+            (self._cif_variance_fig, self._cif_variance_canvas,
+             self._cif_variance_result, self._draw_cif_variance_plot),
+        ):
+            fig.patch.set_facecolor(theme.c("plot_bg"))
+            if fig.axes and result is not None:
+                status = self._at_status_label.cget("text"), self._at_status_label.cget("text_color")
+                draw()
+                self._at_status_label.configure(text=status[0], text_color=status[1])
+            else:
+                if fig.axes:
+                    self._style_themed_figure(fig)
+                canvas.draw()
 
     # ── Analysis Tools tab (Radius Sweep + CIF Variance, shared toggle) ─────
 
@@ -54,209 +81,230 @@ class AnalysisToolsTabMixin:
 
         self._analysis_subtool_var = ctk.StringVar(value="Radius Sweep")
 
-        # One scrollable section for the whole tab (controls, params, run row, log,
-        # plot) -- a single scrollbar rather than the plot having its own
-        tab.grid_columnconfigure(0, weight=1)
+        # Parameters panel on the left (fixed width, Run pinned at its bottom), a divider,
+        # and the plot workspace filling everything else.
+        tab.grid_columnconfigure(2, weight=1)
         tab.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        scroll.grid(row=0, column=0, sticky="nsew")
-        scroll.grid_columnconfigure(0, weight=1)
-
-        # CTkScrollableFrame forces content width to match the viewport, clipping
-        # anything wider (like a big plot). Replace its <Configure> handler with
-        # one that only stretches narrow content up to viewport width, never shrinks
-        # wide content down -- and add a visible horizontal scrollbar for the rest.
-        scroll._parent_canvas.unbind("<Configure>")
-
-        def _fit_width_at_least_viewport(event):
-            natural_w = scroll.winfo_reqwidth()
-            scroll._parent_canvas.itemconfigure(
-                scroll._create_window_id, width=max(natural_w, event.width),
-            )
-
-        scroll._parent_canvas.bind("<Configure>", _fit_width_at_least_viewport)
-
-        at_h_scrollbar = ctk.CTkScrollbar(
-            scroll._parent_frame, orientation="horizontal", command=scroll._parent_canvas.xview,
-        )
-        at_h_scrollbar.grid(row=2, column=0, sticky="ew")
-        scroll._parent_canvas.configure(xscrollcommand=at_h_scrollbar.set)
-
-        p = scroll  # everything below goes in the scrollable frame
-
-        controls = ctk.CTkFrame(p)
-        controls.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+        side = ctk.CTkFrame(tab, fg_color="transparent", corner_radius=0, border_width=0, width=_SIDE_W)
+        side.grid(row=0, column=0, sticky="ns", padx=(14, 10), pady=12)
+        side.grid_propagate(False)
+        side.grid_columnconfigure(0, weight=1)
+        side.grid_rowconfigure(2, weight=1)
 
         ctk.CTkSegmentedButton(
-            controls, values=["Radius Sweep", "CIF Variance"],
+            side, values=["Radius Sweep", "CIF Variance"],
             variable=self._analysis_subtool_var,
             command=lambda _v: (self._rebuild_analysis_tool_fields(), self._show_active_analysis_plot()),
-        ).pack(side="left", padx=(12, 12), pady=10)
+        ).grid(row=0, column=0, sticky="ew")
+        section_header(side, "Parameters", row=1, pady=(14, 2))
 
-        ctk.CTkButton(
-            controls, text="Save PNG", width=100,
-            fg_color="gray30", hover_color="gray40",
-            command=self._save_active_analysis_plot,
-        ).pack(side="left", padx=(0, 12), pady=10)
-
+        # Explicit fg_color (not "transparent"): children of a transparent CTkScrollableFrame
+        # capture a static bg color at construction and show stale corners after a light/dark switch.
+        params_scroll = ctk.CTkScrollableFrame(side, fg_color=theme.pair("bg"))
+        params_scroll.grid(row=2, column=0, sticky="nsew")
+        params_scroll.grid_columnconfigure(0, weight=1)
         # Cleared and rebuilt by _rebuild_analysis_tool_fields on Radius Sweep <-> CIF Variance toggle
-        self._at_params_frame = ctk.CTkFrame(p)
-        # sticky="w", not "ew": this frame shares a grid column with the much wider
-        # plot canvas below (row 5); "ew" would stretch it to match that width
-        self._at_params_frame.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="w")
-        self._at_params_frame.grid_columnconfigure(1, weight=1)
+        self._at_params_frame = ctk.CTkFrame(params_scroll, fg_color="transparent")
+        self._at_params_frame.grid(row=0, column=0, sticky="ew")
+        self._at_params_frame.grid_columnconfigure(0, weight=1)
 
-        # Persistent, built once -- unlike the params frame, this tab is never torn down on toggle
-        run_row = ctk.CTkFrame(p, fg_color="transparent")
-        run_row.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
-        run_row.grid_columnconfigure(2, weight=1)
-
+        # Persistent, built once -- unlike the params frame, this is never torn down on toggle
+        run_area = ctk.CTkFrame(side, fg_color="transparent")
+        run_area.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        run_area.grid_columnconfigure(0, weight=1)
+        self._at_progress_bar = ctk.CTkProgressBar(run_area, height=10)
+        self._at_progress_bar.set(0)
+        self._at_progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self._at_progress_bar.grid_remove()
         self._at_run_btn = ctk.CTkButton(
-            run_row, text="▶  Run", width=100, height=32,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            run_area, text="▶  Run", height=36,
+            font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: self._start_analysis_tool_run(
                 "radius-sweep" if self._analysis_subtool_var.get() == "Radius Sweep" else "cif-variance"
             ),
         )
-        self._at_run_btn.grid(row=0, column=0, padx=(12, 12), pady=8)
+        self._at_run_btn.grid(row=1, column=0, sticky="ew")
 
-        self._at_progress_bar = ctk.CTkProgressBar(run_row, width=140, height=14)
-        self._at_progress_bar.set(0)
-        self._at_progress_bar.grid(row=0, column=1, padx=(0, 12), pady=8, sticky="w")
-        self._at_progress_bar.grid_remove()
+        ctk.CTkFrame(
+            tab, width=1, corner_radius=0, border_width=0, fg_color=theme.pair("line"),
+        ).grid(row=0, column=1, sticky="ns", pady=12)
 
+        main = ctk.CTkFrame(tab, fg_color="transparent", corner_radius=0, border_width=0)
+        main.grid(row=0, column=2, sticky="nsew", padx=14, pady=12)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
+
+        # Results heading: title, live status, hairline, Save PNG
+        head = ctk.CTkFrame(main, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        head.grid_columnconfigure(2, weight=1)
+        title_frame = ctk.CTkFrame(head, fg_color="transparent", width=0, height=0)
+        title_frame.grid(row=0, column=0, padx=(0, 10))
+        ctk.CTkLabel(
+            title_frame, text="RESULTS", text_color=_GRAY, font=ctk.CTkFont(size=11, weight="bold"),
+        ).pack(side="left")
+        # Explains the Radius Sweep panels; only shown while that tool is selected
+        self._at_plots_help = help_icon(title_frame, _RADIUS_SWEEP_HELP["plots"])
         self._at_status_label = ctk.CTkLabel(
-            run_row, text="Set parameters above, then click Run.",
+            head, text="Set parameters on the left, then click Run.",
             text_color=_GRAY, font=ctk.CTkFont(size=11), anchor="w",
         )
-        self._at_status_label.grid(row=0, column=2, padx=(0, 12), pady=8, sticky="w")
+        self._at_status_label.grid(row=0, column=1, padx=(0, 10))
+        ctk.CTkFrame(
+            head, width=0, height=1, corner_radius=0, border_width=0, fg_color=theme.pair("line"),
+        ).grid(row=0, column=2, sticky="ew")
+        ctk.CTkButton(
+            head, text="Save PNG", width=90, height=26, fg_color=_BTN2, hover_color=_BTN2_HOVER,
+            font=ctk.CTkFont(size=12), command=self._save_active_analysis_plot,
+        ).grid(row=0, column=3, padx=(10, 0))
 
-        # Collapsible, collapsed by default since the plot is this tab's primary content
-        self._at_log_visible = False
-        self._at_log_toggle = ctk.CTkButton(
-            p, text="Show Details", width=120, height=28,
-            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
-            command=self._at_toggle_log,
+        canvas_frame = ctk.CTkFrame(main, fg_color=_PLOT_BG)
+        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.grid_columnconfigure(0, weight=1)
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        # Prevents the canvas from resizing this frame back (avoids a resize loop).
+        canvas_frame.grid_propagate(False)
+
+        # Both figures live in canvas_frame; only one is gridded at a time so
+        # switching is instant and each tool keeps its plot without re-running.
+        # Each follows the frame's size (see _bind_analysis_plot_resize).
+        self._radius_sweep_fig = Figure(figsize=(10, 6), dpi=100, facecolor=theme.c("plot_bg"))
+        self._radius_sweep_canvas = FigureCanvasTkAgg(self._radius_sweep_fig, master=canvas_frame)
+        self._radius_sweep_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._bind_analysis_plot_resize(canvas_frame, self._radius_sweep_canvas, self._radius_sweep_fig)
+
+        self._cif_variance_fig = Figure(figsize=(10, 6), dpi=100, facecolor=theme.c("plot_bg"))
+        self._cif_variance_canvas = FigureCanvasTkAgg(self._cif_variance_fig, master=canvas_frame)
+        self._cif_variance_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self._bind_analysis_plot_resize(canvas_frame, self._cif_variance_canvas, self._cif_variance_fig)
+
+        # Shown over the plot area until the active tool has a result to draw
+        self._at_empty_label = ctk.CTkLabel(
+            canvas_frame, text="", text_color=_GRAY, font=ctk.CTkFont(size=13),
         )
-        self._at_log_toggle.grid(row=3, column=0, padx=12, pady=(0, 4), sticky="w")
 
-        self._at_log_frame = ctk.CTkFrame(p, fg_color="transparent")
+        # Collapsed log drawer under the plot (the plot is this tab's primary content)
+        self._at_log_visible = False
+        self._at_log_frame = ctk.CTkFrame(main, fg_color="transparent")
         self._at_log = ctk.CTkTextbox(
-            self._at_log_frame, height=120, font=ctk.CTkFont(family="Courier New", size=12),
-            wrap="word", state="disabled",
+            self._at_log_frame, height=140, font=ctk.CTkFont(family="Courier New", size=12),
+            wrap="word", state="disabled", border_width=1, border_color=theme.pair("line"),
         )
         self._at_log.pack(fill="both", expand=True)
         isolate_textbox_scroll(self._at_log)
         add_resize_grip(self._at_log).pack(fill="x")
-
-        canvas_frame = ctk.CTkFrame(p, fg_color="#2b2b2b")
-        canvas_frame.grid(row=5, column=0, padx=12, pady=(0, 12), sticky="nsew")
-
-        # Both figures live in canvas_frame; only one is gridded at a time so
-        # switching is instant and each tool keeps its plot without re-running
-        self._radius_sweep_fig = Figure(figsize=(14, 9), dpi=100, facecolor="#2b2b2b")
-        self._radius_sweep_canvas = FigureCanvasTkAgg(self._radius_sweep_fig, master=canvas_frame)
-        self._radius_sweep_canvas.get_tk_widget().grid(row=0, column=0)
-
-        self._cif_variance_fig = Figure(figsize=(14, 8), dpi=100, facecolor="#2b2b2b")
-        self._cif_variance_canvas = FigureCanvasTkAgg(self._cif_variance_fig, master=canvas_frame)
-        self._cif_variance_canvas.get_tk_widget().grid(row=0, column=0)
+        self._at_log_toggle = ctk.CTkButton(
+            main, text="▸  Show details", height=26, anchor="w", width=0,
+            fg_color="transparent", hover_color=_CHIP_HOVER,
+            font=ctk.CTkFont(size=12), command=self._at_toggle_log,
+        )
+        self._at_log_toggle.grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         self._rebuild_analysis_tool_fields()
         self._show_active_analysis_plot()
 
-        # Hide each scrollbar when content already fits that axis; show only when needed
-        def _update_scrollbar(*_):
-            try:
-                canvas = scroll._parent_canvas
-                sr = canvas.cget("scrollregion")
-                if not sr:
-                    scroll._scrollbar.grid_remove()
-                    at_h_scrollbar.grid_remove()
-                    return
-                _x0, _y0, x1, y1 = (int(float(v)) for v in sr.split())
-                if y1 > canvas.winfo_height():
-                    scroll._scrollbar.grid()
-                else:
-                    scroll._scrollbar.grid_remove()
-                if x1 > canvas.winfo_width():
-                    at_h_scrollbar.grid()
-                else:
-                    at_h_scrollbar.grid_remove()
-            except Exception:
-                pass
+    def _bind_analysis_plot_resize(self, frame, canvas, fig) -> None:
+        """Keep *fig* sized to fill *frame* as the window resizes. Debounced; the
+        layout is re-fitted after each resize because the figure's own
+        tight_layout ran at the old size.
+        """
+        state = {"after_id": None}
 
-        scroll.bind("<Configure>", _update_scrollbar, add="+")
-        tab.bind("<Configure>", _update_scrollbar, add="+")
-        self.after(200, _update_scrollbar)
+        def _apply(width_px: int, height_px: int) -> None:
+            state["after_id"] = None
+            if width_px < 200 or height_px < 150:
+                return
+            dpi = fig.get_dpi()
+            new_w, new_h = width_px / dpi, height_px / dpi
+            if abs(new_w - fig.get_figwidth()) < 0.05 and abs(new_h - fig.get_figheight()) < 0.05:
+                return
+            fig.set_size_inches(new_w, new_h)
+            if fig.axes:
+                try:
+                    fig.tight_layout()
+                except Exception:
+                    pass
+                canvas.draw()
+
+        def _on_configure(event) -> None:
+            if state["after_id"] is not None:
+                self.after_cancel(state["after_id"])
+            state["after_id"] = self.after(150, lambda: _apply(event.width, event.height))
+
+        frame.bind("<Configure>", _on_configure, add="+")
 
     def _at_toggle_log(self) -> None:
         """Show or hide this tab's own collapsible log panel."""
         if self._at_log_visible:
             self._at_log_frame.grid_remove()
-            self._at_log_toggle.configure(text="Show Details")
+            self._at_log_toggle.configure(text="▸  Show details")
             self._at_log_visible = False
         else:
-            self._at_log_frame.grid(row=4, column=0, padx=12, pady=(0, 8), sticky="ew")
-            self._at_log_toggle.configure(text="Hide Details")
+            self._at_log_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+            self._at_log_toggle.configure(text="▾  Hide details")
             self._at_log_visible = True
 
     def _rebuild_analysis_tool_fields(self) -> None:
         """Clear and rebuild the params frame for whichever sub-tool is selected."""
         for w in self._at_params_frame.winfo_children():
             w.destroy()
-        self._at_params_frame.grid_columnconfigure(1, weight=1)
+        self._at_params_frame.grid_columnconfigure(0, weight=1)
         if self._analysis_subtool_var.get() == "Radius Sweep":
             self._build_radius_sweep_fields()
         else:
             self._build_cif_variance_fields()
 
+    def _at_field_label(self, row: int, text: str, help_text: str | None = None) -> None:
+        """Small muted label (plus optional help icon) above a field in the params panel."""
+        frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent", width=0, height=0)
+        frame.grid(row=row, column=0, sticky="w", pady=(12, 3))
+        ctk.CTkLabel(
+            frame, text=text, anchor="w", text_color=_GRAY, font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+        if help_text:
+            help_icon(frame, help_text).pack(side="left", padx=(5, 0))
+
     def _build_radius_sweep_fields(self):
         """Radius Sweep parameter fields, built into self._at_params_frame."""
-        # self._radius_genes is the source of truth, persisted across sub-tool toggles
-        genes_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        genes_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="nw")
-        ctk.CTkLabel(genes_label_frame, text="Genes / UniProt IDs:", anchor="w").pack(side="left")
-        help_icon(genes_label_frame, _RADIUS_SWEEP_HELP["genes"]).pack(side="left", padx=(4, 0))
+        f = self._at_params_frame
+        wrap = _SIDE_W - 50
+
+        # Genes. self._radius_genes is the source of truth, persisted across sub-tool toggles
+        self._at_field_label(0, "Genes / UniProt IDs", _RADIUS_SWEEP_HELP["genes"])
         if not hasattr(self, "_radius_genes"):
             self._radius_genes: list[str] = []
-
-        gene_input_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        gene_input_frame.grid(row=0, column=1, columnspan=3, padx=6, pady=6, sticky="w")
-
+        gene_input_frame = ctk.CTkFrame(f, fg_color="transparent")
+        gene_input_frame.grid(row=1, column=0, sticky="ew")
+        gene_input_frame.grid_columnconfigure(0, weight=1)
         self._radius_gene_input_var = ctk.StringVar(value="")
         gene_entry = ctk.CTkEntry(
-            gene_input_frame, textvariable=self._radius_gene_input_var, width=180,
+            gene_input_frame, textvariable=self._radius_gene_input_var,
             placeholder_text="Gene symbol or UniProt ID",
         )
-        gene_entry.pack(side="left", padx=(0, 6))
+        gene_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         gene_entry.bind("<Return>", lambda _e: self._add_radius_gene())
-
         ctk.CTkButton(
-            gene_input_frame, text="+ Add", width=70, height=28,
+            gene_input_frame, text="+ Add", width=64, height=28,
             command=self._add_radius_gene,
-        ).pack(side="left")
+        ).grid(row=0, column=1)
 
         # Error feedback for _add_radius_gene — hidden until a lookup fails.
         self._radius_gene_error_label = ctk.CTkLabel(
-            self._at_params_frame, text="", text_color=_RED,
-            font=ctk.CTkFont(size=11), anchor="w",
+            f, text="", text_color=_RED, font=ctk.CTkFont(size=11), anchor="w",
+            justify="left", wraplength=wrap,
         )
-        self._radius_gene_error_label.grid(row=1, column=1, columnspan=3, padx=6, pady=(0, 4), sticky="w")
+        self._radius_gene_error_label.grid(row=2, column=0, sticky="w", pady=(4, 0))
         self._radius_gene_error_label.grid_remove()
 
-        self._radius_genes_list_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        self._radius_genes_list_frame.grid(row=2, column=1, columnspan=3, padx=6, pady=(0, 6), sticky="ew")
+        self._radius_genes_list_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._radius_genes_list_frame.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         self._refresh_radius_gene_chips()
 
         # Radius range
-        range_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        range_label_frame.grid(row=3, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(range_label_frame, text="Radius range (Å):", anchor="w").pack(side="left")
-        help_icon(range_label_frame, _RADIUS_SWEEP_HELP["radius_range"]).pack(side="left", padx=(4, 0))
-        range_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        range_frame.grid(row=3, column=1, columnspan=3, padx=6, pady=6, sticky="w")
+        self._at_field_label(4, "Radius range (Å)", _RADIUS_SWEEP_HELP["radius_range"])
+        range_frame = ctk.CTkFrame(f, fg_color="transparent")
+        range_frame.grid(row=5, column=0, sticky="w")
         if not hasattr(self, "_radius_start_var"):
             self._radius_start_var = ctk.StringVar(value="4")
             self._radius_stop_var = ctk.StringVar(value="20")
@@ -266,31 +314,28 @@ class AnalysisToolsTabMixin:
             ("stop", self._radius_stop_var),
             ("step", self._radius_step_var),
         ]:
-            ctk.CTkLabel(range_frame, text=label).pack(side="left", padx=(0, 4))
-            ctk.CTkEntry(range_frame, textvariable=var, width=50).pack(side="left", padx=(0, 12))
+            ctk.CTkLabel(range_frame, text=label, text_color=_GRAY, font=ctk.CTkFont(size=11)).pack(
+                side="left", padx=(0, 4),
+            )
+            ctk.CTkEntry(range_frame, textvariable=var, width=52).pack(side="left", padx=(0, 12))
 
         # Hotspot recurrence threshold, computed live from raw COSMIC -- independent
         # of the "Min samples" value the Pipeline tab used to build the intermediate TSV
-        ctk.CTkLabel(self._at_params_frame, text="Min samples:", anchor="w").grid(
-            row=4, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
+        self._at_field_label(6, "Min samples")
         if not hasattr(self, "_radius_min_cases_var"):
             from radius_sweep import DEFAULT_MIN_CASES
             self._radius_min_cases_var = ctk.StringVar(value=str(DEFAULT_MIN_CASES))
-        ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._radius_min_cases_var, width=60,
-        ).grid(row=4, column=1, padx=6, pady=6, sticky="w")
+        ctk.CTkEntry(f, textvariable=self._radius_min_cases_var, width=64).grid(row=7, column=0, sticky="w")
         ctk.CTkLabel(
-            self._at_params_frame,
-            text="Minimum distinct COSMIC samples for a mutation to count as a hotspot",
-            text_color=_GRAY, font=ctk.CTkFont(size=11), anchor="w",
-        ).grid(row=4, column=2, columnspan=2, padx=6, pady=6, sticky="w")
+            f, text="Minimum distinct COSMIC samples for a mutation to count as a hotspot",
+            text_color=_GRAY, font=ctk.CTkFont(size=11), anchor="w", justify="left", wraplength=wrap,
+        ).grid(row=8, column=0, sticky="w", pady=(3, 0))
 
         # Unfiltered comparison
         if not hasattr(self, "_radius_unfiltered_var"):
             self._radius_unfiltered_var = ctk.BooleanVar(value=False)
-        unfiltered_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        unfiltered_frame.grid(row=5, column=0, columnspan=4, padx=12, pady=(6, 10), sticky="w")
+        unfiltered_frame = ctk.CTkFrame(f, fg_color="transparent")
+        unfiltered_frame.grid(row=9, column=0, sticky="w", pady=(14, 0))
         ctk.CTkCheckBox(
             unfiltered_frame, text="Include unfiltered COSMIC comparison",
             variable=self._radius_unfiltered_var,
@@ -299,32 +344,27 @@ class AnalysisToolsTabMixin:
         help_icon(unfiltered_frame, _RADIUS_SWEEP_HELP["unfiltered"]).pack(side="left", padx=(4, 0))
 
         # Output folder
-        radius_output_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        radius_output_label_frame.grid(row=6, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(radius_output_label_frame, text="Output folder:", anchor="w").pack(side="left")
-        help_icon(
-            radius_output_label_frame,
+        self._at_field_label(
+            10, "Output folder",
             "Where radius_sweep.tsv (and radius_sweep_plot.png, if you use "
             "Save PNG) are written. Defaults to the app's main Output folder.",
-        ).pack(side="left", padx=(4, 0))
+        )
         if not hasattr(self, "_radius_output_dir_var"):
             self._radius_output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR))
-        radius_output_row = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        radius_output_row.grid(row=6, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
-        radius_output_row.grid_columnconfigure(0, weight=1)
         ctk.CTkEntry(
-            radius_output_row, textvariable=self._radius_output_dir_var, state="readonly",
-        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+            f, textvariable=self._radius_output_dir_var, state="readonly",
+        ).grid(row=11, column=0, sticky="ew")
+        buttons = ctk.CTkFrame(f, fg_color="transparent")
+        buttons.grid(row=12, column=0, sticky="w", pady=(6, 0))
         ctk.CTkButton(
-            radius_output_row, text="Browse", width=70, height=26,
-            font=ctk.CTkFont(size=12),
+            buttons, text="Browse", width=70, height=26, font=ctk.CTkFont(size=12),
             command=self._browse_radius_output_dir,
-        ).grid(row=0, column=1, padx=(0, 6))
+        ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            radius_output_row, text="Open Folder", width=90, height=26,
-            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            buttons, text="Open Folder", width=90, height=26, font=ctk.CTkFont(size=12),
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: self._open_folder(Path(self._radius_output_dir_var.get())),
-        ).grid(row=0, column=2)
+        ).pack(side="left")
 
     def _browse_radius_output_dir(self) -> None:
         path = filedialog.askdirectory(
@@ -415,160 +455,140 @@ class AnalysisToolsTabMixin:
 
         row = None
         for i, gene in enumerate(self._radius_genes):
-            if i % 6 == 0:
+            if i % 3 == 0:
                 row = ctk.CTkFrame(self._radius_genes_list_frame, fg_color="transparent")
                 row.pack(anchor="w", pady=(0, 4))
-            chip = ctk.CTkFrame(row, fg_color="#3a3a3a", corner_radius=6)
+            chip = ctk.CTkFrame(row, fg_color=_CHIP, corner_radius=6)
             chip.pack(side="left", padx=(0, 6))
             ctk.CTkLabel(chip, text=gene, font=ctk.CTkFont(size=12)).pack(
                 side="left", padx=(8, 4), pady=4,
             )
             ctk.CTkButton(
                 chip, text="✕", width=20, height=20, fg_color="transparent",
-                hover_color="#4a4a4a", font=ctk.CTkFont(size=11),
+                hover_color=_CHIP_HOVER, font=ctk.CTkFont(size=11),
                 command=lambda g=gene: self._remove_radius_gene(g),
             ).pack(side="left", padx=(0, 6), pady=4)
 
     def _build_cif_variance_fields(self):
         """CIF Variance parameter fields, built into self._at_params_frame."""
+        f = self._at_params_frame
+        wrap = _SIDE_W - 50
+
         # Input folder
-        input_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        input_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(input_label_frame, text="Input folder:", anchor="w").pack(side="left")
-        help_icon(input_label_frame, _CIF_VARIANCE_HELP["input_dir"]).pack(side="left", padx=(4, 0))
+        self._at_field_label(0, "Input folder", _CIF_VARIANCE_HELP["input_dir"])
         if not hasattr(self, "_variance_input_dir_var"):
             from cif_variance import DEFAULT_INPUT_DIR
             self._variance_input_dir_var = ctk.StringVar(value=str(DEFAULT_INPUT_DIR))
             self._variance_input_dir_var.trace_add("write", self._update_variance_cif_count)
-        ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._variance_input_dir_var, width=280,
-        ).grid(row=0, column=1, padx=6, pady=6, sticky="ew")
-        ctk.CTkButton(
-            self._at_params_frame, text="Browse", width=70, height=26,
-            font=ctk.CTkFont(size=12),
-            command=self._browse_variance_input_dir,
-        ).grid(row=0, column=2, padx=12, pady=6, sticky="e")
-
-        self._variance_cif_count_label = ctk.CTkLabel(
-            self._at_params_frame, text="", anchor="w", font=ctk.CTkFont(size=11),
+        input_row = ctk.CTkFrame(f, fg_color="transparent")
+        input_row.grid(row=1, column=0, sticky="ew")
+        input_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkEntry(input_row, textvariable=self._variance_input_dir_var).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6),
         )
-        self._variance_cif_count_label.grid(row=1, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="w")
+        ctk.CTkButton(
+            input_row, text="Browse", width=70, height=26, font=ctk.CTkFont(size=12),
+            command=self._browse_variance_input_dir,
+        ).grid(row=0, column=1)
+        self._variance_cif_count_label = ctk.CTkLabel(
+            f, text="", anchor="w", font=ctk.CTkFont(size=11),
+        )
+        self._variance_cif_count_label.grid(row=2, column=0, sticky="w", pady=(3, 0))
         self._update_variance_cif_count()
 
         # Top N
-        top_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        top_label_frame.grid(row=2, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(top_label_frame, text="Top N residues:", anchor="w").pack(side="left")
-        help_icon(top_label_frame, _CIF_VARIANCE_HELP["top_n"]).pack(side="left", padx=(4, 0))
+        self._at_field_label(3, "Top N residues", _CIF_VARIANCE_HELP["top_n"])
         if not hasattr(self, "_variance_top_var"):
             self._variance_top_var = ctk.StringVar(value="10")
-        ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._variance_top_var, width=60,
-        ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        ctk.CTkEntry(f, textvariable=self._variance_top_var, width=64).grid(row=4, column=0, sticky="w")
 
-        # Report range
-        report_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        report_label_frame.grid(row=3, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(report_label_frame, text="Report range:", anchor="w").pack(side="left")
-        help_icon(report_label_frame, _CIF_VARIANCE_HELP["report_range"]).pack(side="left", padx=(4, 0))
-        report_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        report_frame.grid(row=3, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        # Report / align ranges
+        # (Placeholder text doesn't show on entries bound to a StringVar, so each range
+        # spells out "from ... to ..." and what a blank end means.)
+        def _range_row(row: int, start_var, end_var, blank_hint: str) -> None:
+            frame = ctk.CTkFrame(f, fg_color="transparent")
+            frame.grid(row=row, column=0, sticky="w")
+            small = ctk.CTkFont(size=11)
+            ctk.CTkLabel(frame, text="from", text_color=_GRAY, font=small).pack(side="left", padx=(0, 4))
+            ctk.CTkEntry(frame, textvariable=start_var, width=70).pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(frame, text="to", text_color=_GRAY, font=small).pack(side="left", padx=(0, 4))
+            ctk.CTkEntry(frame, textvariable=end_var, width=70).pack(side="left")
+            ctk.CTkLabel(
+                f, text=blank_hint, text_color=_GRAY, font=small, anchor="w",
+            ).grid(row=row + 1, column=0, sticky="w", pady=(3, 0))
+
+        self._at_field_label(5, "Report range", _CIF_VARIANCE_HELP["report_range"])
         if not hasattr(self, "_variance_range_start_var"):
             self._variance_range_start_var = ctk.StringVar(value="")
             self._variance_range_end_var = ctk.StringVar(value="")
-        ctk.CTkEntry(report_frame, textvariable=self._variance_range_start_var, width=70,
-                     placeholder_text="start").pack(side="left", padx=(0, 6))
-        ctk.CTkEntry(report_frame, textvariable=self._variance_range_end_var, width=70,
-                     placeholder_text="end (blank = all)").pack(side="left")
+        _range_row(6, self._variance_range_start_var, self._variance_range_end_var, "Blank end = all residues")
 
-        # Align range
-        align_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        align_label_frame.grid(row=4, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(align_label_frame, text="Align range:", anchor="w").pack(side="left")
-        help_icon(align_label_frame, _CIF_VARIANCE_HELP["align_range"]).pack(side="left", padx=(4, 0))
-        align_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        align_frame.grid(row=4, column=1, columnspan=2, padx=6, pady=6, sticky="w")
+        self._at_field_label(8, "Align range", _CIF_VARIANCE_HELP["align_range"])
         if not hasattr(self, "_variance_align_start_var"):
             self._variance_align_start_var = ctk.StringVar(value="")
             self._variance_align_end_var = ctk.StringVar(value="")
-        ctk.CTkEntry(align_frame, textvariable=self._variance_align_start_var, width=70,
-                     placeholder_text="start").pack(side="left", padx=(0, 6))
-        ctk.CTkEntry(align_frame, textvariable=self._variance_align_end_var, width=70,
-                     placeholder_text="end (blank = same as report range)").pack(side="left")
+        _range_row(
+            9, self._variance_align_start_var, self._variance_align_end_var, "Blank = same as the report range",
+        )
 
         # UniProt / gene overrides
-        uniprot_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        uniprot_label_frame.grid(row=5, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(uniprot_label_frame, text="UniProt override:", anchor="w").pack(side="left")
-        help_icon(uniprot_label_frame, _CIF_VARIANCE_HELP["uniprot_override"]).pack(side="left", padx=(4, 0))
+        self._at_field_label(11, "UniProt override", _CIF_VARIANCE_HELP["uniprot_override"])
         if not hasattr(self, "_variance_uniprot_var"):
             self._variance_uniprot_var = ctk.StringVar(value="")
         ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._variance_uniprot_var, width=150,
-            placeholder_text="auto-detected from CIF",
-        ).grid(row=5, column=1, padx=6, pady=6, sticky="w")
+            f, textvariable=self._variance_uniprot_var, placeholder_text="auto-detected from CIF",
+        ).grid(row=12, column=0, sticky="ew")
 
-        gene_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        gene_label_frame.grid(row=6, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(gene_label_frame, text="Gene override:", anchor="w").pack(side="left")
-        help_icon(gene_label_frame, _CIF_VARIANCE_HELP["gene_override"]).pack(side="left", padx=(4, 0))
+        self._at_field_label(13, "Gene override", _CIF_VARIANCE_HELP["gene_override"])
         if not hasattr(self, "_variance_gene_var"):
             self._variance_gene_var = ctk.StringVar(value="")
         ctk.CTkEntry(
-            self._at_params_frame, textvariable=self._variance_gene_var, width=150,
-            placeholder_text="optional, for UniProt lookup",
-        ).grid(row=6, column=1, padx=6, pady=(6, 6), sticky="w")
+            f, textvariable=self._variance_gene_var, placeholder_text="optional, for UniProt lookup",
+        ).grid(row=14, column=0, sticky="ew")
 
         # AlphaFold Server seed-JSON export
         from cif_variance import DEFAULT_SEEDS
-        seed_json_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        seed_json_frame.grid(row=7, column=0, columnspan=3, padx=12, pady=(4, 2), sticky="w")
-        ctk.CTkLabel(seed_json_frame, text="Seeds:").pack(side="left", padx=(0, 4))
+        self._at_field_label(15, "AlphaFold seeds", _CIF_VARIANCE_HELP["seed_json"])
+        seed_json_frame = ctk.CTkFrame(f, fg_color="transparent")
+        seed_json_frame.grid(row=16, column=0, sticky="w")
         if not hasattr(self, "_variance_num_seeds_var"):
             self._variance_num_seeds_var = ctk.StringVar(value=str(len(DEFAULT_SEEDS)))
-        ctk.CTkEntry(
-            seed_json_frame, textvariable=self._variance_num_seeds_var, width=40,
-        ).pack(side="left", padx=(0, 8))
+        ctk.CTkEntry(seed_json_frame, textvariable=self._variance_num_seeds_var, width=44).pack(
+            side="left", padx=(0, 8),
+        )
         self._variance_seed_json_btn = ctk.CTkButton(
-            seed_json_frame, text="⬇  Generate AlphaFold Seeds JSON", width=230, height=28,
-            font=ctk.CTkFont(size=12),
+            seed_json_frame, text="⬇  Generate seeds JSON", width=180, height=28,
+            font=ctk.CTkFont(size=12), fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=self._generate_alphafold_seed_json,
         )
         self._variance_seed_json_btn.pack(side="left")
-        help_icon(seed_json_frame, _CIF_VARIANCE_HELP["seed_json"]).pack(side="left", padx=(6, 0))
-
         self._variance_seed_json_status = ctk.CTkLabel(
-            self._at_params_frame, text="", anchor="w", font=ctk.CTkFont(size=11),
+            f, text="", anchor="w", justify="left", wraplength=wrap, font=ctk.CTkFont(size=11),
         )
-        self._variance_seed_json_status.grid(row=8, column=0, columnspan=3, padx=12, pady=(0, 10), sticky="w")
+        self._variance_seed_json_status.grid(row=17, column=0, sticky="w", pady=(3, 0))
 
         # Output folder
-        variance_output_label_frame = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        variance_output_label_frame.grid(row=9, column=0, padx=(12, 6), pady=6, sticky="w")
-        ctk.CTkLabel(variance_output_label_frame, text="Output folder:", anchor="w").pack(side="left")
-        help_icon(
-            variance_output_label_frame,
+        self._at_field_label(
+            18, "Output folder",
             "Where the variance plot/data, pairwise RMSD, and any generated "
             "AlphaFold Seeds JSON are written. Defaults to Output/cif_variance.",
-        ).pack(side="left", padx=(4, 0))
+        )
         if not hasattr(self, "_variance_output_dir_var"):
             self._variance_output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR / "cif_variance"))
-        variance_output_row = ctk.CTkFrame(self._at_params_frame, fg_color="transparent")
-        variance_output_row.grid(row=9, column=1, columnspan=3, padx=6, pady=6, sticky="ew")
-        variance_output_row.grid_columnconfigure(0, weight=1)
         ctk.CTkEntry(
-            variance_output_row, textvariable=self._variance_output_dir_var, state="readonly",
-        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+            f, textvariable=self._variance_output_dir_var, state="readonly",
+        ).grid(row=19, column=0, sticky="ew")
+        buttons = ctk.CTkFrame(f, fg_color="transparent")
+        buttons.grid(row=20, column=0, sticky="w", pady=(6, 0))
         ctk.CTkButton(
-            variance_output_row, text="Browse", width=70, height=26,
-            font=ctk.CTkFont(size=12),
+            buttons, text="Browse", width=70, height=26, font=ctk.CTkFont(size=12),
             command=self._browse_variance_output_dir,
-        ).grid(row=0, column=1, padx=(0, 6))
+        ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            variance_output_row, text="Open Folder", width=90, height=26,
-            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            buttons, text="Open Folder", width=90, height=26, font=ctk.CTkFont(size=12),
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: self._open_folder(Path(self._variance_output_dir_var.get())),
-        ).grid(row=0, column=2)
+        ).pack(side="left")
 
     def _browse_variance_output_dir(self) -> None:
         path = filedialog.askdirectory(
@@ -675,9 +695,19 @@ class AnalysisToolsTabMixin:
         if self._analysis_subtool_var.get() == "Radius Sweep":
             self._cif_variance_canvas.get_tk_widget().grid_remove()
             self._radius_sweep_canvas.get_tk_widget().grid()
+            fig, hint = self._radius_sweep_fig, "Add genes and click Run to plot hotspot clusters by radius."
+            self._at_plots_help.pack(side="left", padx=(6, 0))
         else:
             self._radius_sweep_canvas.get_tk_widget().grid_remove()
             self._cif_variance_canvas.get_tk_widget().grid()
+            fig, hint = self._cif_variance_fig, "Choose a folder of .cif models and click Run to compare them."
+            self._at_plots_help.pack_forget()
+        if fig.axes:
+            self._at_empty_label.place_forget()
+        else:
+            self._at_empty_label.configure(text=hint)
+            self._at_empty_label.place(relx=0.5, rely=0.5, anchor="center")
+            self._at_empty_label.lift()
 
     def _save_active_analysis_plot(self) -> None:
         if self._analysis_subtool_var.get() == "Radius Sweep":
@@ -690,7 +720,7 @@ class AnalysisToolsTabMixin:
 
         self._radius_sweep_fig.clf()
         build_sweep_figure(self._radius_sweep_result, fig=self._radius_sweep_fig)
-        self._style_dark_figure(self._radius_sweep_fig)
+        self._style_themed_figure(self._radius_sweep_fig)
         self._radius_sweep_canvas.draw()
         self._show_active_analysis_plot()
         self._at_status_label.configure(text="Sweep complete.", text_color=_GREEN)
@@ -712,7 +742,7 @@ class AnalysisToolsTabMixin:
 
         self._cif_variance_fig.clf()
         build_variance_figure(self._cif_variance_result, fig=self._cif_variance_fig)
-        self._style_dark_figure(self._cif_variance_fig)
+        self._style_themed_figure(self._cif_variance_fig)
         self._cif_variance_canvas.draw()
         self._show_active_analysis_plot()
         self._at_status_label.configure(text="Analysis complete.", text_color=_GREEN)

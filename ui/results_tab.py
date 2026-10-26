@@ -15,11 +15,16 @@ import threading
 
 import customtkinter as ctk
 
+from ui import theme
 from ui.common import (
     _ANCHOR_COL_HELP,
     _ANCHOR_TV_COLS,
     _BLUE,
+    _BTN2,
+    _BTN2_HOVER,
+    _CHIP_HOVER,
     _CLUSTER_LONG_SRC_MAP,
+    _GRAY,
     _GREEN,
     _MUT_COL_HELP,
     _MUT_ENTRY_RE,
@@ -62,26 +67,35 @@ class ResultsTabMixin:
         import tkinter.ttk as ttk
         style = ttk.Style()
         style.theme_use("default")
-        bg, fg = "#2b2b2b", "#dcdcdc"
-        heading_bg = "#3a3a3a"
+        bg, fg = theme.c("row_odd"), theme.c("fg")
+        heading_bg, heading_fg = theme.c("head_bg"), theme.c("head_fg")
         for name in ("Results.Treeview",):
             style.configure(name,
-                background=bg, foreground=fg, rowheight=24,
+                background=bg, foreground=fg, rowheight=26,
                 fieldbackground=bg, borderwidth=0, relief="flat",
                 font=("Segoe UI", 10),
             )
             style.configure(f"{name}.Heading",
-                background=heading_bg, foreground=fg,
-                relief="groove", borderwidth=1,
+                background=heading_bg, foreground=heading_fg,
+                relief="flat", borderwidth=0, padding=(2, 6),
                 font=("Segoe UI", 10, "bold"),
             )
             style.map(name,
-                background=[("selected", _BLUE)],
-                foreground=[("selected", "white")],
+                background=[("selected", theme.c("select_bg"))],
+                foreground=[("selected", theme.c("select_fg"))],
             )
             style.map(f"{name}.Heading",
-                background=[("active", "#4a4a4a")],
+                background=[("active", theme.c("head_hover"))],
             )
+
+    def _retheme_results(self) -> None:
+        """Re-apply theme colors to the plain-Tk/ttk parts of the Results tab
+        (CustomTkinter widgets re-theme themselves).
+        """
+        self._setup_treeview_style()
+        for tv in self._tv_state:
+            tv.tag_configure("odd", background=theme.c("row_odd"))
+            tv.tag_configure("even", background=theme.c("row_even"))
 
     def _make_treeview(self, parent, col_defs: list, visible_ids: list | None = None):
         """Build a treeview with every column in *col_defs* defined, but only
@@ -94,8 +108,10 @@ class ResultsTabMixin:
         import tkinter as tk
         import tkinter.ttk as ttk
 
-        frame = tk.Frame(parent, bg="#2b2b2b")
-        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        frame = ctk.CTkFrame(
+            parent, fg_color=theme.pair("row_odd"), corner_radius=0, border_width=0,
+        )
+        frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
         frame.grid_rowconfigure(0, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
@@ -115,12 +131,12 @@ class ResultsTabMixin:
         tv["displaycolumns"] = visible_ids
         self._disable_tv_stretch(tv)
 
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
-        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tv.xview)
+        vsb = ctk.CTkScrollbar(frame, orientation="vertical", command=tv.yview, width=12)
+        hsb = ctk.CTkScrollbar(frame, orientation="horizontal", command=tv.xview, height=12)
         tv.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        tv.tag_configure("odd",  background="#2b2b2b")
-        tv.tag_configure("even", background="#313131")
+        tv.tag_configure("odd",  background=theme.c("row_odd"))
+        tv.tag_configure("even", background=theme.c("row_even"))
 
         tv.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -128,16 +144,18 @@ class ResultsTabMixin:
 
         # Page controls, shown only when the (searched/filtered) rows don't fit
         # on one page -- see _render_tv_page
-        pager = tk.Frame(frame, bg="#2b2b2b")
+        pager = ctk.CTkFrame(
+            frame, fg_color=theme.pair("surface"), corner_radius=0, border_width=0,
+        )
         pager.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-        prev_btn = ctk.CTkButton(pager, text="◀", width=30, height=22,
+        prev_btn = ctk.CTkButton(pager, text="◀", width=30, height=22, fg_color=_BTN2, hover_color=_BTN2_HOVER,
                                  command=lambda: self._turn_tv_page(tv, -1))
-        prev_btn.pack(side=tk.LEFT)
-        label = ctk.CTkLabel(pager, text="", font=ctk.CTkFont(size=11), text_color="gray60")
+        prev_btn.pack(side=tk.LEFT, padx=(8, 0), pady=4)
+        label = ctk.CTkLabel(pager, text="", font=ctk.CTkFont(size=11), text_color=_GRAY)
         label.pack(side=tk.LEFT, padx=8)
-        next_btn = ctk.CTkButton(pager, text="▶", width=30, height=22,
+        next_btn = ctk.CTkButton(pager, text="▶", width=30, height=22, fg_color=_BTN2, hover_color=_BTN2_HOVER,
                                  command=lambda: self._turn_tv_page(tv, 1))
-        next_btn.pack(side=tk.LEFT)
+        next_btn.pack(side=tk.LEFT, pady=4)
         pager.grid_remove()
         self._tv_state[tv] = {"view": [], "page": 0, "sort": None, "hay": None,
                               "pager": (pager, label, prev_btn, next_btn)}
@@ -320,13 +338,13 @@ class ResultsTabMixin:
         label = self._tv_placeholder_labels.get(tv)
         if label is None:
             label = ctk.CTkLabel(
-                tv.master, font=ctk.CTkFont(size=13), fg_color="#242424",
+                tv.master, font=ctk.CTkFont(size=13), fg_color=theme.pair("surface2"),
                 corner_radius=6, padx=16, pady=10, wraplength=380, justify="center",
             )
             self._tv_placeholder_labels[tv] = label
         return label
 
-    def _show_tv_message(self, tv, text: str, color: str = "gray60") -> None:
+    def _show_tv_message(self, tv, text: str, color: str = _GRAY) -> None:
         overlay = self._tv_overlay(tv)
         overlay.configure(text=text, text_color=color)
         overlay.place(relx=0.5, rely=0.5, anchor="center")
@@ -406,9 +424,10 @@ class ResultsTabMixin:
         return self._TEXT_FILTER_OPS
 
     def _update_filter_button_label(self, which: str) -> None:
-        btn = getattr(self, f"_{which}_filter_button")
+        if which != self._results_active_which():
+            return
         n = len(getattr(self, f"_{which}_filters"))
-        btn.configure(text=f"▽  Filter ({n})" if n else "▽  Filter")
+        self._results_filter_button.configure(text=f"▽  Filter ({n})" if n else "▽  Filter")
 
     _FILTER_TV_METHODS = {
         "ptm": "_filter_ptm_tv", "mut": "_filter_mut_tv",
@@ -467,7 +486,7 @@ class ResultsTabMixin:
                 rows[:] = [r for r in rows if r["frame"] is not row_frame]
 
             ctk.CTkButton(row_frame, text="✕", width=28, fg_color="transparent",
-                          hover_color="#3a3a3a", command=_remove).pack(side="left", padx=(4, 0))
+                          hover_color=_CHIP_HOVER, command=_remove).pack(side="left", padx=(4, 0))
 
             rows.append({"frame": row_frame, "col_var": col_var, "op_var": op_var, "val_var": val_var})
 
@@ -562,184 +581,251 @@ class ResultsTabMixin:
         tab.grid_rowconfigure(0, weight=1)
 
         outer = ctk.CTkFrame(tab, fg_color="transparent")
-        outer.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        outer.grid(row=0, column=0, sticky="nsew", padx=12, pady=(8, 8))
         outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
+        outer.grid_rowconfigure(2, weight=1)
 
-        # Mode toggle + shared Refresh/status: PTM Proximity vs Mutation Clusters,
-        # via grid()/grid_remove() swap between two frames built once
-        mode_row = ctk.CTkFrame(outer, fg_color="transparent")
-        mode_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        # Which table in each mode the toolbar's search/Filter/Columns act on
+        # (the one last clicked); see _set_results_active
+        self._results_active = {"ptm": "ptm", "cluster": "anchor"}
+        self._results_titles: dict[str, ctk.CTkLabel] = {}
+        self._results_subtitles: dict[str, ctk.CTkLabel] = {}
+
+        # ── One toolbar for the whole tab ──
+        # Mode and PTM-source toggles, search, then actions. Search/Filter/Columns
+        # act on the active table; Visualize acts on the top table's selection.
+        toolbar = ctk.CTkFrame(outer, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 2))
         self._results_mode_var = ctk.StringVar(value="PTM Proximity")
-        ctk.CTkSegmentedButton(
-            mode_row, values=["PTM Proximity", "Mutation Clusters"],
+        self._results_mode_seg = ctk.CTkSegmentedButton(
+            toolbar, values=["PTM Proximity", "Mutation Clusters"],
             variable=self._results_mode_var,
             command=self._on_results_mode_change,
-        ).pack(side=tk.LEFT)
-        self._refresh_button = ctk.CTkButton(
-            mode_row, text="↺  Refresh", width=90, height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._load_results(force=True),
         )
-        self._refresh_button.pack(side=tk.RIGHT)
+        self._results_mode_seg.pack(side=tk.LEFT)
         # PTM Proximity results come from either PTM source; each has its own
         # output files, so both can be generated and switched between here
         self._results_ptm_source_var = ctk.StringVar(value=_PTM_SOURCE_OPTIONS[0][0])
         self._results_source_toggle = ctk.CTkSegmentedButton(
-            mode_row, values=[label for label, _ in _PTM_SOURCE_OPTIONS],
+            toolbar, values=[label for label, _ in _PTM_SOURCE_OPTIONS],
             variable=self._results_ptm_source_var,
             command=self._on_results_ptm_source_change,
         )
-        self._results_source_toggle.pack(side=tk.LEFT, padx=(12, 0))
-        self._results_status = ctk.CTkLabel(mode_row, text="",
-                                             text_color="gray60",
-                                             font=ctk.CTkFont(size=11))
-        self._results_status.pack(side=tk.LEFT, padx=(12, 0))
+        self._results_source_toggle.pack(side=tk.LEFT, padx=(10, 0))
+
+        self._visualize_button = ctk.CTkButton(
+            toolbar, text="Visualize", width=90, height=28, font=ctk.CTkFont(size=12),
+            command=self._visualize_for_mode,
+        )
+        self._visualize_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self._refresh_button = ctk.CTkButton(
+            toolbar, text="↺  Refresh", width=90, height=28, fg_color=_BTN2, hover_color=_BTN2_HOVER,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._load_results(force=True),
+        )
+        self._refresh_button.pack(side=tk.RIGHT, padx=(6, 0))
+        ctk.CTkButton(
+            toolbar, text="⚙  Columns", width=95, height=28, fg_color=_BTN2, hover_color=_BTN2_HOVER,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._open_column_picker(self._results_active_which()),
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        self._results_filter_button = ctk.CTkButton(
+            toolbar, text="▽  Filter", width=90, height=28, fg_color=_BTN2, hover_color=_BTN2_HOVER,
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._open_filter_picker(self._results_active_which()),
+        )
+        self._results_filter_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self._results_search_entry = ctk.CTkEntry(toolbar, placeholder_text="Search PTM sites…  (Ctrl+F)")
+        self._results_search_entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(10, 0))
+        self._results_search_entry.bind("<KeyRelease>", self._on_results_search_key, add="+")
+
+        # Counts / load status, directly under the toolbar
+        self._results_status = ctk.CTkLabel(outer, text="", text_color=_GRAY,
+                                            font=ctk.CTkFont(size=11), anchor="w")
+        self._results_status.grid(row=1, column=0, sticky="w", padx=2, pady=(0, 0))
+
+        # Per-table search text lives in these vars (filtering traces them); the
+        # toolbar entry shows whichever belongs to the active table
+        self._results_ptm_search_var = ctk.StringVar(value="")
+        self._results_mut_search_var = ctk.StringVar(value="")
+        self._results_anchor_search_var = ctk.StringVar(value="")
+        self._results_nearby_search_var = ctk.StringVar(value="")
+        self._results_ptm_search_var.trace_add("write", self._filter_ptm_tv)
+        self._results_mut_search_var.trace_add("write", self._filter_mut_tv)
+        self._results_anchor_search_var.trace_add("write", self._filter_anchor_tv)
+        self._results_nearby_search_var.trace_add("write", self._filter_nearby_tv)
 
         # ── PTM Proximity mode: PTM Sites / Mutation Details ──
         self._ptm_mode_frame = ctk.CTkFrame(outer, fg_color="transparent")
-        self._ptm_mode_frame.grid(row=1, column=0, sticky="nsew")
-        self._ptm_mode_frame.grid_columnconfigure(0, weight=1)
-        self._ptm_mode_frame.grid_rowconfigure(1, weight=3)
-        self._ptm_mode_frame.grid_rowconfigure(3, weight=2)
+        self._ptm_mode_frame.grid(row=2, column=0, sticky="nsew")
         ptm_root = self._ptm_mode_frame
+        ptm_root.grid_columnconfigure(0, weight=1)
 
-        top_header = ctk.CTkFrame(ptm_root, fg_color="transparent")
-        top_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
-        ctk.CTkLabel(top_header, text="PTM Sites",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
-        ctk.CTkButton(top_header, text="⚙  Columns", width=95, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=lambda: self._open_column_picker("ptm")).pack(side=tk.RIGHT, padx=(0, 6))
-        self._ptm_filter_button = ctk.CTkButton(
-            top_header, text="▽  Filter", width=90, height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._open_filter_picker("ptm"),
-        )
-        self._ptm_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
-        ctk.CTkButton(top_header, text="📈  Visualize", width=100, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=self._visualize_selected_ptm).pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_ptm_search_var = ctk.StringVar(value="")
-        self._ptm_search_entry = ctk.CTkEntry(
-            top_header, textvariable=self._results_ptm_search_var,
-            width=220, placeholder_text="🔍 Search PTM sites… (Ctrl+F)",
-        )
-        self._ptm_search_entry.pack(side=tk.RIGHT, padx=(0, 12))
-        self._results_ptm_search_var.trace_add("write", self._filter_ptm_tv)
-
+        self._results_section(ptm_root, 0, "ptm", "PTM sites")
         top_frame = ctk.CTkFrame(ptm_root)
-        top_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        top_frame.grid(row=1, column=0, sticky="nsew")
         top_frame.grid_rowconfigure(0, weight=1)
         top_frame.grid_columnconfigure(0, weight=1)
         self._ptm_tv = self._make_treeview(top_frame, _PTM_TV_COLS, self._ptm_visible_cols)
         self._ptm_tv.bind("<<TreeviewSelect>>", self._on_ptm_select)
         self._bind_treeview_zoom_override(self._ptm_tv)
 
-        bot_header = ctk.CTkFrame(ptm_root, fg_color="transparent")
-        bot_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
-        ctk.CTkLabel(bot_header, text="Mutation Details",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
-        ctk.CTkButton(bot_header, text="⬇  Export", width=90, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=self._export_mut_tv).pack(side=tk.RIGHT, padx=(0, 6))
-        ctk.CTkButton(bot_header, text="⚙  Columns", width=95, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=lambda: self._open_column_picker("mut")).pack(side=tk.RIGHT, padx=(0, 6))
-        self._mut_filter_button = ctk.CTkButton(
-            bot_header, text="▽  Filter", width=90, height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._open_filter_picker("mut"),
-        )
-        self._mut_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_mut_search_var = ctk.StringVar(value="")
-        self._mut_search_entry = ctk.CTkEntry(
-            bot_header, textvariable=self._results_mut_search_var,
-            width=220, placeholder_text="🔍 Search mutations…",
-        )
-        self._mut_search_entry.pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_mut_search_var.trace_add("write", self._filter_mut_tv)
-
+        handle = self._results_split_handle(ptm_root, 2)
+        bot_head = self._results_section(ptm_root, 3, "mut", "Mutation details")
+        ctk.CTkButton(
+            bot_head, text="⬇  Export", width=80, height=24, fg_color=_BTN2, hover_color=_BTN2_HOVER,
+            font=ctk.CTkFont(size=12), command=self._export_mut_tv,
+        ).grid(row=0, column=3, padx=(10, 0))
         bot_frame = ctk.CTkFrame(ptm_root)
-        bot_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        bot_frame.grid(row=4, column=0, sticky="nsew")
         bot_frame.grid_rowconfigure(0, weight=1)
         bot_frame.grid_columnconfigure(0, weight=1)
         self._mut_tv = self._make_treeview(bot_frame, _MUT_TV_COLS, self._mut_visible_cols)
         self._bind_treeview_zoom_override(self._mut_tv)
         for which in ("ptm", "mut"):
             self._apply_display_columns(which)
+        self._bind_results_splitter(ptm_root, handle, top_frame, bot_frame)
 
         # ── Mutation Clusters mode: Anchor Mutations / Nearby Mutations ──
         self._cluster_mode_frame = ctk.CTkFrame(outer, fg_color="transparent")
-        self._cluster_mode_frame.grid(row=1, column=0, sticky="nsew")
+        self._cluster_mode_frame.grid(row=2, column=0, sticky="nsew")
         self._cluster_mode_frame.grid_remove()
-        self._cluster_mode_frame.grid_columnconfigure(0, weight=1)
-        self._cluster_mode_frame.grid_rowconfigure(1, weight=3)
-        self._cluster_mode_frame.grid_rowconfigure(3, weight=2)
         cluster_root = self._cluster_mode_frame
+        cluster_root.grid_columnconfigure(0, weight=1)
 
-        anchor_header = ctk.CTkFrame(cluster_root, fg_color="transparent")
-        anchor_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
-        ctk.CTkLabel(anchor_header, text="Anchor Mutations",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT)
-        ctk.CTkButton(anchor_header, text="⚙  Columns", width=95, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=lambda: self._open_column_picker("anchor")).pack(side=tk.RIGHT, padx=(0, 6))
-        self._anchor_filter_button = ctk.CTkButton(
-            anchor_header, text="▽  Filter", width=90, height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._open_filter_picker("anchor"),
-        )
-        self._anchor_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
-        ctk.CTkButton(anchor_header, text="📈  Visualize", width=100, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=self._visualize_selected_cluster).pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_anchor_search_var = ctk.StringVar(value="")
-        self._anchor_search_entry = ctk.CTkEntry(
-            anchor_header, textvariable=self._results_anchor_search_var,
-            width=220, placeholder_text="🔍 Search anchor mutations…",
-        )
-        self._anchor_search_entry.pack(side=tk.RIGHT, padx=(0, 12))
-        self._results_anchor_search_var.trace_add("write", self._filter_anchor_tv)
-
+        self._results_section(cluster_root, 0, "anchor", "Anchor mutations")
         anchor_frame = ctk.CTkFrame(cluster_root)
-        anchor_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        anchor_frame.grid(row=1, column=0, sticky="nsew")
         anchor_frame.grid_rowconfigure(0, weight=1)
         anchor_frame.grid_columnconfigure(0, weight=1)
         self._anchor_tv = self._make_treeview(anchor_frame, _ANCHOR_TV_COLS, self._anchor_visible_cols)
         self._anchor_tv.bind("<<TreeviewSelect>>", self._on_anchor_select)
         self._bind_treeview_zoom_override(self._anchor_tv)
 
-        nearby_header = ctk.CTkFrame(cluster_root, fg_color="transparent")
-        nearby_header.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
-        ctk.CTkLabel(nearby_header, text="Nearby Mutations",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(side=tk.LEFT, padx=(8, 0))
-        ctk.CTkButton(nearby_header, text="⚙  Columns", width=95, height=28,
-                       font=ctk.CTkFont(size=12),
-                       command=lambda: self._open_column_picker("nearby")).pack(side=tk.RIGHT, padx=(0, 6))
-        self._nearby_filter_button = ctk.CTkButton(
-            nearby_header, text="▽  Filter", width=90, height=28,
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._open_filter_picker("nearby"),
-        )
-        self._nearby_filter_button.pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_nearby_search_var = ctk.StringVar(value="")
-        self._nearby_search_entry = ctk.CTkEntry(
-            nearby_header, textvariable=self._results_nearby_search_var,
-            width=220, placeholder_text="🔍 Search nearby mutations…",
-        )
-        self._nearby_search_entry.pack(side=tk.RIGHT, padx=(0, 6))
-        self._results_nearby_search_var.trace_add("write", self._filter_nearby_tv)
-
+        handle = self._results_split_handle(cluster_root, 2)
+        self._results_section(cluster_root, 3, "nearby", "Nearby mutations")
         nearby_frame = ctk.CTkFrame(cluster_root)
-        nearby_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        nearby_frame.grid(row=4, column=0, sticky="nsew")
         nearby_frame.grid_rowconfigure(0, weight=1)
         nearby_frame.grid_columnconfigure(0, weight=1)
         self._nearby_tv = self._make_treeview(nearby_frame, _NEARBY_TV_COLS, self._nearby_visible_cols)
         self._bind_treeview_zoom_override(self._nearby_tv)
+        self._bind_results_splitter(cluster_root, handle, anchor_frame, nearby_frame)
+
+        # Clicking anywhere in a table makes it the toolbar's active table
+        for which, tv in (("ptm", self._ptm_tv), ("mut", self._mut_tv),
+                          ("anchor", self._anchor_tv), ("nearby", self._nearby_tv)):
+            tv.bind("<Button-1>", lambda _e, w=which: self._set_results_active(w), add="+")
+        self._sync_results_toolbar()
 
         # Ctrl+F focuses the active mode's search box whenever the Results tab is active
         self.bind_all("<Control-f>", self._focus_results_search)
+
+    # ── Toolbar / section helpers ───────────────────────────────────────────
+
+    _RESULTS_SEARCH_PLACEHOLDERS = {
+        "ptm": "Search PTM sites…  (Ctrl+F)",
+        "mut": "Search mutation details…  (Ctrl+F)",
+        "anchor": "Search anchor mutations…  (Ctrl+F)",
+        "nearby": "Search nearby mutations…  (Ctrl+F)",
+    }
+
+    def _results_active_which(self) -> str:
+        key = "cluster" if self._results_mode_var.get() == "Mutation Clusters" else "ptm"
+        return self._results_active[key]
+
+    def _results_section(self, parent, row: int, which: str, title: str) -> ctk.CTkFrame:
+        """Small-caps table heading with a hairline rule. Clicking the title
+        makes that table the toolbar's active table. Extra header widgets
+        (e.g. Export) go in column 3 of the returned frame.
+        """
+        head = ctk.CTkFrame(parent, fg_color="transparent", width=0, height=18)
+        head.grid(row=row, column=0, sticky="ew", pady=(8, 4))
+        head.grid_columnconfigure(2, weight=1)
+        title_label = ctk.CTkLabel(
+            head, text=title.upper(), text_color=_GRAY, font=ctk.CTkFont(size=11, weight="bold"),
+        )
+        title_label.grid(row=0, column=0, padx=(0, 8))
+        title_label.bind("<Button-1>", lambda _e: self._set_results_active(which))
+        subtitle = ctk.CTkLabel(head, text="", font=ctk.CTkFont(size=12, weight="bold"))
+        subtitle.grid(row=0, column=1, padx=(0, 10))
+        ctk.CTkFrame(
+            head, width=0, height=1, corner_radius=0, border_width=0, fg_color=theme.pair("line"),
+        ).grid(row=0, column=2, sticky="ew")
+        self._results_titles[which] = title_label
+        self._results_subtitles[which] = subtitle
+        return head
+
+    def _set_results_subtitle(self, which: str, text: str) -> None:
+        self._results_subtitles[which].configure(text=f"·  {text}" if text else "")
+
+    def _results_split_handle(self, parent, row: int) -> ctk.CTkFrame:
+        handle = ctk.CTkFrame(
+            parent, height=8, width=0, corner_radius=0, border_width=0,
+            fg_color="transparent", cursor="sb_v_double_arrow",
+        )
+        handle.grid(row=row, column=0, sticky="ew")
+        grip = ctk.CTkFrame(
+            handle, width=40, height=3, corner_radius=2, border_width=0, fg_color=theme.pair("line"),
+        )
+        grip.place(relx=0.5, rely=0.5, anchor="center")
+        grip.configure(cursor="sb_v_double_arrow")
+        return handle
+
+    def _bind_results_splitter(self, root, handle, top_frame, bottom_frame) -> None:
+        """Drag *handle* to trade height between the two tables. Rows share a
+        `uniform` group so their weights split the space proportionally,
+        ignoring each Treeview's own requested height.
+        """
+        def _apply(ratio: float) -> None:
+            ratio = max(0.12, min(0.88, ratio))
+            root.grid_rowconfigure(1, weight=max(1, int(ratio * 100)), uniform="split")
+            root.grid_rowconfigure(4, weight=max(1, int((1 - ratio) * 100)), uniform="split")
+
+        def _drag(event) -> None:
+            top = top_frame.winfo_rooty()
+            total = bottom_frame.winfo_rooty() + bottom_frame.winfo_height() - top
+            if total > 50:
+                _apply((event.y_root - top) / total)
+
+        for w in (handle, *handle.winfo_children()):
+            w.bind("<B1-Motion>", _drag)
+        _apply(0.6)
+
+    def _set_results_active(self, which: str) -> None:
+        key = "cluster" if which in ("anchor", "nearby") else "ptm"
+        self._results_active[key] = which
+        self._sync_results_toolbar()
+
+    def _sync_results_toolbar(self) -> None:
+        """Point the toolbar's search box and Filter button at the active table,
+        and highlight that table's heading.
+        """
+        which = self._results_active_which()
+        entry = self._results_search_entry
+        entry.configure(placeholder_text=self._RESULTS_SEARCH_PLACEHOLDERS[which])
+        text = getattr(self, f"_results_{which}_search_var").get()
+        entry.delete(0, "end")
+        if text:
+            entry.insert(0, text)
+        elif entry.focus_get() is not entry:
+            entry._activate_placeholder()
+        self._update_filter_button_label(which)
+        in_cluster = which in ("anchor", "nearby")
+        for name, label in self._results_titles.items():
+            if (name in ("anchor", "nearby")) == in_cluster:
+                label.configure(text_color=_BLUE if name == which else _GRAY)
+
+    def _on_results_search_key(self, _event=None) -> None:
+        getattr(self, f"_results_{self._results_active_which()}_search_var").set(
+            self._results_search_entry.get(),
+        )
+
+    def _visualize_for_mode(self) -> None:
+        if self._results_mode_var.get() == "Mutation Clusters":
+            self._visualize_selected_cluster()
+        else:
+            self._visualize_selected_ptm()
 
     def _on_results_mode_change(self, _value: str = "") -> None:
         cluster = self._results_mode_var.get() == "Mutation Clusters"
@@ -750,8 +836,9 @@ class ResultsTabMixin:
         else:
             self._cluster_mode_frame.grid_remove()
             self._ptm_mode_frame.grid()
-            self._results_source_toggle.pack(side="left", padx=(12, 0), before=self._results_status)
+            self._results_source_toggle.pack(side="left", padx=(10, 0), after=self._results_mode_seg)
         self._refresh_results_status()
+        self._sync_results_toolbar()
         self._load_results()
 
     def _results_ptm_source(self) -> str:
@@ -784,7 +871,7 @@ class ResultsTabMixin:
             self._results_status.configure(
                 text=f"{self._results_ptm_source_label()}: {n_sites} PTM sites · "
                      f"{n_proteins} proteins{long_note}",
-                text_color="gray60",
+                text_color=_GRAY,
             )
         else:
             if self._cluster_df_wide is None:
@@ -798,7 +885,7 @@ class ResultsTabMixin:
                          else " · enable long format for per-mutation detail")
             self._results_status.configure(
                 text=f"{n_anchors} anchor mutations · {n_proteins} proteins{long_note}",
-                text_color="gray60",
+                text_color=_GRAY,
             )
 
     def _filter_ptm_tv(self, *_args) -> None:
@@ -860,9 +947,7 @@ class ResultsTabMixin:
     def _focus_results_search(self, event=None):
         """Ctrl+F: focus the active mode's search box, but only while the Results tab is showing."""
         if self._tabview.get() == "Results":
-            entry = (self._ptm_search_entry if self._results_mode_var.get() == "PTM Proximity"
-                     else self._anchor_search_entry)
-            entry.focus_set()
+            self._results_search_entry.focus_set()
             return "break"
 
     @staticmethod
@@ -914,7 +999,7 @@ class ResultsTabMixin:
                 self._clear_treeview_fully(tv, getattr(self, attr))
                 setattr(self, attr, [])
                 self._show_tv_message(tv, "Loading data…")
-        self._results_status.configure(text="Loading data…", text_color="gray60")
+        self._results_status.configure(text="Loading data…", text_color=_GRAY)
         self._refresh_button.configure(state="disabled")
         self._results_loading = True
         results: dict = {}
@@ -1127,6 +1212,7 @@ class ResultsTabMixin:
         if not sel or self._results_df_wide is None:
             return
         row = self._results_df_wide.iloc[int(sel[0]) - 1]
+        self._set_results_subtitle("mut", f"{row.get('gene', '')} {row.get('ptm_site', '')}".strip())
         if self._results_df_long is not None:
             uid  = row.get("UniProt", "")
             site = row.get("ptm_site", "")
@@ -1172,6 +1258,9 @@ class ResultsTabMixin:
         if not sel or self._cluster_df_wide is None:
             return
         row = self._cluster_df_wide.iloc[int(sel[0]) - 1]
+        self._set_results_subtitle(
+            "nearby", f"{row.get('gene', '')} {row.get('anchor_mutation', '')}".strip(),
+        )
         if self._cluster_df_long is not None:
             uid = row.get("UniProt", "")
             anchor = row.get("anchor_mutation", "")

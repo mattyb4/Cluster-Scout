@@ -13,9 +13,14 @@ from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
-from PIL import Image
 
+from ui import theme
 from ui.common import (
+    _BTN2,
+    _BTN2_HOVER,
+    _CHIP,
+    _CHIP_HOVER,
+    _DANGER,
     _GRAY,
     _GREEN,
     _INPUT_FOLDERS,
@@ -26,68 +31,67 @@ from ui.common import (
     _RED,
     _YELLOW,
     OUTPUT_DIR,
-    PROJECT_ROOT,
     add_resize_grip,
     color_swatch_button,
     discover_psp_files,
     extract_uniprot_from_cif,
     help_icon,
     isolate_textbox_scroll,
+    load_logo_image,
     pipeline_steps,
     psp_folder_summary,
     resolve_input_file,
+    section_header,
     validate_psp_folder,
 )
+
+_LABEL_W = 120  # shared label column width, so every control starts on the same line
 
 
 class PipelineTabMixin:
     def _build_pipeline_tab(self, tab) -> None:
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)  # scroll area; the run bar below it stays pinned
 
-        scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        # Explicit fg_color (not "transparent"): children of a transparent CTkScrollableFrame
+        # capture a static bg color at construction and show stale corners after a light/dark switch.
+        scroll = ctk.CTkScrollableFrame(tab, fg_color=theme.pair("bg"))
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
-        p = scroll  # all pipeline widgets go in the scrollable frame
+        # One content column spanning the window
+        content = ctk.CTkFrame(scroll, fg_color="transparent", border_width=0)
+        content.grid(row=0, column=0, sticky="ew", padx=24)
+        content.grid_columnconfigure(0, weight=1)
+        p = content  # all pipeline widgets go in the content column
 
-        # Title
-        _logo_path_dark = PROJECT_ROOT / "cluster_scout_logo_dark.png"
-        if _logo_path_dark.exists():
-            _pil_dark = Image.open(_logo_path_dark)
-            _h = 200
-            _w = int(_pil_dark.width * _h / _pil_dark.height)
-            _logo_img = ctk.CTkImage(
-                light_image=_pil_dark,
-                dark_image=_pil_dark,
-                size=(_w, _h),
-            )
-            ctk.CTkLabel(p, image=_logo_img, text="").grid(
-                row=0, column=0, padx=24, pady=(12, 4), sticky="w"
-            )
+        # Header: the logo
+        header = ctk.CTkFrame(p, fg_color="transparent")
+        header.grid(row=0, column=0, pady=(10, 0), sticky="ew")
+        header.grid_columnconfigure(1, weight=1)
+        logo = load_logo_image(104)
+        if logo is not None:
+            ctk.CTkLabel(header, image=logo, text="").grid(row=0, column=0, sticky="w")
         else:
             ctk.CTkLabel(
-                p,
-                text="Cluster-Scout",
-                font=ctk.CTkFont(size=22, weight="bold"),
-            ).grid(row=0, column=0, padx=24, pady=(12, 4), sticky="w")
+                header, text="Cluster-Scout", font=ctk.CTkFont(size=22, weight="bold"),
+            ).grid(row=0, column=0, sticky="w")
 
         # Data-file status bar with Browse buttons
-        self._file_frame = ctk.CTkFrame(p)
-        self._file_frame.grid(row=1, column=0, padx=24, pady=4, sticky="ew")
+        # Each of the three main sections (input files, run settings, steps) is a bordered card
+        file_card = ctk.CTkFrame(p)
+        file_card.grid(row=1, column=0, pady=(14, 0), sticky="ew")
+        file_card.grid_columnconfigure(0, weight=1)
+        section_header(file_card, "Input files", row=0, pady=(12, 4), padx=14)
+        self._file_frame = ctk.CTkFrame(file_card, fg_color="transparent")
+        self._file_frame.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
         self._file_frame.grid_columnconfigure(1, weight=1)
         self._file_indicators: dict[str, ctk.CTkLabel] = {}
         self._file_buttons: dict[str, ctk.CTkButton] = {}
 
-        ctk.CTkLabel(
-            self._file_frame,
-            text="Input files:",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
-
         for i, (name, (folder, exts, desc, validator)) in enumerate(_INPUT_FOLDERS.items(), 1):
             lbl = ctk.CTkLabel(self._file_frame, text=f"{name} …", anchor="w")
-            lbl.grid(row=i, column=0, columnspan=2, padx=(12, 6), pady=3, sticky="ew")
+            lbl.grid(row=i, column=0, columnspan=2, padx=(0, 6), pady=3, sticky="ew")
             self._file_indicators[name] = lbl
 
             filetypes = [(desc, " ".join(f"*{e}" for e in exts))]
@@ -99,29 +103,34 @@ class PipelineTabMixin:
                 font=ctk.CTkFont(size=12),
                 command=lambda n=name, f=folder, ft=filetypes, v=validator: self._browse_file(n, f, ft, v),
             )
-            btn.grid(row=i, column=2, padx=12, pady=3, sticky="e")
+            btn.grid(row=i, column=2, padx=(12, 0), pady=3, sticky="e")
             self._file_buttons[name] = btn
 
         # PhosphoSitePlus is a folder of files, so it gets its own row and a
         # folder picker instead of the single-file Browse above
         psp_row = len(_INPUT_FOLDERS) + 1
         self._psp_file_indicator = ctk.CTkLabel(self._file_frame, text="PhosphoSitePlus …", anchor="w")
-        self._psp_file_indicator.grid(row=psp_row, column=0, columnspan=2, padx=(12, 6), pady=3, sticky="ew")
+        self._psp_file_indicator.grid(row=psp_row, column=0, columnspan=2, padx=(0, 6), pady=3, sticky="ew")
         ctk.CTkButton(
             self._file_frame, text="Browse", width=70, height=26,
             font=ctk.CTkFont(size=12), command=self._browse_psp_folder,
-        ).grid(row=psp_row, column=2, padx=12, pady=3, sticky="e")
+        ).grid(row=psp_row, column=2, padx=(12, 0), pady=3, sticky="e")
 
         # Mode selection, with PTM Proximity's PTM-source selector underneath
         # (packed/unpacked in _rebuild_step_rows as the mode changes)
-        mode_area = ctk.CTkFrame(p, fg_color="transparent")
-        mode_area.grid(row=2, column=0, padx=24, pady=4, sticky="ew")
-        mode_frame = ctk.CTkFrame(mode_area)
+        settings_card = ctk.CTkFrame(p)
+        settings_card.grid(row=2, column=0, pady=(14, 0), sticky="ew")
+        settings_card.grid_columnconfigure(0, weight=1)
+        section_header(settings_card, "Run settings", row=0, pady=(12, 4), padx=14)
+        mode_area = ctk.CTkFrame(settings_card, fg_color="transparent")
+        mode_area.grid(row=1, column=0, padx=14, pady=2, sticky="ew")
+        ctk.CTkFrame(settings_card, fg_color="transparent", width=0, height=8).grid(row=6, column=0)  # bottom padding
+        mode_frame = ctk.CTkFrame(mode_area, fg_color="transparent")
         mode_frame.pack(fill="x")
 
         ctk.CTkLabel(
-            mode_frame, text="Mode:", font=ctk.CTkFont(weight="bold")
-        ).pack(side="left", padx=(12, 8), pady=10)
+            mode_frame, text="Mode", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 8), pady=8)
 
         self._mode = ctk.StringVar(value="ptm-proximity")
         for label, value in [
@@ -136,13 +145,13 @@ class PipelineTabMixin:
                 variable=self._mode,
                 value=value,
                 command=self._rebuild_step_rows,
-            ).pack(side="left", padx=(8, 0), pady=10)
-            help_icon(mode_frame, _MODE_HELP[value]).pack(side="left", padx=(4, 8), pady=10)
+            ).pack(side="left", padx=(8, 0), pady=8)
+            help_icon(mode_frame, _MODE_HELP[value]).pack(side="left", padx=(4, 8), pady=8)
 
-        self._ptm_source_frame = ctk.CTkFrame(mode_area)
+        self._ptm_source_frame = ctk.CTkFrame(mode_area, fg_color="transparent")
         ctk.CTkLabel(
-            self._ptm_source_frame, text="PTM source:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(12, 8), pady=8)
+            self._ptm_source_frame, text="PTM source", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 8), pady=6)
         self._ptm_source_var = ctk.StringVar(value=_PTM_SOURCE_OPTIONS[0][0])
         ctk.CTkSegmentedButton(
             self._ptm_source_frame, values=[label for label, _ in _PTM_SOURCE_OPTIONS],
@@ -159,14 +168,14 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(6, 8), pady=8)
 
         # Output folder selector
-        out_frame = ctk.CTkFrame(p)
-        out_frame.grid(row=3, column=0, padx=24, pady=4, sticky="ew")
+        out_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
+        out_frame.grid(row=2, column=0, padx=14, pady=2, sticky="ew")
         out_frame.grid_columnconfigure(1, weight=1)
 
         self._output_dir_label = ctk.CTkLabel(
-            out_frame, text="Output folder:", font=ctk.CTkFont(weight="bold"),
+            out_frame, text="Output folder", width=_LABEL_W, anchor="w",
         )
-        self._output_dir_label.grid(row=0, column=0, padx=(12, 6), pady=8, sticky="w")
+        self._output_dir_label.grid(row=0, column=0, padx=(0, 8), pady=6, sticky="w")
 
         # Shared root for ptm-proximity/mutation-clustering/single-protein (they
         # intentionally write into the same output DB files); Structure Heatmaps
@@ -179,7 +188,7 @@ class PipelineTabMixin:
         self._output_dir_entry = ctk.CTkEntry(
             out_frame, textvariable=self._output_dir_var, state="readonly",
         )
-        self._output_dir_entry.grid(row=0, column=1, padx=6, pady=8, sticky="ew")
+        self._output_dir_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
 
         ctk.CTkButton(
             out_frame, text="Change", width=70, height=26,
@@ -189,20 +198,20 @@ class PipelineTabMixin:
 
         ctk.CTkButton(
             out_frame, text="Reset", width=60, height=26,
-            font=ctk.CTkFont(size=12), fg_color="gray30", hover_color="gray40",
+            font=ctk.CTkFont(size=12), fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: self._active_output_dir_var().set(str(self._active_output_dir_default())),
-        ).grid(row=0, column=3, padx=(0, 12), pady=8, sticky="e")
+        ).grid(row=0, column=3, padx=(0, 0), pady=6, sticky="e")
 
         # Pipeline settings (ptm-proximity, mutation-clustering, AND single-protein
         # -- analyze_single_cif_nearby_mutations.py accepts all four of these too)
-        settings_frame = self._settings_frame = ctk.CTkFrame(p)
-        settings_frame.grid(row=4, column=0, padx=24, pady=4, sticky="ew")
+        settings_frame = self._settings_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
+        settings_frame.grid(row=3, column=0, padx=14, pady=2, sticky="ew")
 
         ctk.CTkLabel(
-            settings_frame, text="Settings:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(12, 8), pady=8)
+            settings_frame, text="Thresholds", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 8), pady=6)
 
-        ctk.CTkLabel(settings_frame, text="Cutoff (Å):").pack(side="left", padx=(8, 4), pady=8)
+        ctk.CTkLabel(settings_frame, text="Cutoff (Å):").pack(side="left", padx=(0, 4), pady=6)
         help_icon(
             settings_frame,
             "Maximum 3D distance, in Ångströms, between a PTM site and a "
@@ -256,12 +265,12 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(0, 12), pady=8)
 
         # PolyPhen filter
-        pp_frame = self._pp_frame = ctk.CTkFrame(p)
-        pp_frame.grid(row=5, column=0, padx=24, pady=4, sticky="ew")
+        pp_frame = self._pp_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
+        pp_frame.grid(row=4, column=0, padx=14, pady=2, sticky="ew")
 
         ctk.CTkLabel(
-            pp_frame, text="PolyPhen filter:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(12, 4), pady=8)
+            pp_frame, text="PolyPhen filter", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 4), pady=6)
 
         self._pp_benign_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -286,12 +295,12 @@ class PipelineTabMixin:
 
         # PhosphoSitePlus site filters -- only shown for PTM Proximity with the
         # PhosphoSitePlus source (see _rebuild_step_rows); applied in step 1
-        psp_frame = self._psp_filter_frame = ctk.CTkFrame(p)
-        psp_frame.grid(row=6, column=0, padx=24, pady=4, sticky="ew")
+        psp_frame = self._psp_filter_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
+        psp_frame.grid(row=5, column=0, padx=14, pady=2, sticky="ew")
 
         ctk.CTkLabel(
-            psp_frame, text="PhosphoSitePlus filters:", font=ctk.CTkFont(weight="bold"),
-        ).pack(side="left", padx=(12, 4), pady=8)
+            psp_frame, text="PSP site filters", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 4), pady=6)
 
         for kind, label, help_text in (
             ("ltp", "LTP", "Keep only sites whose LTP count - literature records from "
@@ -326,56 +335,62 @@ class PipelineTabMixin:
         ).pack(side="left", padx=(0, 12), pady=8)
 
         # Steps panel
-        self._steps_outer = ctk.CTkFrame(p)
-        self._steps_outer.grid(row=7, column=0, padx=24, pady=4, sticky="ew")
+        steps_card = ctk.CTkFrame(p)
+        steps_card.grid(row=3, column=0, pady=(14, 0), sticky="ew")
+        steps_card.grid_columnconfigure(0, weight=1)
+        self._steps_outer = ctk.CTkFrame(steps_card, fg_color="transparent")
+        self._steps_outer.grid(row=0, column=0, padx=14, pady=(0, 10), sticky="ew")
         self._steps_outer.grid_columnconfigure(1, weight=1)
         self._rebuild_step_rows()
 
-        # Buttons
-        btn_frame = ctk.CTkFrame(p, fg_color="transparent")
-        btn_frame.grid(row=8, column=0, padx=24, pady=8, sticky="ew")
+        # Run bar, pinned under the scroll area so Run/Stop are always visible
+        ctk.CTkFrame(
+            tab, width=0, height=1, corner_radius=0, border_width=0, fg_color=theme.pair("line"),
+        ).grid(row=1, column=0, sticky="ew")
+        btn_frame = ctk.CTkFrame(tab, fg_color=theme.pair("surface"), corner_radius=0, border_width=0)
+        btn_frame.grid(row=2, column=0, sticky="ew")
 
         self._run_btn = ctk.CTkButton(
             btn_frame,
             text="▶  Run Pipeline",
             command=self._start_pipeline,
-            width=160,
-            height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            width=150,
+            height=36,
+            font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self._run_btn.pack(side="left", padx=(0, 8))
+        self._run_btn.pack(side="left", padx=(24, 8), pady=10)
 
         self._stop_btn = ctk.CTkButton(
             btn_frame,
             text="■  Stop",
             command=self._stop_pipeline,
             width=110,
-            height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            height=36,
+            font=ctk.CTkFont(size=14, weight="bold"),
             state="disabled",
-            fg_color="gray30",
-            hover_color=_RED,
+            fg_color=_BTN2,
+            hover_color=_DANGER,
         )
-        self._stop_btn.pack(side="left", padx=(0, 12))
+        self._stop_btn.pack(side="left", padx=(0, 8), pady=10)
 
         self._open_btn = ctk.CTkButton(
             btn_frame,
             text="Open Output Folder",
             command=self._open_output_folder,
-            width=180,
-            height=44,
+            width=160,
+            height=36,
         )
-        self._open_btn.pack(side="left")
+        self._open_btn.pack(side="left", pady=10)
 
         ctk.CTkButton(
             btn_frame,
             text="Manage Cache",
             command=self._manage_cache,
             width=140,
-            height=44,
-            fg_color="gray30",
-            hover_color="gray40",
-        ).pack(side="left", padx=(8, 0))
+            height=36,
+            fg_color=_BTN2,
+            hover_color=_BTN2_HOVER,
+        ).pack(side="left", padx=(8, 0), pady=10)
 
         self._timer_label = ctk.CTkLabel(
             btn_frame,
@@ -383,7 +398,7 @@ class PipelineTabMixin:
             text_color=_GRAY,
             font=ctk.CTkFont(size=13),
         )
-        self._timer_label.pack(side="right", padx=12)
+        self._timer_label.pack(side="right", padx=(12, 24))
 
         import tkinter as tk
         self._activity_width = 40
@@ -391,7 +406,7 @@ class PipelineTabMixin:
         self._activity_chunk = 12
         self._activity_canvas = tk.Canvas(
             btn_frame, width=self._activity_width, height=self._activity_height,
-            highlightthickness=0, bg="#333333", bd=0,
+            highlightthickness=0, bg=theme.c("line"), bd=0,
         )
         self._activity_canvas.pack(side="right", padx=(0, 4))
         self._activity_canvas.pack_forget()
@@ -406,11 +421,11 @@ class PipelineTabMixin:
             width=120,
             height=28,
             font=ctk.CTkFont(size=12),
-            fg_color="gray30",
-            hover_color="gray40",
+            fg_color=_BTN2,
+            hover_color=_BTN2_HOVER,
             command=self._toggle_log,
         )
-        self._log_toggle.grid(row=9, column=0, padx=24, pady=(8, 0), sticky="w")
+        self._log_toggle.grid(row=4, column=0, pady=(14, 0), sticky="w")
 
         self._log_frame = ctk.CTkFrame(p, fg_color="transparent")
         self._log = ctk.CTkTextbox(
@@ -419,6 +434,8 @@ class PipelineTabMixin:
             font=ctk.CTkFont(family="Courier New", size=12),
             wrap="word",
             state="disabled",
+            border_width=1,
+            border_color=theme.pair("line"),
         )
         self._log.pack(fill="both", expand=True)
         isolate_textbox_scroll(self._log)
@@ -509,9 +526,9 @@ class PipelineTabMixin:
         mode = self._mode.get()
         self._output_dir_entry.configure(textvariable=self._active_output_dir_var())
         if mode == "ca-coordinates":
-            self._output_dir_label.configure(text="Output folder (Structure Heatmaps):")
+            self._output_dir_label.configure(text="Heatmap folder")
         else:
-            self._output_dir_label.configure(text="Output folder:")
+            self._output_dir_label.configure(text="Output folder")
 
     def _rebuild_step_rows(self):
         for w in self._steps_outer.winfo_children():
@@ -552,15 +569,11 @@ class PipelineTabMixin:
 
         steps = pipeline_steps(mode, self._ptm_source())
 
-        ctk.CTkLabel(
-            self._steps_outer,
-            text="Steps",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=4, padx=12, pady=(8, 2), sticky="w")
+        section_header(self._steps_outer, "Steps", row=0, columnspan=4)
 
         for i, (panel_label, _log_label) in enumerate(steps, 1):
-            ctk.CTkLabel(self._steps_outer, text=f"  {i}.", width=28).grid(
-                row=i, column=0, padx=(12, 0), pady=5, sticky="w"
+            ctk.CTkLabel(self._steps_outer, text=f"{i}.", width=28, anchor="w").grid(
+                row=i, column=0, padx=(0, 0), pady=5, sticky="w"
             )
             ctk.CTkLabel(self._steps_outer, text=panel_label, anchor="w").grid(
                 row=i, column=1, padx=6, pady=5, sticky="ew"
@@ -579,16 +592,12 @@ class PipelineTabMixin:
                 anchor="e",
                 text_color=_GRAY,
             )
-            status.grid(row=i, column=3, padx=12, pady=5, sticky="e")
+            status.grid(row=i, column=3, padx=(12, 0), pady=5, sticky="e")
             self._step_status_labels.append(status)
 
     def _build_single_protein_panel(self):
         """Build the input fields for single-protein analysis mode."""
-        ctk.CTkLabel(
-            self._steps_outer,
-            text="Single Protein Analysis",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
+        section_header(self._steps_outer, "Single protein analysis", row=0, columnspan=3)
 
         # CIF file picker
         ctk.CTkLabel(self._steps_outer, text="CIF file:", anchor="w").grid(
@@ -647,11 +656,7 @@ class PipelineTabMixin:
 
     def _build_ca_coordinates_panel(self):
         """Build the input fields for Structure Heatmaps mode (CA-coordinate export)."""
-        ctk.CTkLabel(
-            self._steps_outer,
-            text="Structure Heatmaps",
-            font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(8, 2), sticky="w")
+        section_header(self._steps_outer, "Structure heatmaps", row=0, columnspan=3)
 
         # Source toggle: batch of database-backed proteins, or one caller-provided CIF
         source_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
@@ -787,9 +792,7 @@ class PipelineTabMixin:
             self._rebuild_step_rows()
 
         # Heatmaps section
-        ctk.CTkLabel(
-            self._steps_outer, text="Heatmaps:", font=ctk.CTkFont(weight="bold"),
-        ).grid(row=3, column=0, columnspan=3, padx=12, pady=(10, 2), sticky="w")
+        section_header(self._steps_outer, "Heatmaps", row=3, columnspan=3, pady=(14, 4))
 
         # Mutation heatmap
         if not hasattr(self, "_ca_mutation_heatmap_var"):
@@ -820,7 +823,7 @@ class PipelineTabMixin:
         color_swatch_button(mut_colors_frame, self._ca_mutation_high_var).pack(side="left")
         ctk.CTkButton(
             mut_colors_frame, text="↺", width=24, height=22,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: _reset_colors(
                 (self._ca_mutation_low_var, MUTATION_DEFAULT_LOW_COLOR),
                 (self._ca_mutation_mid_var, MUTATION_DEFAULT_MID_COLOR),
@@ -911,7 +914,7 @@ class PipelineTabMixin:
         color_swatch_button(plddt_colors_frame, self._ca_plddt_high_var).pack(side="left")
         ctk.CTkButton(
             plddt_colors_frame, text="↺", width=24, height=22,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: _reset_colors(
                 (self._ca_plddt_low_var, PLDDT_DEFAULT_LOW_COLOR),
                 (self._ca_plddt_mid_var, PLDDT_DEFAULT_MID_COLOR),
@@ -947,7 +950,7 @@ class PipelineTabMixin:
         color_swatch_button(ptm_frame, self._ca_ptm_marker_color_var).pack(side="left", padx=(8, 0))
         ctk.CTkButton(
             ptm_frame, text="↺", width=24, height=22,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: _reset_colors((self._ca_ptm_marker_color_var, PTM_MARKER_DEFAULT_COLOR)),
         ).pack(side="left", padx=(4, 0))
 
@@ -973,7 +976,7 @@ class PipelineTabMixin:
         color_swatch_button(mut_marker_frame, self._ca_mutation_marker_color_var).pack(side="left", padx=(8, 0))
         ctk.CTkButton(
             mut_marker_frame, text="↺", width=24, height=22,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: _reset_colors(
                 (self._ca_mutation_marker_color_var, MUTATION_MARKER_DEFAULT_COLOR),
             ),
@@ -1140,14 +1143,14 @@ class PipelineTabMixin:
             if i % 6 == 0:
                 row = ctk.CTkFrame(self._ca_proteins_list_frame, fg_color="transparent")
                 row.pack(anchor="w", pady=(0, 4))
-            chip = ctk.CTkFrame(row, fg_color="#3a3a3a", corner_radius=6)
+            chip = ctk.CTkFrame(row, fg_color=_CHIP, corner_radius=6)
             chip.pack(side="left", padx=(0, 6))
             ctk.CTkLabel(chip, text=token, font=ctk.CTkFont(size=12)).pack(
                 side="left", padx=(8, 4), pady=4,
             )
             ctk.CTkButton(
                 chip, text="✕", width=20, height=20, fg_color="transparent",
-                hover_color="#4a4a4a", font=ctk.CTkFont(size=11),
+                hover_color=_CHIP_HOVER, font=ctk.CTkFont(size=11),
                 command=lambda t=token: self._remove_ca_protein(t),
             ).pack(side="left", padx=(0, 6), pady=4)
 
@@ -1275,7 +1278,7 @@ class PipelineTabMixin:
             self._log_toggle.configure(text="Show Details")
             self._log_visible = False
         else:
-            self._log_frame.grid(row=10, column=0, padx=24, pady=(6, 12), sticky="ew")
+            self._log_frame.grid(row=5, column=0, pady=(6, 16), sticky="ew")
             self._log_toggle.configure(text="Hide Details")
             self._log_visible = True
 

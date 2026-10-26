@@ -22,11 +22,18 @@ from pathlib import Path
 import customtkinter as ctk
 import psutil
 
+from ui import theme
 from ui.common import (
     _BLUE,
+    _BTN2,
+    _BTN2_HOVER,
     _CACHE_ITEMS,
+    _DANGER,
+    _DANGER_HOVER,
     _GRAY,
     _GREEN,
+    _PRIMARY,
+    _PRIMARY_HOVER,
     _PSP_INPUT_FOLDER,
     _RED,
     _YELLOW,
@@ -82,6 +89,10 @@ class PipelineRunnerMixin:
 
     # ── Activity animation ─────────────────────────────────────────────────
 
+    def _retheme_pipeline(self) -> None:
+        """Re-apply theme colors to the plain-Tk activity-bar canvas."""
+        self._activity_canvas.configure(bg=theme.c("line"))
+
     def _start_activity_animation(self):
         self._activity_animating = True
         self._activity_pos = -self._activity_chunk
@@ -100,7 +111,7 @@ class PipelineRunnerMixin:
         if x2 > x1:
             self._activity_canvas.create_rectangle(
                 x1, 0, x2, self._activity_height,
-                fill=_BLUE, outline="", tags="chunk",
+                fill=theme.resolve(_BLUE), outline="", tags="chunk",
             )
         self._activity_pos += 1
         if self._activity_pos > self._activity_width:
@@ -272,7 +283,7 @@ class PipelineRunnerMixin:
         self._stop_requested = False
         self._suspended = False
         self._set_run_controls(True)
-        self._stop_btn.configure(state="normal", fg_color=_RED)
+        self._stop_btn.configure(state="normal", fg_color=_DANGER)
         self._timer_label.configure(text="")
 
         self._log.configure(state="normal")
@@ -400,7 +411,7 @@ class PipelineRunnerMixin:
                 pass
             if actually_suspended:
                 self._signal_1433_prefetch("suspend")
-        self._stop_btn.configure(state="disabled", fg_color="gray30")
+        self._stop_btn.configure(state="disabled", fg_color=_BTN2)
         if actually_suspended:
             self._paused_elapsed = time.time() - self._pipeline_start
             self._stop_activity_animation()
@@ -415,8 +426,8 @@ class PipelineRunnerMixin:
                 width=110,
                 height=44,
                 font=ctk.CTkFont(size=15, weight="bold"),
-                fg_color=_RED,
-                hover_color="#b82020",
+                fg_color=_DANGER,
+                hover_color=_DANGER_HOVER,
             )
             self._cancel_btn_ref.pack(side="left", padx=(8, 0))
             self._q("log", "Pipeline paused.")
@@ -443,7 +454,7 @@ class PipelineRunnerMixin:
         self._run_btn.configure(
             state="disabled", text="▶  Run Pipeline", command=self._start_pipeline,
         )
-        self._stop_btn.configure(state="normal", fg_color=_RED)
+        self._stop_btn.configure(state="normal", fg_color=_DANGER)
         self._activity_canvas.pack(side="right", padx=(0, 4))
         self._start_activity_animation()
         self._tick()
@@ -468,8 +479,8 @@ class PipelineRunnerMixin:
         self._run_btn.configure(
             state="normal", text="▶  Run Pipeline", command=self._start_pipeline,
         )
-        self._stop_btn.configure(state="disabled", fg_color="gray30")
-        self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
+        self._stop_btn.configure(state="disabled", fg_color=_BTN2)
+        self._open_btn.configure(state="normal", fg_color=_PRIMARY, hover_color=_PRIMARY_HOVER)
         for lbl in self._step_status_labels:
             lbl.configure(text="●  Waiting", text_color=_GRAY)
         for bar in self._step_progress_bars:
@@ -1336,7 +1347,7 @@ class PipelineRunnerMixin:
                         self._analysis_subtool_var.set("CIF Variance")
                         self._draw_cif_variance_plot()
                 elif kind == "enable_open":
-                    self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
+                    self._open_btn.configure(state="normal", fg_color=_PRIMARY, hover_color=_PRIMARY_HOVER)
                 elif kind == "finished":
                     was_cancelled = self._stop_requested
                     self._running = False
@@ -1354,8 +1365,8 @@ class PipelineRunnerMixin:
                         command=self._start_pipeline,
                     )
                     self._at_run_btn.configure(state="normal")
-                    self._stop_btn.configure(state="disabled", fg_color="gray30")
-                    self._open_btn.configure(state="normal", fg_color=_BLUE, hover_color="#2563eb")
+                    self._stop_btn.configure(state="disabled", fg_color=_BTN2)
+                    self._open_btn.configure(state="normal", fg_color=_PRIMARY, hover_color=_PRIMARY_HOVER)
                     if was_cancelled:
                         for lbl in self._step_status_labels:
                             lbl.configure(text="●  Waiting", text_color=_GRAY)
@@ -1472,7 +1483,7 @@ class PipelineRunnerMixin:
 
         ctk.CTkButton(
             btn_frame, text="Skip", width=100,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=dialog.destroy,
         ).pack(side="left", padx=6)
 
@@ -1566,14 +1577,14 @@ class PipelineRunnerMixin:
 
             ctk.CTkButton(
                 dialog, text="Clear", width=64,
-                fg_color="gray30", hover_color=_RED,
+                fg_color=_BTN2, hover_color=_DANGER,
                 command=lambda p=path, d=is_dir, lbl=count_lbl: _clear(p, d, lbl),
             ).grid(row=row, column=3, padx=(0, 20), pady=3)
 
         bottom_row = 3 + len(_CACHE_ITEMS)
         ctk.CTkButton(
             dialog, text="Clear All Caches",
-            fg_color="gray30", hover_color=_RED,
+            fg_color=_BTN2, hover_color=_DANGER,
             command=_clear_all,
         ).grid(row=bottom_row, column=0, columnspan=4, padx=20, pady=(10, 16), sticky="ew")
 

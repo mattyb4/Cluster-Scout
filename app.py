@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.2.0"
 
 
 def _fix_tcl_tk_library_paths() -> None:
@@ -45,16 +45,25 @@ import tkinter as tk  # noqa: E402
 import customtkinter as ctk  # noqa: E402
 from PIL import Image, ImageTk  # noqa: E402
 
+from ui import theme  # noqa: E402
 from ui.analysis_tools_tab import AnalysisToolsTabMixin  # noqa: E402
-from ui.common import _BLUE, MAX_UI_SCALE, MIN_UI_SCALE, PROJECT_ROOT, UI_SCALE_STEP  # noqa: E402
+from ui.common import (  # noqa: E402
+    _BLUE,
+    MAX_UI_SCALE,
+    MIN_UI_SCALE,
+    PROJECT_ROOT,
+    UI_PREFS_FILE,
+    UI_SCALE_STEP,
+    load_logo_image,
+)
 from ui.help_tab import HelpTabMixin  # noqa: E402
 from ui.pipeline_panels import PipelineTabMixin  # noqa: E402
 from ui.pipeline_runner import PipelineRunnerMixin  # noqa: E402
 from ui.results_tab import ResultsTabMixin  # noqa: E402
+from ui.tabs import HciTabview  # noqa: E402
 from ui.visualization_tab import VisualizationTabMixin  # noqa: E402
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
+theme.init(UI_PREFS_FILE)  # HCI light/dark theme; saved mode defaults to dark
 
 
 def _patch_customtkinter_textbox_scroll_callback() -> None:
@@ -109,9 +118,9 @@ def _patch_customtkinter_scaling_tracker() -> None:
 def _patch_customtkinter_appearance_mode_tracker() -> None:
     """AppearanceModeTracker polls every 30ms forever to detect a live OS-level
     light/dark mode change via darkdetect. This app hardcodes
-    ctk.set_appearance_mode("dark") once at import and never offers a way to
-    change it at runtime, so the loop this exists for never applies -- skip
-    it on every platform.
+    theme.init() once at import and only ever sets an explicit light/dark mode
+    (via the toggle button, which calls set_appearance_mode directly), so the
+    OS-follow loop this exists for never applies -- skip it on every platform.
     """
     try:
         from customtkinter.windows.widgets.appearance_mode import appearance_mode_tracker
@@ -125,47 +134,9 @@ def _patch_customtkinter_appearance_mode_tracker() -> None:
     appearance_mode_tracker.AppearanceModeTracker.update = _noop_update
 
 
-def _patch_customtkinter_tabview_switch() -> None:
-    """CTkTabview switches tabs by grid_forget()-ing the outgoing frame and
-    grid()-ing the incoming one -- on Tk's macOS Aqua backend each widget is a
-    real Cocoa NSView, so unmapping/mapping a tab's whole subtree is a genuine
-    per-widget Cocoa operation, causing a 50-211ms main-thread stall per switch.
-
-    Once a tab has been shown at least once, keeping it permanently gridded
-    and switching only which one is on top via tkraise() avoids that cost:
-    grid() on an already-managed widget is a cheap no-op, and tkraise() only
-    reorders stacking. Safe here since no code relies on hidden tabs being
-    actually unmapped, and tabs are only ever added at startup.
-    """
-    try:
-        from customtkinter.windows.widgets import ctk_tabview
-    except ImportError:
-        return
-
-    def _fast_segmented_button_callback(self, selected_name):
-        self._current_name = selected_name
-        self._set_grid_current_tab()
-        self._tab_dict[self._current_name].tkraise()
-        if self._command is not None:
-            self._command()
-
-    def _fast_set(self, name: str):
-        if name in self._tab_dict:
-            self._current_name = name
-            self._segmented_button.set(name)
-            self._set_grid_current_tab()
-            self._tab_dict[name].tkraise()
-        else:
-            raise ValueError(f"CTkTabview has no tab named '{name}'")
-
-    ctk_tabview.CTkTabview._segmented_button_callback = _fast_segmented_button_callback
-    ctk_tabview.CTkTabview.set = _fast_set
-
-
 _patch_customtkinter_textbox_scroll_callback()
 _patch_customtkinter_scaling_tracker()
 _patch_customtkinter_appearance_mode_tracker()
-_patch_customtkinter_tabview_switch()
 
 
 class App(
@@ -212,6 +183,7 @@ class App(
         self._zoom_indicator_hide_job: str | None = None
 
         self._build_ui()
+        theme.on_change(self._retheme_all)
         self._refresh_file_status()
         self._poll_queue()
         self._bind_zoom_shortcuts()
@@ -223,8 +195,8 @@ class App(
         self.grid_rowconfigure(0, weight=1)
 
         # Tab view
-        self._tabview = ctk.CTkTabview(self, command=self._on_tab_change)
-        self._tabview.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
+        self._tabview = HciTabview(self, logo=load_logo_image(30, mark_only=True), command=self._on_tab_change)
+        self._tabview.grid(row=0, column=0, sticky="nsew")
         pipeline_tab = self._tabview.add("Pipeline")
         results_tab = self._tabview.add("Results")
         viz_tab = self._tabview.add("Visualization")
@@ -241,9 +213,34 @@ class App(
         # so it stays visible regardless of which tab is active
         self._zoom_indicator = ctk.CTkLabel(
             self, font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#242424", text_color=_BLUE, corner_radius=8,
+            fg_color=theme.pair("surface2"), text_color=_BLUE, corner_radius=8,
             padx=16, pady=8,
         )
+
+        # Light/dark switch, in the tab bar's right-hand slot
+        self._theme_btn = ctk.CTkButton(
+            self._tabview.header_right, width=118, height=28, font=ctk.CTkFont(size=12),
+            fg_color="transparent", hover_color=theme.pair("chrome_hover"),
+            text_color=theme.pair("chrome_fg"), border_width=1,
+            border_color=theme.pair("chrome_fg"), command=theme.toggle,
+        )
+        self._theme_btn.pack()
+        self._update_theme_button_label()
+
+    def _update_theme_button_label(self) -> None:
+        # Label names the mode a click switches to
+        self._theme_btn.configure(text="☀  Light mode" if theme.mode() == theme.DARK else "☾  Dark mode")
+
+    def _retheme_all(self, _mode: str) -> None:
+        """Re-apply colors to everything CustomTkinter doesn't re-theme itself
+        (plain Tk/ttk widgets, matplotlib figures, the HTML help pane).
+        """
+        self._update_theme_button_label()
+        self._retheme_results()
+        self._retheme_pipeline()
+        self._retheme_viz()
+        self._retheme_analysis()
+        self._retheme_help()
 
     def _on_tab_change(self) -> None:
         tab = self._tabview.get()

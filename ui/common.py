@@ -15,6 +15,8 @@ from tkinter import colorchooser
 
 import customtkinter as ctk
 
+from ui import theme
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 OUTPUT_DIR = PROJECT_ROOT / "Output"
@@ -137,7 +139,7 @@ class _Tooltip:
 
         tk.Label(
             self._popup, text=self._text, justify="left",
-            background="#2b2b2b", foreground="#dce4ee",
+            background=theme.c("tip_bg"), foreground=theme.c("tip_fg"),
             font=("Segoe UI", 11), padx=10, pady=6,
             wraplength=280, borderwidth=1, relief="solid",
         ).pack()
@@ -156,7 +158,7 @@ def help_icon(parent, text: str) -> ctk.CTkLabel:
     """
     badge = ctk.CTkLabel(
         parent, text="?", width=16, height=16, corner_radius=8,
-        fg_color="gray30", text_color="#cfcfcf",
+        fg_color=theme.pair("badge"), text_color=theme.pair("fg"),
         font=ctk.CTkFont(size=10, weight="bold"),
     )
     _Tooltip(badge, text)
@@ -183,7 +185,7 @@ def color_swatch_button(parent, color_var: ctk.StringVar, *, width: int = 26, he
     btn = ctk.CTkButton(
         parent, text="", width=width, height=height, corner_radius=4,
         fg_color=color_var.get(), hover_color=color_var.get(),
-        border_width=1, border_color="gray50",
+        border_width=1, border_color=("#a3a5a4", "#808080"),
         command=_pick,
     )
     return btn
@@ -198,7 +200,7 @@ def add_resize_grip(widget, min_height: int = 60, max_height: int = 800) -> ctk.
     *widget*, in the same parent, so it reads as an edge of *widget*.
     """
     grip = ctk.CTkFrame(
-        widget.master, height=7, fg_color="gray25", cursor="sb_v_double_arrow",
+        widget.master, height=7, fg_color=("#d2d3d3", "#404040"), border_width=0, cursor="sb_v_double_arrow",
     )
     grip.grid_propagate(False)
     grip.pack_propagate(False)
@@ -281,6 +283,15 @@ _RADIUS_SWEEP_HELP: dict[str, str] = {
                     "start, stop, and step size. The sweep re-runs the "
                     "proximity search at each radius in this range, so you "
                     "can see how results change as the cutoff changes.",
+    "plots": "Top-left, Hotspot-Filtered Mutations: at each radius, the average "
+             "number of hotspot mutation positions within that distance of a "
+             "PTM site, averaged over the protein's PTM sites. Bottom-left, "
+             "Hotspot - Size Normalized: the same curves divided by protein "
+             "length (per 1000 residues), so long and short proteins can be "
+             "compared on one scale. Dashed lines are a random-placement "
+             "baseline, diamonds mark each protein's elbow, and the red line "
+             "is the average elbow. With the unfiltered option, the right-hand "
+             "panels repeat both using every COSMIC missense mutation.",
     "unfiltered": "Also run the sweep against every COSMIC missense mutation "
                   "for these genes, not just the recurrent hotspot ones - "
                   "lets you compare hotspot-filtered results against the "
@@ -316,11 +327,22 @@ _CIF_VARIANCE_HELP: dict[str, str] = {
 }
 
 
-_GRAY = "gray"
-_BLUE = "#3a86ff"
-_GREEN = "#2ecc71"
-_RED = "#e74c3c"
-_YELLOW = "#f1c40f"
+# (light, dark) text/accent colors -- see ui/theme.py. Brand fills for plots
+# (PolyPhen classes, domain types) are separate, mode-independent constants.
+_GRAY = theme.pair("muted")
+_BLUE = theme.pair("accent")
+_GREEN = theme.pair("ok")
+_RED = theme.pair("err")
+_YELLOW = theme.pair("warn")
+_PRIMARY = theme.pair("primary")
+_PRIMARY_HOVER = theme.pair("primary_hover")
+_DANGER = theme.pair("danger")
+_DANGER_HOVER = theme.pair("danger_hover")
+_BTN2 = theme.pair("secondary")
+_BTN2_HOVER = theme.pair("secondary_hover")
+_CHIP = ("#e1e2e2", "#3a3a3a")
+_CHIP_HOVER = ("#cfd0d0", "#4a4a4a")
+_PLOT_BG = theme.pair("plot_bg")
 
 # Ctrl+scroll UI zoom (see App._on_ctrl_scroll_zoom)
 MIN_UI_SCALE = 0.6
@@ -367,25 +389,26 @@ _MUT_ENTRY_RE = re.compile(
 )
 _PP_LABEL = {"D": "probably_damaging", "P": "possibly_damaging", "B": "benign"}
 _PP_COLORS = {
-    "probably_damaging": _RED,
-    "possibly_damaging": _YELLOW,
-    "benign": _GREEN,
+    "probably_damaging": theme.PP_RED,
+    "possibly_damaging": theme.PP_YELLOW,
+    "benign": theme.PP_GREEN,
 }
-_PTM_MARKER_COLOR = _BLUE
-_NEEDLE_DEFAULT_COLOR = "#888888"
+# (light, dark) tuples: resolve with theme.resolve() before handing to matplotlib
+_PTM_MARKER_COLOR = theme.pair("ptm_marker")
+_NEEDLE_DEFAULT_COLOR = theme.pair("neutral")
 
 # Domain-map diagram (Visualization tab): color and lane per InterPro entry
 # type. Lane groups by specificity (0 = broadest, rendered lowest) so a domain
 # nested inside a broader family/superfamily call stays visually distinct
 # instead of overdrawing the same strip. Unlisted types fall back to lane 1.
 _DOMAIN_TYPE_COLORS: dict[str, str] = {
-    "homologous_superfamily": _GRAY,
-    "family": _GREEN,
-    "domain": _BLUE,
-    "repeat": "#e67e22",
-    "conserved_site": _YELLOW,
-    "active_site": _RED,
-    "binding_site": "#9b59b6",
+    "homologous_superfamily": _NEEDLE_DEFAULT_COLOR,
+    "family": theme.PP_GREEN,
+    "domain": theme.SKY,
+    "repeat": "#f2ad49",
+    "conserved_site": theme.PP_YELLOW,
+    "active_site": theme.PP_RED,
+    "binding_site": "#8e6bbf",  # no violet in the HCI palette; keeps 8 types distinguishable
     "ptm": _PTM_MARKER_COLOR,
 }
 _DOMAIN_TYPE_LANES: dict[str, int] = {
@@ -398,7 +421,7 @@ _DOMAIN_TYPE_LANES: dict[str, int] = {
     "binding_site": 2,
     "ptm": 2,
 }
-_DOMAIN_TYPE_FALLBACK_COLOR = "#5a5a5a"
+_DOMAIN_TYPE_FALLBACK_COLOR = "#707271"
 _DOMAIN_TYPE_FALLBACK_LANE = 1
 
 
@@ -867,3 +890,61 @@ def _save_column_prefs(which: str, col_ids: list[str]) -> None:
         COLUMN_PREFS_FILE.write_text(json.dumps(data, indent=2))
     except Exception:
         pass
+
+
+# Appearance-mode preference (persisted across app launches).
+UI_PREFS_FILE = OUTPUT_DIR / "logs" / "ui_prefs.json"
+
+
+# The logo PNGs are 1000x500 with large transparent margins; crop to the artwork
+# so a given display height shows the wordmark at a readable size.
+_LOGO_ART_BOX = (90, 66, 885, 434)    # hexagon mark + wordmark
+_LOGO_MARK_BOX = (90, 66, 414, 434)   # hexagon mark only
+
+
+def load_logo_image(height: int, mark_only: bool = False):
+    """CTkImage of the Cluster Scout logo (light/dark variants) at *height* px,
+    or None if the logo files are missing. *mark_only* crops to the hexagon.
+    """
+    from PIL import Image
+
+    dark_path = PROJECT_ROOT / "cluster_scout_logo_dark.png"
+    light_path = PROJECT_ROOT / "cluster_scout_logo_light.png"
+    if not dark_path.exists():
+        return None
+    box = _LOGO_MARK_BOX if mark_only else _LOGO_ART_BOX
+    dark = Image.open(dark_path).crop(box)
+    light = Image.open(light_path).crop(box) if light_path.exists() else dark
+    if mark_only:
+        # Sits on the navy/charcoal tab bar in both modes, where the translucent hexagon would
+        # vanish, so draw the mark on a small white rounded tile.
+        from PIL import ImageDraw
+
+        pad = round(light.width * 0.14)
+        tile = Image.new("RGBA", (light.width + 2 * pad, light.height + 2 * pad), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).rounded_rectangle(
+            (0, 0, tile.width - 1, tile.height - 1), radius=round(tile.width * 0.2), fill=(255, 255, 255, 255),
+        )
+        tile.alpha_composite(light, (pad, pad))
+        light = dark = tile
+    width = round(dark.width * height / dark.height)
+    return ctk.CTkImage(light_image=light, dark_image=dark, size=(width, height))
+
+
+def section_header(parent, text: str, row: int, columnspan: int = 1, pady=(14, 6), padx=0) -> ctk.CTkFrame:
+    """Small-caps section title followed by a hairline rule, gridded at *row*.
+
+    Replaces the boxed-panel look on the Pipeline tab: sections are separated
+    by these rules instead of borders.
+    """
+    header = ctk.CTkFrame(parent, fg_color="transparent", width=0, height=18)
+    header.grid(row=row, column=0, columnspan=columnspan, sticky="ew", pady=pady, padx=padx)
+    header.grid_columnconfigure(1, weight=1)
+    ctk.CTkLabel(
+        header, text=text.upper(), text_color=_GRAY,
+        font=ctk.CTkFont(size=11, weight="bold"),
+    ).grid(row=0, column=0, padx=(0, 10))
+    ctk.CTkFrame(
+        header, width=0, height=1, corner_radius=0, border_width=0, fg_color=theme.pair("line"),
+    ).grid(row=0, column=1, sticky="ew")
+    return header

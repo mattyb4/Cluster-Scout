@@ -9,15 +9,20 @@ import re
 
 import customtkinter as ctk
 
+from ui import theme
 from ui.common import (
+    _BTN2,
+    _BTN2_HOVER,
     _CIF_DIR,
     _DOMAIN_TYPE_COLORS,
     _DOMAIN_TYPE_FALLBACK_COLOR,
     _DOMAIN_TYPE_FALLBACK_LANE,
     _DOMAIN_TYPE_LANES,
+    _GRAY,
     _GREEN,
     _MUT_ENTRY_RE,
     _NEEDLE_DEFAULT_COLOR,
+    _PLOT_BG,
     _PP_COLORS,
     _PP_LABEL,
     _PTM_MARKER_COLOR,
@@ -38,6 +43,7 @@ class VisualizationTabMixin:
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(3, weight=1)
 
+        self._viz_stale = {"single": False, "whole": False}  # plots drawn in the previous theme
         self._viz_ptm_rows: dict[str, int] = {}
         self._viz_all_labels: list[str] = []
         self._viz_protein_rows: dict[str, list[int]] = {}
@@ -48,8 +54,13 @@ class VisualizationTabMixin:
         self._viz_all_cluster_protein_labels: list[str] = []
 
         # ── Controls row 0: data source + view mode ──
-        mode_row = ctk.CTkFrame(tab)
-        mode_row.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+        # One box holds all three control rows; the rows themselves are borderless
+        controls_box = ctk.CTkFrame(tab)
+        controls_box.grid(row=0, column=0, padx=12, pady=(12, 6), sticky="ew")
+        controls_box.grid_columnconfigure(0, weight=1)
+
+        mode_row = ctk.CTkFrame(controls_box, fg_color="transparent")
+        mode_row.grid(row=0, column=0, sticky="ew")
 
         ctk.CTkLabel(mode_row, text="Data:", font=ctk.CTkFont(weight="bold")).pack(
             side="left", padx=(12, 6), pady=10,
@@ -72,8 +83,8 @@ class VisualizationTabMixin:
         ).pack(side="left", padx=(0, 12), pady=10)
 
         # ── Controls row 1a: PTM/anchor selection (Single PTM mode) ──
-        self._viz_ptm_controls = ctk.CTkFrame(tab)
-        self._viz_ptm_controls.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        self._viz_ptm_controls = ctk.CTkFrame(controls_box, fg_color="transparent")
+        self._viz_ptm_controls.grid(row=1, column=0, sticky="ew")
         controls = self._viz_ptm_controls
 
         self._viz_anchor_label = ctk.CTkLabel(
@@ -102,8 +113,8 @@ class VisualizationTabMixin:
         ).pack(side="left", padx=(0, 12), pady=10)
 
         # ── Controls row 1b: protein selection (Whole protein mode) ──
-        self._viz_protein_controls = ctk.CTkFrame(tab)
-        self._viz_protein_controls.grid(row=1, column=0, padx=12, pady=(0, 6), sticky="ew")
+        self._viz_protein_controls = ctk.CTkFrame(controls_box, fg_color="transparent")
+        self._viz_protein_controls.grid(row=1, column=0, sticky="ew")
         self._viz_protein_controls.grid_remove()
         pcontrols = self._viz_protein_controls
 
@@ -129,8 +140,8 @@ class VisualizationTabMixin:
         ).pack(side="left", padx=(0, 12), pady=10)
 
         # ── Controls row 2: display mode + actions (shared) ──
-        controls2 = ctk.CTkFrame(tab)
-        controls2.grid(row=2, column=0, padx=12, pady=(0, 6), sticky="ew")
+        controls2 = ctk.CTkFrame(controls_box, fg_color="transparent")
+        controls2.grid(row=2, column=0, sticky="ew")
 
         ctk.CTkLabel(controls2, text="Show:", font=ctk.CTkFont(weight="bold")).pack(
             side="left", padx=(12, 6), pady=10,
@@ -144,25 +155,25 @@ class VisualizationTabMixin:
 
         ctk.CTkButton(
             controls2, text="Save PNG", width=100,
-            fg_color="gray30", hover_color="gray40",
+            fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=self._save_viz_plot,
         ).pack(side="left", padx=(0, 12), pady=10)
 
         self._viz_status = ctk.CTkLabel(
             controls2, text="Load results to select a PTM site.",
-            text_color="gray60", font=ctk.CTkFont(size=11),
+            text_color=_GRAY, font=ctk.CTkFont(size=11),
         )
         self._viz_status.pack(side="left", padx=(4, 12), pady=10)
 
         # ── Plot area: single-PTM canvas (row 3, Single PTM mode) ──
-        self._viz_canvas_frame = ctk.CTkFrame(tab, fg_color="#2b2b2b")
+        self._viz_canvas_frame = ctk.CTkFrame(tab, fg_color=_PLOT_BG)
         self._viz_canvas_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self._viz_canvas_frame.grid_columnconfigure(0, weight=1)
         self._viz_canvas_frame.grid_rowconfigure(0, weight=1)
         # Prevents the canvas from resizing this frame back (avoids a resize loop).
         self._viz_canvas_frame.grid_propagate(False)
 
-        self._viz_fig = Figure(figsize=(10, 6), dpi=100, facecolor="#2b2b2b")
+        self._viz_fig = Figure(figsize=(10, 6), dpi=100, facecolor=theme.c("plot_bg"))
         self._viz_canvas = FigureCanvasTkAgg(self._viz_fig, master=self._viz_canvas_frame)
         self._viz_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
         self._bind_viz_canvas_resize(self._viz_canvas_frame, self._viz_canvas, self._viz_fig)
@@ -178,11 +189,17 @@ class VisualizationTabMixin:
             self._viz_canvas_frame.grid_remove()
             self._viz_whole_protein_frame.grid()
             self._carry_ptm_selection_to_protein()
+            if self._viz_stale["whole"]:
+                self._viz_stale["whole"] = False
+                self._generate_whole_protein_view()
         else:
             self._viz_protein_controls.grid_remove()
             self._viz_ptm_controls.grid()
             self._viz_whole_protein_frame.grid_remove()
             self._viz_canvas_frame.grid()
+            if self._viz_stale["single"]:
+                self._viz_stale["single"] = False
+                self._generate_lollipop_plot()
 
     # ── Visualization: PTM Proximity / Mutation Clusters data source ────────
 
@@ -252,6 +269,25 @@ class VisualizationTabMixin:
         self._viz_protein_search_var.set("")
         self._viz_protein_combo.set(plabel)
         self._generate_whole_protein_view()
+
+    def _retheme_viz(self) -> None:
+        """Re-render existing plots in the new theme's colors. Only the
+        visible view is redrawn now; the other is flagged and redrawn when
+        the user switches to it.
+        """
+        plot_bg = theme.c("plot_bg")
+        for fig in (self._viz_fig, self._viz_stack_fig):
+            fig.patch.set_facecolor(plot_bg)
+        whole = self._viz_view_mode_var.get() == "Whole protein"
+        has_single = bool(self._viz_fig.axes)
+        has_whole = bool(self._viz_stack_fig.axes)
+        self._viz_stale = {"single": has_single and whole, "whole": has_whole and not whole}
+        if whole and has_whole:
+            self._generate_whole_protein_view()
+        elif not whole and has_single:
+            self._generate_lollipop_plot()
+        else:
+            (self._viz_stack_canvas if whole else self._viz_canvas).draw()
 
     def _generate_current_view(self) -> None:
         if self._viz_view_mode_var.get() == "Whole protein":
@@ -377,7 +413,7 @@ class VisualizationTabMixin:
         self._viz_whole_protein_frame.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="nsew")
         self._viz_whole_protein_frame.grid_remove()
         self._viz_whole_protein_frame.grid_columnconfigure(0, weight=1)
-        self._viz_whole_protein_frame.grid_rowconfigure(1, weight=1)
+        self._viz_whole_protein_frame.grid_rowconfigure(2, weight=1)
 
         # Plain Tk title/legend, not matplotlib artists -- fig.suptitle()/
         # fig.legend() break down on a figure that can be 100+ inches tall.
@@ -400,7 +436,7 @@ class VisualizationTabMixin:
             (None, "Probably damaging", _PP_COLORS["probably_damaging"]),
             (None, "Unknown", _NEEDLE_DEFAULT_COLOR),
         ]:
-            swatch = ctk.CTkFrame(legend_frame, fg_color=color, width=14, height=14, corner_radius=3)
+            swatch = ctk.CTkFrame(legend_frame, fg_color=color, width=14, height=14, corner_radius=3, border_width=0)
             swatch.pack(side="left", padx=(10, 3))
             swatch.pack_propagate(False)
             label = ctk.CTkLabel(legend_frame, text=text, font=ctk.CTkFont(size=11))
@@ -408,15 +444,30 @@ class VisualizationTabMixin:
             if key:
                 self._viz_stack_legend_labels[key] = label
 
+        # Domain-type key (colors are fixed per type, so a static row works)
+        type_row = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="transparent")
+        type_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        ctk.CTkLabel(type_row, text="Domain map:", font=ctk.CTkFont(size=11), text_color=_GRAY).pack(
+            side="left", padx=(4, 0),
+        )
+        for type_key, type_name in self._DOMAIN_TYPE_NAMES.items():
+            ctk.CTkFrame(
+                type_row, fg_color=_DOMAIN_TYPE_COLORS.get(type_key, _DOMAIN_TYPE_FALLBACK_COLOR),
+                width=14, height=14, corner_radius=3, border_width=0,
+            ).pack(side="left", padx=(10, 3))
+            ctk.CTkLabel(type_row, text=type_name, font=ctk.CTkFont(size=11)).pack(side="left")
+
         # ── Scrollable lollipop stack ──
-        stack_outer = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color="#2b2b2b")
-        stack_outer.grid(row=1, column=0, sticky="nsew")
+        stack_outer = ctk.CTkFrame(self._viz_whole_protein_frame, fg_color=_PLOT_BG)
+        stack_outer.grid(row=2, column=0, sticky="nsew")
         stack_outer.grid_columnconfigure(0, weight=1)
         stack_outer.grid_rowconfigure(0, weight=1)
         stack_outer.grid_propagate(False)  # same reasoning as _viz_canvas_frame above
         self._bind_viz_stack_resize(stack_outer)
 
-        scroll = ctk.CTkScrollableFrame(stack_outer, fg_color="transparent")
+        # Explicit fg_color (not "transparent"): children of a transparent CTkScrollableFrame
+        # capture a static bg color at construction and show stale corners after a light/dark switch.
+        scroll = ctk.CTkScrollableFrame(stack_outer, fg_color=_PLOT_BG)
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
@@ -439,7 +490,7 @@ class VisualizationTabMixin:
         scroll._parent_canvas.configure(xscrollcommand=stack_h_scrollbar.set)
 
         self._viz_stack_scroll = scroll
-        self._viz_stack_fig = Figure(figsize=(10, 2), dpi=100, facecolor="#2b2b2b")
+        self._viz_stack_fig = Figure(figsize=(10, 2), dpi=100, facecolor=theme.c("plot_bg"))
         self._viz_stack_canvas = FigureCanvasTkAgg(self._viz_stack_fig, master=scroll)
         self._viz_stack_canvas.get_tk_widget().grid(row=0, column=0, sticky="nw")
 
@@ -631,80 +682,87 @@ class VisualizationTabMixin:
     # ── Visualization: plotting ──────────────────────────────────────────────
 
     def _style_lollipop_axis(self, ax) -> None:
-        ax.set_facecolor("#2b2b2b")
+        ax.set_facecolor(theme.c("plot_bg"))
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#555555")
-        ax.spines["bottom"].set_color("#555555")
-        ax.tick_params(colors="#dcdcdc")
-        ax.yaxis.label.set_color("#dcdcdc")
-        ax.xaxis.label.set_color("#dcdcdc")
+        ax.spines["left"].set_color(theme.c("plot_axis"))
+        ax.spines["bottom"].set_color(theme.c("plot_axis"))
+        ax.tick_params(colors=theme.c("plot_fg"))
+        ax.yaxis.label.set_color(theme.c("plot_fg"))
+        ax.xaxis.label.set_color(theme.c("plot_fg"))
 
-    _MUT_LABEL_FONTSIZE = 8
-    _MUT_LABEL_BASE_OFFSET_PTS = (0, 10)  # directly above the marker (label is rotated fully vertical)
-    _MUT_LABEL_PUSH_STEP_PTS = 8          # increment used to push a colliding label clear
-    _MUT_LABEL_PAD_PX = 3                 # breathing room added around each label's box
+    _MUT_LABEL_FONTSIZE = 8.5
+    _MUT_MAX_LABELS = 14        # per panel; the rest stay as unlabeled markers (labels would pile up)
+    _MUT_LABEL_BASE_PTS = 9     # label's bottom edge above its marker's center
+    _MUT_LABEL_PAD_PX = 3       # breathing room added around each label's box
+    _MUT_LABEL_MAX_LEVELS = 10  # how many rows a label may climb before giving up
+    _MUT_MARKER_RADIUS_PX = 7
+    _PTM_STAR_RADIUS_PX = 14
+    _PTM_LABEL_FONTSIZE = 11
 
-    def _layout_mutation_label_offsets(self, ax, mutations: list[str],
-                                        x_plot: list[float], y_plot: list[float]) -> dict[int, float]:
-        """Push mutation labels straight up, one at a time, until each one's
-        actual rendered footprint (in real screen pixels) no longer overlaps
-        any label already placed.
+    def _layout_mutation_labels(self, ax, names: list[str], x_plot: list[float], y_plot: list[float],
+                                 obstacles: list[tuple[float, float, float, float]]) -> list[tuple[float, float, bool]]:
+        """Pick a spot for each horizontal label, in real screen pixels.
 
-        Needed because a label's on-screen position depends on *both* its
-        residue position (x) and its marker height (y = patient count) --
-        two mutations a residue apart can still land far apart vertically if
-        their patient counts differ, while two at very different positions
-        can still collide if one has a tall needle. A purely x-order row
-        assignment (as used for the domain map, where every label sits on
-        the same baseline) can't account for that, so this checks true
-        pixel-space bounding boxes instead. Returns {df_row_index: extra
-        y-offset in points} to add on top of _MUT_LABEL_BASE_OFFSET_PTS;
-        entries with no collision map to 0.0, reproducing the original fixed
-        offset.
+        Most-reported mutations are placed first so they get the closest, most
+        direct spot. Each label tries its own column first, then shifts
+        sideways, then climbs a row and tries again, and takes the first spot
+        that overlaps no already-placed label, no marker, and none of
+        *obstacles* (the PTM star, its needle and its own label), staying inside the
+        axes horizontally. Returns, per name, (dx_pts, dy_pts, needs_leader):
+        the label's offset from its marker and whether it moved far enough
+        that a thin leader line should connect it back.
         """
-        if not mutations:
-            return {}
+        if not names:
+            return []
 
-        fig = ax.figure
-        px_per_pt = fig.dpi / 72.0
-        base_x_px, base_y_px = (v * px_per_pt for v in self._MUT_LABEL_BASE_OFFSET_PTS)
-        push_step_px = self._MUT_LABEL_PUSH_STEP_PTS * px_per_pt
+        ppp = ax.figure.dpi / 72.0
         pad = self._MUT_LABEL_PAD_PX
+        widths = [w + pad for w in self._measure_text_widths_px(names, self._MUT_LABEL_FONTSIZE)]
+        h = self._MUT_LABEL_FONTSIZE * ppp * 1.25 + pad
+        base = self._MUT_LABEL_BASE_PTS * ppp
+        r = self._MUT_MARKER_RADIUS_PX
+        bbox = ax.get_window_extent()
+        anchors = ax.transData.transform(list(zip(x_plot, y_plot)))
 
-        px_lengths = self._measure_text_widths_px(mutations, self._MUT_LABEL_FONTSIZE)
-        text_h_px = self._MUT_LABEL_FONTSIZE * px_per_pt * 1.2  # approx line height incl. leading
-        # Labels are rotated fully vertical (90 degrees): the string's own
-        # rendered length becomes its vertical footprint, and the font's
-        # line height becomes its (much narrower) horizontal footprint.
-        box_sizes = [(text_h_px + pad, length + pad) for length in px_lengths]
+        placed = list(obstacles) + [(ax_px - r, ay_px - r, ax_px + r, ay_px + r) for ax_px, ay_px in anchors]
 
-        anchors_px = ax.transData.transform(list(zip(x_plot, y_plot)))
+        def free(box) -> bool:
+            if box[0] < bbox.x0 - 4 or box[2] > bbox.x1 + 4:
+                return False
+            return not any(box[0] < o[2] and box[2] > o[0] and box[1] < o[3] and box[3] > o[1] for o in placed)
 
-        order = sorted(range(len(mutations)), key=lambda i: x_plot[i])
-        placed: list[tuple[float, float, float, float]] = []
-        offsets: dict[int, float] = {}
+        result: list[tuple[float, float, bool] | None] = [None] * len(names)
+        order = sorted(range(len(names)), key=lambda i: (-y_plot[i], x_plot[i]))
         for i in order:
-            ax_px, ay_px = anchors_px[i]
-            w, h = box_sizes[i]
-            x0 = ax_px + base_x_px - w / 2  # centered horizontally on the marker
-            extra_px = 0.0
-            while True:
-                y0 = ay_px + base_y_px + extra_px
-                box = (x0, y0, x0 + w, y0 + h)
-                conflict = any(
-                    box[0] < o[2] and box[2] > o[0] and box[1] < o[3] and box[3] > o[1]
-                    for o in placed
-                )
-                if not conflict:
-                    placed.append(box)
+            ax_px, ay_px = anchors[i]
+            w = widths[i]
+            chosen = None
+            for level in range(self._MUT_LABEL_MAX_LEVELS):
+                y0 = ay_px + base + level * h
+                for dx in (0, -0.6 * w, 0.6 * w, -1.2 * w, 1.2 * w):
+                    box = (ax_px + dx - w / 2, y0, ax_px + dx + w / 2, y0 + h)
+                    if free(box):
+                        chosen = (dx, y0 - ay_px, box)
+                        break
+                if chosen:
                     break
-                extra_px += push_step_px
-            offsets[i] = extra_px / px_per_pt
-        return offsets
+            if chosen is None:  # crowded everywhere: sit directly above the marker
+                chosen = (0, base, (ax_px - w / 2, ay_px + base, ax_px + w / 2, ay_px + base + h))
+            dx, dy, box = chosen
+            placed.append(box)
+            result[i] = (dx / ppp, dy / ppp, dx != 0 or dy > base + 0.5)
+        return result  # type: ignore[return-value]
 
-    def _draw_mutation_needles(self, ax, df, jitter: bool, x_col: str = "mutation_position") -> None:
+    def _draw_mutation_needles(self, ax, df, jitter: bool, x_col: str = "mutation_position",
+                                ptm: dict | None = None) -> None:
+        """Draw the lollipops and their labels. *ptm* ({"x", "y", "label"}) describes
+        the PTM star on this axes, if any, so labels keep clear of it and mutations
+        sitting exactly on the PTM position are spread to either side of its needle.
+        """
         from collections import defaultdict
+
+        import matplotlib.patheffects as pe
 
         positions = df[x_col].tolist()
         groups: dict = defaultdict(list)
@@ -713,36 +771,69 @@ class VisualizationTabMixin:
 
         x_plot = list(positions)
         if jitter:
+            ptm_key = round(ptm["x"]) if ptm else None
             for pos, idxs in groups.items():
                 n = len(idxs)
-                if n > 1:
+                if pos == ptm_key:
+                    # The PTM needle already owns this x: fan mutations out right, left, right...
+                    for k, i in enumerate(idxs):
+                        x_plot[i] = pos + (1 if k % 2 == 0 else -1) * (k // 2 + 1) * 0.6
+                elif n > 1:
                     for k, i in enumerate(idxs):
                         x_plot[i] = pos + (k - (n - 1) / 2) * 0.6
 
-        label_offsets = (
-            self._layout_mutation_label_offsets(
-                ax, df["mutation"].astype(str).tolist(), x_plot, df["patient_count"].tolist(),
-            ) if jitter else {}
+        counts = df["patient_count"].tolist()
+        names = df["mutation"].astype(str).tolist()
+        # Label only the most-reported mutations when there are many: with ~100
+        # needles every label would collide. Ties go to the lower index.
+        if len(counts) > self._MUT_MAX_LABELS:
+            labeled = sorted(sorted(range(len(counts)), key=lambda i: (-counts[i], i))[:self._MUT_MAX_LABELS])
+        else:
+            labeled = list(range(len(counts)))
+
+        obstacles: list[tuple[float, float, float, float]] = []
+        if ptm:
+            ppp = ax.figure.dpi / 72.0
+            sx, sy = ax.transData.transform((ptm["x"], ptm["y"]))
+            _x0, y_floor = ax.transData.transform((ptm["x"], 0))
+            rs = self._PTM_STAR_RADIUS_PX
+            obstacles.append((sx - rs, sy - rs, sx + rs, sy + rs))  # the star
+            obstacles.append((sx - 4, y_floor, sx + 4, sy))         # its needle
+            if ptm.get("label"):
+                lw = self._measure_text_widths_px([ptm["label"]], self._PTM_LABEL_FONTSIZE)[0] * 1.15 + 6
+                lh = self._PTM_LABEL_FONTSIZE * ppp * 1.4
+                obstacles.append((sx - lw / 2, sy + 10 * ppp, sx + lw / 2, sy + 10 * ppp + lh))
+
+        spots = self._layout_mutation_labels(
+            ax, [names[i] for i in labeled], [x_plot[i] for i in labeled],
+            [counts[i] for i in labeled], obstacles,
         )
+        spot_by_row = dict(zip(labeled, spots))
+        halo = [pe.withStroke(linewidth=2.5, foreground=theme.c("plot_bg"))]
 
         for i, (_, r) in enumerate(df.iterrows()):
             x = x_plot[i]
             count = r["patient_count"]
-            color = _PP_COLORS.get(str(r.get("polyphen_class", "")).strip(), _NEEDLE_DEFAULT_COLOR)
+            color = _PP_COLORS.get(str(r.get("polyphen_class", "")).strip(), theme.resolve(_NEEDLE_DEFAULT_COLOR))
             ax.vlines(x, 0, count, color=color, linewidth=2, zorder=2)
             ax.scatter([x], [count], s=90, color=color, edgecolor="black", zorder=3)
-            # The far (categorical) panel already names each mutation via its x-tick
-            # label, so only annotate above the marker for the true-scale local panel.
-            if jitter:
-                base_x, base_y = self._MUT_LABEL_BASE_OFFSET_PTS
+            if i in spot_by_row:
+                dx, dy, leader = spot_by_row[i]
                 ax.annotate(
-                    str(r["mutation"]), (x, count),
-                    xytext=(base_x, base_y + label_offsets.get(i, 0.0)),
-                    textcoords="offset points", ha="center", va="bottom",
-                    fontsize=self._MUT_LABEL_FONTSIZE, color="#dcdcdc", rotation=90,
+                    names[i], (x, count), xytext=(dx, dy), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=self._MUT_LABEL_FONTSIZE,
+                    color=theme.c("plot_fg"), path_effects=halo, zorder=5,
+                    arrowprops=(dict(arrowstyle="-", color=theme.c("plot_axis"), lw=0.6,
+                                     shrinkA=0, shrinkB=4, relpos=(0.5, 0.0))
+                                if leader else None),
                 )
 
-    _DOMAIN_LABEL_FONTSIZE = 7
+    _DOMAIN_LABEL_FONTSIZE = 7.5
+    # Broad "homologous superfamily" calls overlap nearly every real domain and
+    # their long names were the main source of label clutter; their boxes are
+    # still drawn (and keyed in the legend), just not labeled.
+    _DOMAIN_UNLABELED_TYPES = frozenset({"homologous_superfamily"})
+    _DOMAIN_LABEL_MAX_CHARS = 32
     _DOMAIN_LANE_HEIGHT_IN = 0.16  # physical height of one lane row (boxes)
     _DOMAIN_BACKBONE_MARGIN_IN = 0.12  # space below the lowest lane, for the backbone/PTM marker
     _DOMAIN_LABEL_TOP_PADDING_IN = 0.14  # gap between the top lane and the first label row
@@ -774,6 +865,7 @@ class VisualizationTabMixin:
         Returns (assignments, n_rows_used); each assignment is
         (entry, row, arrow_x_offset).
         """
+        entries = self._labelable_domain_entries(entries)
         if not entries:
             return [], 0
 
@@ -787,27 +879,41 @@ class VisualizationTabMixin:
             [e["name"] for e in sorted_entries], self._DOMAIN_LABEL_FONTSIZE,
         )
 
-        row_occupied: list[list[tuple[float, float, float]]] = []
+        # Every placed label is (row, text_start, text_end, arrow_x). A new label
+        # conflicts with a placed one if (same row) their text or arrows are too
+        # close, or (different rows) either one's vertical arrow would pass
+        # through the other's text -- the arrow of a higher-row label crosses
+        # every row below it.
+        arrow_pad = 5 * data_units_per_px
+        placed: list[tuple[int, float, float, float]] = []
         assignments = []
         for e, px_w in zip(sorted_entries, px_widths):
             label_w = px_w * data_units_per_px
             center_x = e["start"] + (e["end"] - e["start"]) / 2
             label_start, label_end = center_x - label_w / 2, center_x + label_w / 2
 
+            def _conflicts(row: int) -> bool:
+                for o_row, o_start, o_end, o_center in placed:
+                    if o_row == row:
+                        if (label_start - gap < o_end and label_end + gap > o_start
+                                or abs(center_x - o_center) < min_arrow_gap):
+                            return True
+                    elif o_row > row:  # their arrow passes through this row
+                        if label_start - arrow_pad < o_center < label_end + arrow_pad:
+                            return True
+                    elif o_start - arrow_pad < center_x < o_end + arrow_pad:  # our arrow passes through theirs
+                        return True
+                return False
+
+            # Stop at one row above everything placed so far: going higher can't
+            # clear an arrow that must cross a lower label, so accept it there
+            top_row = max((o[0] for o in placed), default=-1)
             row = 0
-            while True:
-                if row == len(row_occupied):
-                    row_occupied.append([])
-                conflict = any(
-                    (label_start - gap < o_end and label_end + gap > o_start)
-                    or abs(center_x - o_center) < min_arrow_gap
-                    for o_start, o_end, o_center in row_occupied[row]
-                )
-                if not conflict:
-                    row_occupied[row].append((label_start, label_end, center_x))
-                    assignments.append((e, row))
-                    break
+            while row <= top_row and _conflicts(row):
                 row += 1
+            placed.append((row, label_start, label_end, center_x))
+            assignments.append((e, row))
+        n_rows = 1 + max(r for _e, r in assignments)
 
         # Entries whose box positions are so close together that their
         # (otherwise perfectly vertical) arrows would land on top of each
@@ -836,7 +942,24 @@ class VisualizationTabMixin:
                 offsets[j] = (k - (len(cluster) - 1) / 2) * fan_step
 
         assignments = [(e, row, offsets.get(i, 0.0)) for i, (e, row) in enumerate(by_center)]
-        return assignments, len(row_occupied)
+        return assignments, n_rows
+
+    def _labelable_domain_entries(self, entries: list[dict]) -> list[dict]:
+        """Entries to label: drops the broadest calls and exact repeats, and
+        shortens long InterPro names (copies; the originals keep their full name).
+        """
+        out, seen = [], set()
+        limit = self._DOMAIN_LABEL_MAX_CHARS
+        for e in entries:
+            if e["type"] in self._DOMAIN_UNLABELED_TYPES:
+                continue
+            key = (e["name"], e["start"], e["end"])
+            if key in seen:
+                continue
+            seen.add(key)
+            name = e["name"] if len(e["name"]) <= limit else e["name"][:limit - 1].rstrip() + "…"
+            out.append(dict(e, name=name))
+        return out
 
     def _domain_strip_height_in(self, n_label_rows: int) -> float:
         """Physical height (inches) needed for the domain strip's backbone,
@@ -863,7 +986,7 @@ class VisualizationTabMixin:
         backbone_y = 0.0
         lanes_top_y = backbone_y + self._DOMAIN_BACKBONE_MARGIN_IN + n_lanes * self._DOMAIN_LANE_HEIGHT_IN
 
-        ax.hlines(backbone_y, 0, length, color=_NEEDLE_DEFAULT_COLOR, linewidth=2.5, zorder=1)
+        ax.hlines(backbone_y, 0, length, color=theme.resolve(_NEEDLE_DEFAULT_COLOR), linewidth=2.5, zorder=1)
 
         def _box_position(e: dict) -> tuple[float, float, float]:
             lane = _DOMAIN_TYPE_LANES.get(e["type"], _DOMAIN_TYPE_FALLBACK_LANE)
@@ -872,7 +995,7 @@ class VisualizationTabMixin:
 
         for e in entries:
             y0, _box_top, _center = _box_position(e)
-            color = _DOMAIN_TYPE_COLORS.get(e["type"], _DOMAIN_TYPE_FALLBACK_COLOR)
+            color = theme.resolve(_DOMAIN_TYPE_COLORS.get(e["type"], _DOMAIN_TYPE_FALLBACK_COLOR))
             ax.add_patch(Rectangle(
                 (e["start"], y0), e["end"] - e["start"], self._DOMAIN_LANE_HEIGHT_IN * 0.8,
                 facecolor=color, edgecolor="black", linewidth=0.4, alpha=0.85, zorder=2,
@@ -888,14 +1011,14 @@ class VisualizationTabMixin:
             # vertical lines.
             ax.annotate(
                 e["name"], xy=(box_center_x + arrow_x_offset, box_top_y), xytext=(box_center_x, label_y),
-                fontsize=self._DOMAIN_LABEL_FONTSIZE, color="#dcdcdc", ha="center", va="bottom",
-                arrowprops=dict(arrowstyle="->", color="#888888", lw=0.7, shrinkA=0, shrinkB=2),
+                fontsize=self._DOMAIN_LABEL_FONTSIZE, color=theme.c("plot_fg"), ha="center", va="bottom",
+                arrowprops=dict(arrowstyle="->", color=theme.c("plot_axis"), lw=0.6, shrinkA=0, shrinkB=2),
                 clip_on=False, zorder=3,
             )
 
         ax.plot(
             ptm_pos, backbone_y, marker="v", markersize=8,
-            color=_PTM_MARKER_COLOR, markeredgecolor="white", markeredgewidth=0.6, zorder=4,
+            color=theme.resolve(_PTM_MARKER_COLOR), markeredgecolor=theme.c("plot_bg"), markeredgewidth=0.6, zorder=4,
         )
 
         ax.set_xlim(-length * 0.02, length * 1.02)
@@ -911,7 +1034,7 @@ class VisualizationTabMixin:
             ax.annotate(
                 "No InterPro domain data available for this protein", (0.5, 0.5),
                 xycoords="axes fraction", ha="center", va="center",
-                color="#888888", fontsize=7,
+                color=theme.c("neutral"), fontsize=7,
             )
 
     def _draw_lollipop_group(self, fig, subplotspec, gene: str, ptm_site: str, ptm_pos: int,
@@ -941,7 +1064,10 @@ class VisualizationTabMixin:
         y_top = ptm_height * 1.45
 
         n_label_rows = domain_layout[1]
-        domain_h = min(self._domain_strip_height_in(n_label_rows), available_height_in * 0.7)
+        # x1.3: the 0.6 hspace gridspec below hands ~23% of each row's height to
+        # the gap between the two axes; compensate so 1 y-unit stays 1 inch
+        strip_in = self._domain_strip_height_in(n_label_rows) * 1.3
+        domain_h = strip_in if subplotspec is not None else min(strip_in, available_height_in * 0.7)
         lollipop_h = max(available_height_in - domain_h, 0.5)
 
         if subplotspec is None:
@@ -971,7 +1097,7 @@ class VisualizationTabMixin:
         # ── Local panel (true sequence scale) ──
         self._style_lollipop_axis(ax_local)
         x_min, x_max = ptm_pos - local_window, ptm_pos + local_window
-        ax_local.hlines(0, x_min, x_max, color=_NEEDLE_DEFAULT_COLOR, linewidth=2, zorder=1)
+        ax_local.hlines(0, x_min, x_max, color=theme.resolve(_NEEDLE_DEFAULT_COLOR), linewidth=2, zorder=1)
         ax_local.set_xlim(x_min - 0.5, x_max + 0.5)
         ax_local.set_ylim(0, y_top)
         ax_local.set_ylabel("Patient count")
@@ -979,18 +1105,22 @@ class VisualizationTabMixin:
         if has_far:
             ax_local.spines["right"].set_visible(False)
 
-        ax_local.vlines(ptm_pos, 0, ptm_height, color=_PTM_MARKER_COLOR, linewidth=2, zorder=2)
+        ax_local.vlines(ptm_pos, 0, ptm_height, color=theme.resolve(_PTM_MARKER_COLOR), linewidth=2, zorder=2)
         ax_local.scatter(
             [ptm_pos], [ptm_height], marker="*", s=420,
-            color=_PTM_MARKER_COLOR, edgecolor="white", linewidth=0.8, zorder=4,
+            color=theme.resolve(_PTM_MARKER_COLOR), edgecolor=theme.c("plot_bg"), linewidth=0.8, zorder=4,
         )
-        ax_local.annotate(
-            str(ptm_site), (ptm_pos, ptm_height), xytext=(0, 10),
-            textcoords="offset points", ha="center", color="white",
-            fontsize=11, fontweight="bold",
-        )
+        if subplotspec is None:
+            ax_local.annotate(
+                str(ptm_site), (ptm_pos, ptm_height), xytext=(0, 10),
+                textcoords="offset points", ha="center", color=theme.c("plot_strong"),
+                fontsize=self._PTM_LABEL_FONTSIZE, fontweight="bold",
+            )
 
-        self._draw_mutation_needles(ax_local, local_df, jitter=True)
+        self._draw_mutation_needles(
+            ax_local, local_df, jitter=True,
+            ptm={"x": ptm_pos, "y": ptm_height, "label": str(ptm_site) if subplotspec is None else None},
+        )
 
         # ── Broken-axis gap + far panel (categorical scale) ──
         if has_far:
@@ -999,23 +1129,25 @@ class VisualizationTabMixin:
             ax_gap.set_ylim(0, 1)
             for xc in (0.3, 0.7):
                 ax_gap.plot([xc - 0.12, xc + 0.12], [0.42, 0.52],
-                            color="#888888", lw=1.2, transform=ax_gap.transAxes, clip_on=False)
+                            color=theme.c("neutral"), lw=1.2, transform=ax_gap.transAxes, clip_on=False)
                 ax_gap.plot([xc - 0.12, xc + 0.12], [0.48, 0.58],
-                            color="#888888", lw=1.2, transform=ax_gap.transAxes, clip_on=False)
+                            color=theme.c("neutral"), lw=1.2, transform=ax_gap.transAxes, clip_on=False)
 
             self._style_lollipop_axis(ax_far)
             far_df["_x"] = range(len(far_df))
             n_far = len(far_df)
-            ax_far.hlines(0, -0.5, n_far - 0.5, color=_NEEDLE_DEFAULT_COLOR, linewidth=2, zorder=1)
+            ax_far.hlines(0, -0.5, n_far - 0.5, color=theme.resolve(_NEEDLE_DEFAULT_COLOR), linewidth=2, zorder=1)
             ax_far.set_xlim(-0.5, n_far - 0.5)
             ax_far.set_ylim(0, y_top)
             ax_far.set_yticklabels([])
             ax_far.spines["left"].set_visible(False)
 
             self._draw_mutation_needles(ax_far, far_df, jitter=False, x_col="_x")
-            ax_far.set_xticks(list(range(n_far)))
-            ax_far.set_xticklabels(far_df["mutation"], rotation=45, ha="right", fontsize=8)
-            ax_far.set_title(f"> {local_window:g} aa away", fontsize=9, color="gray")
+            ax_far.set_xticks([])  # names are annotated above the top markers instead
+            ax_far.set_title(
+                f"> {local_window:g} aa away  ·  {n_far} mutation{'s' if n_far != 1 else ''}",
+                fontsize=9, color=theme.c("muted"),
+            )
 
         # Quick-reference counts, anchored to the figure (not an axes) in the
         # left margin, vertically centered on the domain strip specifically
@@ -1032,41 +1164,59 @@ class VisualizationTabMixin:
         fig.text(
             left_x - 0.01, center_y,
             f"{mutation_count} mutation{'s' if mutation_count != 1 else ''}\n"
-            f"{unique_count} unique",
+            f"{unique_count} unique"
+            + (f"\nlabeling top {self._MUT_MAX_LABELS}\nper panel" if len(mut_df) > self._MUT_MAX_LABELS else ""),
             transform=fig.transFigure, ha="right", va="center",
-            fontsize=8, color="#dcdcdc", linespacing=1.7,
+            fontsize=8, color=theme.c("plot_fg"), linespacing=1.7,
         )
 
         return ax_local, domain_ax
 
-    def _domain_map_legend_handles(self):
-        from matplotlib.lines import Line2D
+    _DOMAIN_TYPE_NAMES = {
+        "domain": "Domain", "family": "Family", "repeat": "Repeat",
+        "homologous_superfamily": "Superfamily", "conserved_site": "Conserved site",
+        "active_site": "Active site", "binding_site": "Binding site",
+    }
 
-        label = "Anchor mutation" if self._viz_is_cluster() else "PTM position"
-        return [
-            Line2D([0], [0], marker="v", color="none", markerfacecolor=_PTM_MARKER_COLOR,
-                   markeredgecolor="white", markersize=10, label=label),
-        ]
-
-    def _lollipop_legend_handles(self):
+    def _domain_map_legend_handles(self, entries: list[dict] | None = None):
+        """Marker keys plus a swatch per domain type actually drawn."""
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
 
-        marker_label = "Anchor mutation" if self._viz_is_cluster() else "PTM site"
+        cluster = self._viz_is_cluster()
+        handles = [
+            Line2D([0], [0], marker="v", color="none", markerfacecolor=theme.resolve(_PTM_MARKER_COLOR),
+                   markeredgecolor=theme.c("plot_bg"), markersize=9,
+                   label="Anchor mutation (domain map)" if cluster else "PTM position"),
+            Line2D([0], [0], marker="*", color="none", markerfacecolor=theme.resolve(_PTM_MARKER_COLOR),
+                   markeredgecolor=theme.c("plot_bg"), markersize=12,
+                   label="Anchor mutation" if cluster else "PTM site"),
+        ]
+        present = {e["type"] for e in entries or []}
+        for t in sorted(present, key=lambda t: (_DOMAIN_TYPE_LANES.get(t, _DOMAIN_TYPE_FALLBACK_LANE), t)):
+            if t in self._DOMAIN_TYPE_NAMES:
+                handles.append(Patch(
+                    facecolor=theme.resolve(_DOMAIN_TYPE_COLORS.get(t, _DOMAIN_TYPE_FALLBACK_COLOR)),
+                    edgecolor="black", linewidth=0.4, label=self._DOMAIN_TYPE_NAMES[t],
+                ))
+        return handles
+
+    def _lollipop_legend_handles(self):
+        """PolyPhen class swatches for the mutation needles."""
+        from matplotlib.patches import Patch
+
         return [
-            Line2D([0], [0], marker="*", color="none", markerfacecolor=_PTM_MARKER_COLOR,
-                   markeredgecolor="white", markersize=14, label=marker_label),
             Patch(facecolor=_PP_COLORS["benign"], label="Benign"),
             Patch(facecolor=_PP_COLORS["possibly_damaging"], label="Possibly damaging"),
             Patch(facecolor=_PP_COLORS["probably_damaging"], label="Probably damaging"),
-            Patch(facecolor=_NEEDLE_DEFAULT_COLOR, label="Unknown / not scored"),
+            Patch(facecolor=theme.resolve(_NEEDLE_DEFAULT_COLOR), label="Unknown / not scored"),
         ]
 
     def _draw_lollipop(self, gene: str, ptm_site: str, ptm_pos: int, mut_df, local_window: float,
                         uid: str, mutation_count: int, unique_count: int) -> None:
         fig = self._viz_fig
         fig.clf()
-        fig.patch.set_facecolor("#2b2b2b")
+        fig.patch.set_facecolor(theme.c("plot_bg"))
         fig.set_size_inches(*self._current_viz_canvas_size_in())
 
         domain_entries = _load_interpro_entries(uid)
@@ -1082,19 +1232,22 @@ class VisualizationTabMixin:
             mutation_count, unique_count,
         )
 
-        ax_local.legend(
-            handles=self._lollipop_legend_handles(), loc="upper left", fontsize=8,
-            facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
+        # Both legends sit in a strip above the plots (figure-anchored, no frame) so
+        # they never cover needles or domain labels.
+        legend_style = dict(
+            fontsize=8, frameon=False, labelcolor=theme.c("plot_fg"),
+            handlelength=1.4, columnspacing=1.2, handletextpad=0.5,
         )
-        # Anchored to the figure (not domain_ax) so it can't overlap domain
-        # boxes/labels near position 0.
         fig.legend(
-            handles=self._domain_map_legend_handles(), loc="lower left",
-            bbox_to_anchor=(0.08, 0.87), fontsize=7,
-            facecolor="#3a3a3a", edgecolor="#555555", labelcolor="#dcdcdc",
+            handles=self._domain_map_legend_handles(domain_entries), loc="lower left",
+            bbox_to_anchor=(0.08, 0.875), ncol=9, **legend_style,
+        )
+        fig.legend(
+            handles=self._lollipop_legend_handles(), loc="lower right",
+            bbox_to_anchor=(0.97, 0.875), ncol=4, **legend_style,
         )
 
-        fig.suptitle(f"{gene} — {ptm_site} and nearby mutations", color="white",
+        fig.suptitle(f"{gene} — {ptm_site} and nearby mutations", color=theme.c("plot_strong"),
                      fontsize=14, fontweight="bold")
 
         self._viz_canvas.draw()
@@ -1161,7 +1314,7 @@ class VisualizationTabMixin:
         status = f"{len(mut_df)} {kind} for {gene} {ptm_site}"
         if note:
             status += f" — {note}"
-        self._viz_status.configure(text=status, text_color="gray60")
+        self._viz_status.configure(text=status, text_color=_GRAY)
 
     def _collapse_to_unique_positions(self, df):
         """Merge same-position mutations into one entry (summed patient count,
@@ -1259,7 +1412,7 @@ class VisualizationTabMixin:
             return
 
         self._viz_status.configure(
-            text=f"Rendering {len(ptm_entries)} {kind_label} for {gene} ({uid})…", text_color="gray60",
+            text=f"Rendering {len(ptm_entries)} {kind_label} for {gene} ({uid})…", text_color=_GRAY,
         )
         domain_entries = _load_interpro_entries(uid)
         protein_length = get_protein_length(_CIF_DIR / uid)
@@ -1288,7 +1441,7 @@ class VisualizationTabMixin:
         """
         fig = self._viz_stack_fig
         fig.clf()
-        fig.patch.set_facecolor("#2b2b2b")
+        fig.patch.set_facecolor(theme.c("plot_bg"))
 
         n = len(ptm_entries)
         width_in = self._current_viz_stack_width_in()
@@ -1297,7 +1450,7 @@ class VisualizationTabMixin:
         max_end = max((e["end"] for e in domain_entries), default=0)
         length = max(protein_length or 0, max_end, max_ptm_pos, 1)
         domain_layout = self._layout_domain_labels(domain_entries, length, width_in)
-        row_height_in = self._domain_strip_height_in(domain_layout[1]) + self._WHOLE_PROTEIN_LOLLIPOP_HEIGHT_IN
+        row_height_in = self._domain_strip_height_in(domain_layout[1]) * 1.3 + self._WHOLE_PROTEIN_LOLLIPOP_HEIGHT_IN
 
         total_height_in = 0.6 + n * row_height_in
         dpi = fig.get_dpi()
@@ -1326,7 +1479,7 @@ class VisualizationTabMixin:
                     domain_entries, length, domain_layout, row_height_in,
                     mutation_count, unique_count,
                 )
-                ax_local.set_title(str(ptm_site), fontsize=10, color="#dcdcdc")
+                ax_local.set_title(str(ptm_site), fontsize=10, color=theme.c("plot_fg"))
             if end < n:
                 self.after(1, _build_batch, end)
             else:
@@ -1347,7 +1500,7 @@ class VisualizationTabMixin:
         self._viz_stack_canvas.draw()
 
         self._viz_status.configure(
-            text=f"{n} {kind_label} for {gene} ({uid})", text_color="gray60",
+            text=f"{n} {kind_label} for {gene} ({uid})", text_color=_GRAY,
         )
 
     def _save_viz_plot(self) -> None:
