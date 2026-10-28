@@ -102,7 +102,7 @@ The residue check in the first two cases makes a wrong move unlikely. A mutation
 ### How results are recorded
 
 - **Labels.** Moved mutations are relabelled in canonical numbering (R248Q → R249Q) everywhere in the outputs. That's the numbering the PTM sites, structures, sequence distances and plots all use.
-- **COSMIC's own label** is kept in the step-1 file's `cosmic_mutation_labels` column (as `R249Q=R248Q`). The long-format outputs carry it in `cosmic_mutation` (and `cosmic_anchor_mutation` for Mutation Clustering anchors), and the app shows it as "COSMIC label". Use it to look a mutation up in COSMIC.
+- **COSMIC's own label** is kept in the step-1 file's `cosmic_mutation_labels` column (as `R249Q=R248Q`). The long-format outputs carry it in `cosmic_mutation` (and `cosmic_anchor_mutation` for Mutation Clustering anchors), and the app shows it as "COSMIC label". Use it to look a mutation up in COSMIC. The same isoform check runs on ClinVar mutations (ClinVar also numbers a variant along its own RefSeq transcript's protein, which can be a different isoform), and for ClinVar results the app shows this column as "ClinVar label"; the column names in the data files stay `cosmic_mutation` and `cosmic_anchor_mutation`.
 - **Which isoform COSMIC used** for each renumbered protein is recorded in the step-1 file's `cosmic_numbering_isoform` column.
 - **Unmapped mutations** keep COSMIC's label and are listed in the step-1 file's `unmapped_mutations` column. Step 3 still measures them at COSMIC's position number but tags them `(isoform?)`. Step 3 also tags any mutation whose reference residue doesn't match the AlphaFold model's residue at its position, which catches differences between the model and the current UniProt sequence.
 

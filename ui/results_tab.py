@@ -125,7 +125,7 @@ class ResultsTabMixin:
 
         for display, col_id, width, numeric, default in col_defs:
             anchor = "e" if numeric else "w"
-            tv.heading(col_id, text=display,
+            tv.heading(col_id, text=self._source_text(display),
                        command=lambda c=col_id: self._sort_tv(tv, c, False))
             tv.column(col_id, width=width, minwidth=30, stretch=False, anchor=anchor)
 
@@ -209,7 +209,7 @@ class ResultsTabMixin:
         current = set(getattr(self, f"_{which}_visible_cols"))
         # The other PTM source's columns aren't offered, but keep their state
         hidden = self._hidden_source_cols(which)
-        registry = [c for c in registry if c[1] not in hidden]
+        registry = [(self._source_text(c[0]), *c[1:]) for c in registry if c[1] not in hidden]
         kept_hidden = [c for c in getattr(self, f"_{which}_visible_cols") if c in hidden]
 
         win = ctk.CTkToplevel(self)
@@ -232,7 +232,7 @@ class ResultsTabMixin:
             ctk.CTkCheckBox(row, text=display, variable=var).pack(side="left")
             help_text = col_help.get(col_id)
             if help_text:
-                help_icon(row, help_text).pack(side="left", padx=(6, 0))
+                help_icon(row, self._source_text(help_text)).pack(side="left", padx=(6, 0))
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(4, 10))
@@ -439,7 +439,7 @@ class ResultsTabMixin:
 
     def _open_filter_picker(self, which: str) -> None:
         full_registry, _col_help, _col_title, title = _TV_REGISTRY[which]
-        registry = [c for c in full_registry if c[1] != "#col"]
+        registry = [(self._source_text(c[0]), *c[1:]) for c in full_registry if c[1] != "#col"]
         current_filters = getattr(self, f"_{which}_filters")
         labels_by_id = {c[1]: c[0] for c in registry}
         id_by_label = {c[0]: c[1] for c in registry}
@@ -866,7 +866,21 @@ class ResultsTabMixin:
     def _results_mutation_source_label(self) -> str:
         return self._results_mutation_source_var.get()
 
+    def _source_text(self, text: str) -> str:
+        """*text* with "COSMIC" swapped for the mutation source the Results tab is showing,
+        so the "COSMIC label" columns read "ClinVar label" for ClinVar results."""
+        var = getattr(self, "_results_mutation_source_var", None)
+        return text.replace("COSMIC", var.get()) if var is not None else text
+
+    def _refresh_source_headings(self) -> None:
+        for tv, col_defs in ((self._mut_tv, _MUT_TV_COLS), (self._anchor_tv, _ANCHOR_TV_COLS),
+                             (self._nearby_tv, _NEARBY_TV_COLS)):
+            for display, col_id, *_rest in col_defs:
+                if "COSMIC" in display:
+                    tv.heading(col_id, text=self._source_text(display))
+
     def _on_results_mutation_source_change(self, _value: str = "") -> None:
+        self._refresh_source_headings()
         self._load_results()
 
     def _on_results_ptm_source_change(self, _value: str = "") -> None:
@@ -942,7 +956,7 @@ class ResultsTabMixin:
         all_cols = list(tv["columns"])
         data_cols = [c for c in all_cols if c != "#col"]
         col_index = {c: i for i, c in enumerate(all_cols)}
-        headers = [display for display, col_id, *_rest in _MUT_TV_COLS if col_id in data_cols]
+        headers = [self._source_text(display) for display, col_id, *_rest in _MUT_TV_COLS if col_id in data_cols]
 
         gene = site = ""
         sel = self._ptm_tv.selection()

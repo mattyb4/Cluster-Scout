@@ -174,3 +174,17 @@ class TestPipelineUtilsClinVar:
             "Filter and merge PhosphoSitePlus + ClinVar data"
         assert mod.pipeline_steps("mutation-clustering", "ptmd", "clinvar")[0][0] == "Filter ClinVar hotspot mutations"
         assert mod.pipeline_steps("ptm-proximity")[0][0] == "Filter and merge PTMD + COSMIC data"
+
+
+class TestResultsLabelFollowsMutationSource:
+    def test_cosmic_label_headings_read_clinvar_for_clinvar_results(self):
+        from types import SimpleNamespace
+
+        from ui.results_tab import ResultsTabMixin
+        tab = ResultsTabMixin.__new__(ResultsTabMixin)
+        tab._results_mutation_source_var = SimpleNamespace(get=lambda: "ClinVar")
+        assert tab._source_text("COSMIC label") == "ClinVar label"
+        assert tab._source_text("Anchor COSMIC label") == "Anchor ClinVar label"
+        assert tab._source_text("Mutation") == "Mutation", "columns that don't name the source are untouched"
+        tab._results_mutation_source_var = SimpleNamespace(get=lambda: "COSMIC")
+        assert tab._source_text("COSMIC label") == "COSMIC label"
