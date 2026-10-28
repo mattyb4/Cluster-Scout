@@ -30,6 +30,8 @@ from ui.common import (
     _MUT_ENTRY_RE,
     _MUT_LONG_SRC_MAP,
     _MUT_TV_COLS,
+    _MUTATION_SOURCE_BY_LABEL,
+    _MUTATION_SOURCE_OPTIONS,
     _NEARBY_COL_HELP,
     _NEARBY_TV_COLS,
     _PP_LABEL,
@@ -42,6 +44,7 @@ from ui.common import (
     _YELLOW,
     _load_column_prefs,
     _save_column_prefs,
+    cluster_output_paths,
     help_icon,
     ptm_output_paths,
 )
@@ -612,6 +615,14 @@ class ResultsTabMixin:
             command=self._on_results_ptm_source_change,
         )
         self._results_source_toggle.pack(side=tk.LEFT, padx=(10, 0))
+        # Both modes' results come from either mutation source, again with files of their own
+        self._results_mutation_source_var = ctk.StringVar(value=_MUTATION_SOURCE_OPTIONS[0][0])
+        self._results_mutation_toggle = ctk.CTkSegmentedButton(
+            toolbar, values=[label for label, _ in _MUTATION_SOURCE_OPTIONS],
+            variable=self._results_mutation_source_var,
+            command=self._on_results_mutation_source_change,
+        )
+        self._results_mutation_toggle.pack(side=tk.LEFT, padx=(10, 0))
 
         self._visualize_button = ctk.CTkButton(
             toolbar, text="Visualize", width=90, height=28, font=ctk.CTkFont(size=12),
@@ -848,10 +859,26 @@ class ResultsTabMixin:
     def _results_ptm_source_label(self) -> str:
         return self._results_ptm_source_var.get()
 
+    def _results_mutation_source(self) -> str:
+        """The mutation source whose results both modes show ("cosmic"/"clinvar")."""
+        return _MUTATION_SOURCE_BY_LABEL[self._results_mutation_source_var.get()]
+
+    def _results_mutation_source_label(self) -> str:
+        return self._results_mutation_source_var.get()
+
+    def _on_results_mutation_source_change(self, _value: str = "") -> None:
+        self._load_results()
+
     def _on_results_ptm_source_change(self, _value: str = "") -> None:
         for which in ("ptm", "mut"):
             self._apply_display_columns(which)
         self._load_results()
+
+    def _clinvar_count_note(self) -> str:
+        """Status-line reminder that ClinVar runs' "patient" counts are ClinVar submitters."""
+        if self._results_mutation_source() != "clinvar":
+            return ""
+        return " · ClinVar: patient counts are ClinVar submitters"
 
     def _refresh_results_status(self) -> None:
         """Recompute the shared status label for whichever mode is currently
@@ -870,7 +897,7 @@ class ResultsTabMixin:
                          else " · enable long format for per-mutation detail")
             self._results_status.configure(
                 text=f"{self._results_ptm_source_label()}: {n_sites} PTM sites · "
-                     f"{n_proteins} proteins{long_note}",
+                     f"{n_proteins} proteins{long_note}{self._clinvar_count_note()}",
                 text_color=_GRAY,
             )
         else:
@@ -884,7 +911,7 @@ class ResultsTabMixin:
             long_note = (" · long format available" if self._cluster_df_long is not None
                          else " · enable long format for per-mutation detail")
             self._results_status.configure(
-                text=f"{n_anchors} anchor mutations · {n_proteins} proteins{long_note}",
+                text=f"{n_anchors} anchor mutations · {n_proteins} proteins{long_note}{self._clinvar_count_note()}",
                 text_color=_GRAY,
             )
 
@@ -978,9 +1005,9 @@ class ResultsTabMixin:
             # e.g. the PTM source was switched mid-load: check again afterwards
             self._results_reload_after = True
             return
-        ptm_paths = ptm_output_paths(self._output_dir, self._results_ptm_source())
-        cluster_paths = {"db": self._output_dir / "mutation_cluster_db.tsv",
-                         "long": self._output_dir / "mutation_cluster_long.tsv"}
+        mutation_source = self._results_mutation_source()
+        ptm_paths = ptm_output_paths(self._output_dir, self._results_ptm_source(), mutation_source)
+        cluster_paths = cluster_output_paths(self._output_dir, mutation_source)
         ptm_needs_load = force or self._mtime_key(ptm_paths["db"]) != self._results_loaded_key
         cluster_needs_load = force or self._mtime_key(cluster_paths["db"]) != self._cluster_loaded_key
         if not ptm_needs_load and not cluster_needs_load:
@@ -1068,8 +1095,9 @@ class ResultsTabMixin:
 
         if result.get("missing"):
             source = self._results_ptm_source_label()
-            msg = (f"No {source} PTM Proximity output found in {self._output_dir.name}/ -- "
-                   f"run PTM Proximity with PTM source {source} to generate it")
+            mutations = self._results_mutation_source_label()
+            msg = (f"No {source} + {mutations} PTM Proximity output found in {self._output_dir.name}/ -- "
+                   f"run PTM Proximity with PTM source {source} and mutation source {mutations} to generate it")
             self._results_load_msg["ptm"] = msg
             self._show_tv_message(self._ptm_tv, msg, _RED)
             self._show_tv_message(self._mut_tv, msg, _RED)
@@ -1102,7 +1130,9 @@ class ResultsTabMixin:
         import pandas as pd
 
         if result.get("missing"):
-            msg = f"No Mutation Clustering output found in {self._output_dir.name}/"
+            mutations = self._results_mutation_source_label()
+            msg = (f"No {mutations} Mutation Clustering output found in {self._output_dir.name}/ -- "
+                   f"run Mutation Clustering with mutation source {mutations} to generate it")
             self._results_load_msg["cluster"] = msg
             self._show_tv_message(self._anchor_tv, msg, _RED)
             self._show_tv_message(self._nearby_tv, msg, _RED)

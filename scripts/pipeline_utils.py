@@ -38,6 +38,7 @@ def fmt_time(seconds: float) -> str:
 # ── Input folder resolution ───────────────────────────────────────────────────
 
 COSMIC_INPUT_DIR = "cosmic"
+CLINVAR_INPUT_DIR = "ClinVar"
 PTMD_INPUT_DIR = "ptmd"
 PSP_INPUT_DIR = "phosphositeplus"
 INTERACTORS_1433_INPUT_DIR = "1433_interactors"
@@ -66,8 +67,16 @@ MUTATION_CLUSTERING_HOTSPOTS_FILENAME = "COSMIC_hotspots_by_protein.tsv"
 PTM_SOURCES = ("ptmd", "psp")
 DEFAULT_PTM_SOURCE = "ptmd"
 
+# Where the mutations come from. COSMIC's files and columns keep their original
+# names; ClinVar's get a "ClinVar"/"clinvar_" tag so a ClinVar run never
+# overwrites a COSMIC run (or the reverse).
+MUTATION_SOURCES = ("cosmic", "clinvar")
+DEFAULT_MUTATION_SOURCE = "cosmic"
+MUTATION_SOURCE_LABELS = {"cosmic": "COSMIC", "clinvar": "ClinVar"}
 
-def hotspots_tsv_path(root: Path, mode: str, ptm_source: str = DEFAULT_PTM_SOURCE) -> Path:
+
+def hotspots_tsv_path(root: Path, mode: str, ptm_source: str = DEFAULT_PTM_SOURCE,
+                      mutation_source: str = DEFAULT_MUTATION_SOURCE) -> Path:
     """Path to the mode-specific Step-1 filtered hotspot TSV under *root*.
 
     *mode* is "mutation-clustering" or (anything else, including the default)
@@ -75,25 +84,48 @@ def hotspots_tsv_path(root: Path, mode: str, ptm_source: str = DEFAULT_PTM_SOURC
     pipeline scripts. *ptm_source* ("ptmd" or "psp") only matters for
     ptm-proximity.
     """
-    if mode == "mutation-clustering":
-        filename = MUTATION_CLUSTERING_HOTSPOTS_FILENAME
-    elif ptm_source == "psp":
-        filename = PSP_PTM_PROXIMITY_HOTSPOTS_FILENAME
-    else:
-        filename = PTM_PROXIMITY_HOTSPOTS_FILENAME
+    filename = _hotspots_filename(mode, ptm_source)
+    if mutation_source == "clinvar":
+        filename = filename.replace("COSMIC", "ClinVar")
     return root / "data" / "steps" / filename
 
 
-def ptm_output_paths(output_dir: Path, ptm_source: str = DEFAULT_PTM_SOURCE) -> dict[str, Path]:
+def _hotspots_filename(mode: str, ptm_source: str) -> str:
+    if mode == "mutation-clustering":
+        return MUTATION_CLUSTERING_HOTSPOTS_FILENAME
+    if ptm_source == "psp":
+        return PSP_PTM_PROXIMITY_HOTSPOTS_FILENAME
+    return PTM_PROXIMITY_HOTSPOTS_FILENAME
+
+
+def _output_prefix(mutation_source: str, ptm_source: str | None = None) -> str:
+    return ("clinvar_" if mutation_source == "clinvar" else "") + ("psp_" if ptm_source == "psp" else "")
+
+
+def ptm_output_paths(output_dir: Path, ptm_source: str = DEFAULT_PTM_SOURCE,
+                     mutation_source: str = DEFAULT_MUTATION_SOURCE) -> dict[str, Path]:
     """PTM-proximity output file paths for *ptm_source*, keyed "db", "long",
-    "skipped" and "unmatched". PSP files carry a "psp_" prefix so PTMD and PSP
-    results can sit side by side in one output folder."""
-    prefix = "psp_" if ptm_source == "psp" else ""
+    "skipped" and "unmatched". PSP files carry a "psp_" prefix and ClinVar
+    files a "clinvar_" prefix so every combination can sit side by side in one
+    output folder."""
+    prefix = _output_prefix(mutation_source, ptm_source)
+    unmatched_name = f"ptm_genes_without_{'clinvar' if mutation_source == 'clinvar' else 'cosmic'}_mutations.tsv"
     return {
         "db": output_dir / f"{prefix}ptm_mutation_proximity_db.tsv",
         "long": output_dir / f"{prefix}ptm_mutation_proximity_long.tsv",
         "skipped": output_dir / "logs" / f"{prefix}ptm_skipped.tsv",
-        "unmatched": output_dir / "logs" / f"{prefix}ptm_genes_without_cosmic_mutations.tsv",
+        "unmatched": output_dir / "logs" / f"{prefix}{unmatched_name}",
+    }
+
+
+def cluster_output_paths(output_dir: Path,
+                         mutation_source: str = DEFAULT_MUTATION_SOURCE) -> dict[str, Path]:
+    """Mutation-clustering output file paths, keyed "db", "long" and "skipped"."""
+    prefix = _output_prefix(mutation_source)
+    return {
+        "db": output_dir / f"{prefix}mutation_cluster_db.tsv",
+        "long": output_dir / f"{prefix}mutation_cluster_long.tsv",
+        "skipped": output_dir / "logs" / f"{prefix}mutation_cluster_skipped.tsv",
     }
 
 
@@ -131,6 +163,10 @@ PTMD_REQUIRED_COLUMNS = (
     "State", "UniProt", "Disease", "MutationSite", "Residue", "Position", "Type",
 )
 INTERACTORS_1433_REQUIRED_COLUMNS = ("Residue", "PMID")
+# ClinVar's variant_summary header starts "#AlleleID"; only these are read
+CLINVAR_REQUIRED_COLUMNS = (
+    "Name", "GeneSymbol", "ClinicalSignificance", "Assembly", "NumberSubmitters",
+)
 
 
 def _peek_columns(path: Path, is_excel: bool) -> list[str]:
@@ -158,6 +194,11 @@ def _validate_columns(path: Path, required: tuple[str, ...], is_excel: bool = Fa
 def validate_cosmic_file(path: Path) -> list[str]:
     """Validate that *path* looks like a COSMIC Mutant Census TSV."""
     return _validate_columns(path, COSMIC_REQUIRED_COLUMNS)
+
+
+def validate_clinvar_file(path: Path) -> list[str]:
+    """Validate that *path* looks like ClinVar's variant_summary.txt(.gz)."""
+    return _validate_columns(path, CLINVAR_REQUIRED_COLUMNS)
 
 
 def validate_ptmd_file(path: Path) -> list[str]:
@@ -412,14 +453,25 @@ MUTATION_CLUSTERING_STEPS = [
 ]
 
 
-def pipeline_steps(mode: str, ptm_source: str = DEFAULT_PTM_SOURCE) -> list[tuple[str, str]]:
-    """Step labels for *mode*, with the step-1 label naming the PTM source."""
+def pipeline_steps(mode: str, ptm_source: str = DEFAULT_PTM_SOURCE,
+                   mutation_source: str = DEFAULT_MUTATION_SOURCE) -> list[tuple[str, str]]:
+    """Step labels for *mode*, with the step-1 label naming the PTM and
+    mutation sources."""
+    mut = MUTATION_SOURCE_LABELS[mutation_source]
+
+    def relabel(text: str) -> str:
+        return text.replace("COSMIC", mut)
+
     if mode == "mutation-clustering":
-        return MUTATION_CLUSTERING_STEPS
-    if ptm_source != "psp":
-        return PTM_PROXIMITY_STEPS
-    return [
-        ("Filter and merge PhosphoSitePlus + COSMIC data",
-         "Filtering and merging PhosphoSitePlus + COSMIC data - this may take a moment"),
-        *PTM_PROXIMITY_STEPS[1:],
-    ]
+        steps = MUTATION_CLUSTERING_STEPS
+    elif ptm_source != "psp":
+        steps = PTM_PROXIMITY_STEPS
+    else:
+        steps = [
+            ("Filter and merge PhosphoSitePlus + COSMIC data",
+             "Filtering and merging PhosphoSitePlus + COSMIC data - this may take a moment"),
+            *PTM_PROXIMITY_STEPS[1:],
+        ]
+    if mutation_source == DEFAULT_MUTATION_SOURCE:
+        return steps
+    return [(relabel(panel), relabel(log)) for panel, log in steps]

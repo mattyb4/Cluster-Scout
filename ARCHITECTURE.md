@@ -61,7 +61,7 @@ The numbers ARE the data flow — each step reads what the previous step wrote:
 
 | Script | Does | Reads | Writes |
 |---|---|---|---|
-| `1_filter.py` | Merge + filter COSMIC and PTMD; map genes→UniProt | `data/input/` files | `data/steps/*_hotspots_by_protein.tsv` |
+| `1_filter.py` | Merge + filter COSMIC (or ClinVar, via `clinvar_input.py`) and PTMD/PSP; map genes→UniProt | `data/input/` files | `data/steps/*_hotspots_by_protein.tsv` |
 | `2_download_structures.py` | Fetch AlphaFold CIF + PAE per protein | step-1 TSV | `cif_models/{uniprot}/` |
 | `3_find_nearby_mutations.py` | Compute 3D distances PTM↔mutation | step-1 TSV + CIFs | `Output/*_db.tsv` |
 | `4_annotate.py` | Add 14-3-3, PolyPhen, kinase, AIUPred, InterPro | step-3 output | annotated `Output/*_db.tsv` |
@@ -262,6 +262,7 @@ standalone scripts.
 - **Step 4's phases run concurrently.** `_run_phases` in `4_annotate.py` runs 14-3-3, PolyPhen, kinase, AIUPred and InterPro on threads at once. Each works on its own copy of just the columns it reads, and its columns are merged back in the fixed phase order, so output is byte-identical to a sequential run. Progress is the average of the phases' own progress. Don't give two phases a shared mutable input or cache file.
 - **14-3-3 prefetch.** `4_annotate.py --prefetch-1433 --ptm-source X` fills `data/cache/1433pred/` for the step-1 table's proteins with Ser/Thr sites. The GUI runner and `main.py` start it after step 1 of a PTM-proximity run, suspend or resume it on pause and resume, and terminate it on cancel or when step 3 finishes. Cache files are written to a temporary file and renamed, so stopping it at any point can't leave a partial file.
 - **Kinase Library runs in its own environment.** `scripts/kinase_predictor.py` carries inline script metadata (`kinase-library==1.8.0`, locked in `kinase_predictor.py.lock`), and step 4 runs it via `uv run --script` in parallel subprocesses. Every kinase-library release pins numpy ~1.26 / pandas ~2.2, which conflicts with this project's pins. Installing it into the project env silently broke kinase predictions once, when a later `uv sync` removed it. Don't add it to `pyproject.toml`.
+- **AIUPred runs in its own environment too, for a different reason: size.** `scripts/aiupred_predictor.py` pins the `aiupred` package to a commit (fetched as a zip, so users don't need `git`; locked in `aiupred_predictor.py.lock`) and pulls in PyTorch, which the rest of the app doesn't need. Both helpers are set up by `_check_uv_helper` in `4_annotate.py`, which prints a "downloading dependencies" notice only when the environment isn't built yet (an `--offline` check tells the two cases apart). Step 4 scores proteins locally from their AlphaFold sequences, in chunks of 25 per helper process, saving the cache after each chunk; the web API is only the fallback. Running helper processes in parallel doesn't help (it is CPU-bound).
 
 - **Two shared-utility modules**, mirroring the two layers: `pipeline_utils.py`
   (backend) and `ui/common.py` (frontend). Don't import GUI code into the

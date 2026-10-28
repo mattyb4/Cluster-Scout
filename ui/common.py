@@ -22,7 +22,9 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
+from clinvar_input import CLINVAR_CLASS_LABELS, CLINVAR_CLASSES  # noqa: E402
 from pipeline_utils import (  # noqa: E402
+    CLINVAR_INPUT_DIR,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
     INTERACTORS_1433_INPUT_DIR,
@@ -30,6 +32,7 @@ from pipeline_utils import (  # noqa: E402
     PSP_INPUT_DIR,
     PTM_PROXIMITY_STEPS,
     PTMD_INPUT_DIR,
+    cluster_output_paths,
     extract_uniprot_from_cif,
     get_protein_length,
     hotspots_tsv_path,
@@ -38,6 +41,7 @@ from pipeline_utils import (  # noqa: E402
     ptm_output_paths,
     resolve_input_file,
     validate_1433_file,
+    validate_clinvar_file,
     validate_cosmic_file,
     validate_ptmd_file,
 )
@@ -58,6 +62,7 @@ __all__ = [
     "MUTATION_CLUSTERING_STEPS",
     "PTM_PROXIMITY_STEPS",
     "_fmt_time",
+    "cluster_output_paths",
     "extract_uniprot_from_cif",
     "get_protein_length",
     "discover_psp_files",
@@ -81,6 +86,12 @@ _INPUT_FOLDERS: dict[str, tuple[Path, tuple[str, ...], str, object]] = {
         "COSMIC Mutant Census TSV",
         validate_cosmic_file,
     ),
+    "ClinVar": (
+        input_dir(PROJECT_ROOT, CLINVAR_INPUT_DIR),
+        (".txt", ".gz"),
+        "ClinVar variant_summary (.txt or .txt.gz)",
+        validate_clinvar_file,
+    ),
     "PTMD": (
         input_dir(PROJECT_ROOT, PTMD_INPUT_DIR),
         (".tsv",),
@@ -96,6 +107,12 @@ _PSP_INPUT_FOLDER = input_dir(PROJECT_ROOT, PSP_INPUT_DIR)
 # PTM Proximity's two PTM sources: (Pipeline/Results tab label, --ptm-source value)
 _PTM_SOURCE_OPTIONS = [("PTMD", "ptmd"), ("PhosphoSitePlus", "psp")]
 _PTM_SOURCE_BY_LABEL = dict(_PTM_SOURCE_OPTIONS)
+
+# Where the mutations come from: (Pipeline/Results tab label, --mutation-source value)
+_MUTATION_SOURCE_OPTIONS = [("COSMIC", "cosmic"), ("ClinVar", "clinvar")]
+_MUTATION_SOURCE_BY_LABEL = dict(_MUTATION_SOURCE_OPTIONS)
+# ClinVar classification classes the Pipeline tab offers: (checkbox label, --clinvar-classes value)
+_CLINVAR_CLASS_OPTIONS = [(CLINVAR_CLASS_LABELS[key], key) for key in CLINVAR_CLASSES]
 
 
 # ── Hover-tooltip help icons ──────────────────────────────────────────────────

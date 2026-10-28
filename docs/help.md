@@ -13,6 +13,8 @@ The pipeline requires two input data files. Use the **Browse** buttons on the Pi
 
 Each input folder should contain exactly **one** file. Browsing a new file replaces the previous one.
 
+**ClinVar (optional):** needed only with ClinVar as the mutation source (see **Mutation source** below). Download `variant_summary.txt.gz` from ClinVar's FTP site (https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) and pick it with **Browse** next to ClinVar. It works zipped or unzipped (about 4 GB unzipped, so copying it in takes a moment). Replace it with a newer download the same way.
+
 **PhosphoSitePlus (optional):** PTM Proximity can use a PhosphoSitePlus download as its PTM sites instead of PTMD (see **PTM source** below). Click **Browse** next to PhosphoSitePlus and pick the download *folder*. The app finds the files it needs by their columns (not their names), checks them, and copies them in. The `*_site_dataset` files are required, and `Disease-associated_sites` is optional. A newer download can replace an older one the same way.
 
 A third input — the **14-3-3 confirmed interactors** spreadsheet — is bundled with the app rather than something you provide. It's small and rarely updated, so it isn't part of the Input Files section.
@@ -79,7 +81,9 @@ Both heatmaps can be on at once — they're written as separate scripts, since C
 
 ### Step 1: Filter and Merge Data
 
-Merges PTM sites (PTMD's disease-associated sites, or every PhosphoSitePlus site) with COSMIC recurrent mutations. A mutation must appear in at least a minimum number of distinct samples (3 by default — configurable via the **Min samples** field) with confirmed somatic status to be included.
+Merges PTM sites (PTMD's disease-associated sites, or every PhosphoSitePlus site) with the mutation source's recurrent mutations. With COSMIC, a mutation must appear in at least a minimum number of distinct samples (3 by default — configurable via the **Min samples** field) with confirmed somatic status to be included. With ClinVar, the same field is the minimum number of ClinVar submitters.
+
+**Mutation source:** PTM Proximity and Mutation Clustering can take their mutations from COSMIC (the default: recurrent somatic cancer mutations) or from ClinVar (missense variants from any disease). For ClinVar, the **ClinVar classes** checkboxes choose which classifications count — Pathogenic and Likely pathogenic by default (about 4,400 genes; about 2,200 meet the default Min samples of 3). Adding Uncertain significance makes the run far larger. Only GRCh38 single-residue substitutions are used, and a mutation's count is the number of ClinVar submitters, summed over variants giving the same protein change. Each source has its own output files (ClinVar's start with `clinvar_`), and the Results tab has a matching **COSMIC / ClinVar** toggle. Count columns keep their names ("Patients", "Total gene pts") but hold ClinVar submitter counts.
 
 ### Step 2: Download Structures
 
@@ -96,7 +100,7 @@ In PTM Proximity mode, adds five types of annotations to each PTM site:
 - **14-3-3 binding predictions** — Queries the 14-3-3-Pred API and cross-references experimentally confirmed interactors (Ser/Thr sites only)
 - **PolyPhen-2 scores** — Queries myvariant.info for pathogenicity predictions on each mutation
 - **Kinase predictions** — Uses the Kinase Library to predict the top 5 upstream kinases for each phosphorylation site (Ser/Thr/Tyr sites only). It runs in its own environment, which the first run sets up automatically (about a minute). If that fails, the log says why, and those sites are retried on the next run.
-- **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue
+- **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue Scores are computed on your computer using the AIUPred package, which runs in its own environment. The first run downloads it (PyTorch, a few minutes); the log says when this is happening. If the local setup fails, the AIUPred web server is used instead.
 - **InterPro functional domains** — Queries the InterPro REST API for curated domain/family/site entries on each protein, then reports which entry (if any) contains the PTM site's or mutation's specific residue position
 
 Mutation Clustering mode also runs this step, applying the PolyPhen-2, AIUPred, and InterPro annotations above to the anchor mutation and its nearby mutations — 14-3-3 and kinase predictions are skipped, since both require a curated PTM site that this mode has no concept of.
@@ -227,7 +231,7 @@ The pipeline caches data to speed up subsequent runs:
 | 14-3-3 predictions | `data/cache/1433pred/` | Per-protein API responses |
 | PolyPhen-2 scores | `data/cache/polyphen.tsv` | Per-mutation pathogenicity |
 | Kinase predictions | `data/cache/kinase_predictions.tsv` | Per-sequence-window kinase scores |
-| AIUPred disorder | `data/cache/aiupred_disorder.tsv` | Per-residue disorder/binding scores |
+| AIUPred disorder | `data/cache/aiupred_disorder.tsv` | Per-residue disorder/binding scores (computed locally; web server as fallback) |
 | InterPro domains | `data/cache/interpro_domains.tsv` | Per-protein functional domain/family/site entries |
 
 All caches are automatically populated on first run and reused on subsequent runs. Use **Manage Cache** on the Pipeline tab to clear individual caches (or all of them) and force fresh lookups.

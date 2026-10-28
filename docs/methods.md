@@ -15,6 +15,17 @@ Implemented in `scripts/4_annotate.py` (step 4). Each mutation gets the PolyPhen
 
 ---
 
+## ClinVar as a mutation source
+
+Source file: ClinVar's `variant_summary.txt` (one row per variant per genome assembly).
+
+1. **Variants kept.** Rows on the GRCh38 assembly whose `Name` ends in a protein change `(p.Xaa123Yaa)` between two different standard amino acids. Synonymous (`=`), stop (`Ter`), frameshift, extension, indel and selenocysteine/pyrrolysine changes are dropped. The three-letter codes are converted to one-letter notation. For variants spanning several genes (`GeneSymbol` of the form `A;B`), the gene named in the variant's transcript is used.
+2. **Classes.** A variant is included when any part of its `ClinicalSignificance` (split on `/`, so `Pathogenic/Likely pathogenic` counts as both) belongs to a selected class: Pathogenic, Likely pathogenic, Uncertain significance, Likely benign, Benign, or Conflicting classifications of pathogenicity. The default is Pathogenic and Likely pathogenic.
+3. **Counts.** A mutation's count is the sum of `NumberSubmitters` over every included variant of the same gene and protein change (a variant with 0 submitters counts as 1). This stands in for COSMIC's number of affected samples; the hotspot threshold (default 3) is applied to it, and the per-gene total is the sum over all of the gene's included missense variants before that threshold.
+4. **Numbering.** ClinVar numbers a mutation along its RefSeq transcript's protein. Positions are then put on the canonical AlphaFold-modeled sequence by the same procedure as COSMIC's (next section).
+
+ClinVar submitter counts are not independent patients: several submitters can report the same patient, and ClinVar's clinical focus means well-studied genes have more submissions. Counts therefore compare variants within a ClinVar run, not against COSMIC sample counts.
+
 ## Mapping COSMIC mutations onto the canonical protein sequence
 
 Implemented in `scripts/cosmic_numbering.py`. It runs in pipeline step 1 (`scripts/1_filter.py`, `apply_canonical_numbering`) for every pipeline mode and PTM source.

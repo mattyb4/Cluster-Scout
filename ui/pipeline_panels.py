@@ -20,11 +20,14 @@ from ui.common import (
     _BTN2_HOVER,
     _CHIP,
     _CHIP_HOVER,
+    _CLINVAR_CLASS_OPTIONS,
     _DANGER,
     _GRAY,
     _GREEN,
     _INPUT_FOLDERS,
     _MODE_HELP,
+    _MUTATION_SOURCE_BY_LABEL,
+    _MUTATION_SOURCE_OPTIONS,
     _PSP_INPUT_FOLDER,
     _PTM_SOURCE_BY_LABEL,
     _PTM_SOURCE_OPTIONS,
@@ -167,6 +170,47 @@ class PipelineTabMixin:
             "overwrites the other.",
         ).pack(side="left", padx=(6, 8), pady=8)
 
+        # Mutation source (PTM Proximity and Mutation Clustering), and for ClinVar
+        # the classifications to include -- both shown/hidden in _rebuild_step_rows
+        self._mutation_source_frame = ctk.CTkFrame(mode_area, fg_color="transparent")
+        ctk.CTkLabel(
+            self._mutation_source_frame, text="Mutation source", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 8), pady=6)
+        self._mutation_source_var = ctk.StringVar(value=_MUTATION_SOURCE_OPTIONS[0][0])
+        ctk.CTkSegmentedButton(
+            self._mutation_source_frame, values=[label for label, _ in _MUTATION_SOURCE_OPTIONS],
+            variable=self._mutation_source_var, command=lambda _v: self._rebuild_step_rows(),
+        ).pack(side="left", pady=8)
+        help_icon(
+            self._mutation_source_frame,
+            "Where the mutations come from. COSMIC: recurrent somatic cancer "
+            "mutations from the COSMIC Mutant Census. ClinVar: missense variants "
+            "from ClinVar's variant_summary file (any disease), counted by the "
+            "number of ClinVar submitters. Each source writes its own files "
+            "(ClinVar's start with clinvar_), so running one never overwrites "
+            "the other.",
+        ).pack(side="left", padx=(6, 8), pady=8)
+
+        self._clinvar_classes_frame = ctk.CTkFrame(mode_area, fg_color="transparent")
+        ctk.CTkLabel(
+            self._clinvar_classes_frame, text="ClinVar classes", width=_LABEL_W, anchor="w",
+        ).pack(side="left", padx=(0, 8), pady=6)
+        self._clinvar_class_vars: dict[str, ctk.BooleanVar] = {}
+        for label, key in _CLINVAR_CLASS_OPTIONS:
+            var = ctk.BooleanVar(value=key in ("P", "LP"))
+            self._clinvar_class_vars[key] = var
+            ctk.CTkCheckBox(
+                self._clinvar_classes_frame, text=label, variable=var,
+                checkbox_width=18, checkbox_height=18,
+            ).pack(side="left", padx=(0, 10), pady=8)
+        help_icon(
+            self._clinvar_classes_frame,
+            "Which ClinVar classifications count. Pathogenic + Likely pathogenic "
+            "is about 4,400 genes; adding Uncertain significance makes the run "
+            "far larger. A combined classification such as "
+            "'Pathogenic/Likely pathogenic' counts for each part.",
+        ).pack(side="left", padx=(0, 8), pady=8)
+
         # Output folder selector
         out_frame = ctk.CTkFrame(settings_card, fg_color="transparent")
         out_frame.grid(row=2, column=0, padx=14, pady=2, sticky="ew")
@@ -225,7 +269,8 @@ class PipelineTabMixin:
         ctk.CTkLabel(settings_frame, text="Min samples:").pack(side="left", padx=(8, 4), pady=8)
         help_icon(
             settings_frame,
-            "Minimum number of distinct COSMIC patient samples a mutation "
+            "Minimum number of distinct COSMIC patient samples (or ClinVar "
+            "submitters, with the ClinVar source) a mutation "
             "must appear in to count as a recurrent hotspot. Lower values "
             "include rarer mutations; higher values restrict to mutations "
             "seen more often. In Single Protein mode, this can only tighten "
@@ -490,6 +535,14 @@ class PipelineTabMixin:
         """The selected PTM source as a --ptm-source value ("ptmd" or "psp")."""
         return _PTM_SOURCE_BY_LABEL[self._ptm_source_var.get()]
 
+    def _mutation_source(self) -> str:
+        """The selected mutation source as a --mutation-source value ("cosmic" or "clinvar")."""
+        return _MUTATION_SOURCE_BY_LABEL[self._mutation_source_var.get()]
+
+    def _clinvar_classes(self) -> list[str]:
+        """The ticked ClinVar classes as --clinvar-classes values."""
+        return [key for _label, key in _CLINVAR_CLASS_OPTIONS if self._clinvar_class_vars[key].get()]
+
     def _psp_filter_args(self) -> tuple[list[str], list[str]]:
         """Step-1 arguments for the PhosphoSitePlus filters, plus any problems
         with the entered values (blank minimum = 0, blank maximum = no limit)."""
@@ -539,10 +592,15 @@ class PipelineTabMixin:
 
         mode = self._mode.get()
         self._sync_output_dir_section_for_mode()
+        # Re-pack in a fixed order, since pack() appends after whatever is showing
+        for frame in (self._ptm_source_frame, self._mutation_source_frame, self._clinvar_classes_frame):
+            frame.pack_forget()
         if mode == "ptm-proximity":
             self._ptm_source_frame.pack(fill="x", pady=(4, 0))
-        else:
-            self._ptm_source_frame.pack_forget()
+        if mode in ("ptm-proximity", "mutation-clustering"):
+            self._mutation_source_frame.pack(fill="x", pady=(4, 0))
+            if self._mutation_source() == "clinvar":
+                self._clinvar_classes_frame.pack(fill="x", pady=(0, 0))
         if mode == "ptm-proximity" and self._ptm_source() == "psp":
             self._psp_filter_frame.grid()
         else:
@@ -567,7 +625,7 @@ class PipelineTabMixin:
             self._build_ca_coordinates_panel()
             return
 
-        steps = pipeline_steps(mode, self._ptm_source())
+        steps = pipeline_steps(mode, self._ptm_source(), self._mutation_source())
 
         section_header(self._steps_outer, "Steps", row=0, columnspan=4)
 

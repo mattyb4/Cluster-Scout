@@ -36,10 +36,13 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     AA3TO1,
+    DEFAULT_MUTATION_SOURCE,
     DEFAULT_PTM_SOURCE,
     MUT_RE,
+    MUTATION_SOURCES,
     PTM_SOURCES,
     SITE_RE,
+    cluster_output_paths,
     find_canonical_cif,
     get_plddt_map,
     hotspots_tsv_path,
@@ -491,6 +494,12 @@ def main():
         help="PTM site data for ptm-proximity mode: 'ptmd' (default) or 'psp' (PhosphoSitePlus)",
     )
     parser.add_argument(
+        "--mutation-source",
+        choices=MUTATION_SOURCES,
+        default=DEFAULT_MUTATION_SOURCE,
+        help="Which mutation source's step-1 file and outputs to use: 'cosmic' (default) or 'clinvar'",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT_DIR),
         help="Directory for output files (default: Output/)",
@@ -519,7 +528,7 @@ def main():
     MAX_PAE = args.max_pae
     # Each mode reads its own Step-1 output file -- must be set before any
     # parsing helper (which all read PTM_TSV_PATH via get_ptm_rows()) runs.
-    PTM_TSV_PATH = hotspots_tsv_path(PROJECT_ROOT, args.mode, args.ptm_source)
+    PTM_TSV_PATH = hotspots_tsv_path(PROJECT_ROOT, args.mode, args.ptm_source, args.mutation_source)
     is_psp = args.ptm_source == "psp"
     source_label = "PhosphoSitePlus" if is_psp else "PTMD"
     if MIN_PLDDT > 0:
@@ -528,13 +537,14 @@ def main():
         print(f"PAE filter: excluding pairs above {MAX_PAE}")
 
     output_dir = Path(args.output_dir)
-    ptm_paths = ptm_output_paths(output_dir, args.ptm_source)
+    ptm_paths = ptm_output_paths(output_dir, args.ptm_source, args.mutation_source)
     OUTPUT_PATH = ptm_paths["db"]
     LONG_OUTPUT_PATH = ptm_paths["long"]
     SKIPPED_PATH = ptm_paths["skipped"]
-    CLUSTER_OUTPUT_PATH = output_dir / "mutation_cluster_db.tsv"
-    CLUSTER_LONG_PATH = output_dir / "mutation_cluster_long.tsv"
-    CLUSTER_SKIPPED_PATH = output_dir / "logs" / "mutation_cluster_skipped.tsv"
+    cluster_paths = cluster_output_paths(output_dir, args.mutation_source)
+    CLUSTER_OUTPUT_PATH = cluster_paths["db"]
+    CLUSTER_LONG_PATH = cluster_paths["long"]
+    CLUSTER_SKIPPED_PATH = cluster_paths["skipped"]
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     SKIPPED_PATH.parent.mkdir(parents=True, exist_ok=True)
 

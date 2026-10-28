@@ -12,6 +12,8 @@ Output/mutation_cluster_db.tsv instead -- see pipeline_utils.PTM_PROXIMITY_STEPS
 /MUTATION_CLUSTERING_STEPS for the exact step labels used in each mode.
 --ptm-source psp takes ptm-proximity's PTM sites from PhosphoSitePlus instead
 of PTMD, writing Output/psp_ptm_mutation_proximity_db.tsv.
+--mutation-source clinvar uses ClinVar's variant_summary file instead of COSMIC
+(see scripts/clinvar_input.py); its outputs get a "clinvar_" prefix.
 """
 from __future__ import annotations
 
@@ -22,8 +24,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+from clinvar_input import CLINVAR_CLASSES, DEFAULT_CLINVAR_CLASSES  # noqa: E402
 from pipeline_utils import (  # noqa: E402
+    DEFAULT_MUTATION_SOURCE,
     DEFAULT_PTM_SOURCE,
+    MUTATION_SOURCE_LABELS,
+    MUTATION_SOURCES,
     PTM_SOURCES,
     hotspots_tsv_path,
     pipeline_steps,
@@ -83,6 +89,32 @@ def main() -> None:
             "LTP/HTP evidence counts)."
         ),
     )
+    parser.add_argument(
+        "--mutation-source",
+        choices=MUTATION_SOURCES,
+        default=DEFAULT_MUTATION_SOURCE,
+        help=(
+            "Mutation data: 'cosmic' (default, COSMIC Mutant Census) or 'clinvar' "
+            "(ClinVar variant_summary, counted by submitters)."
+        ),
+    )
+    parser.add_argument(
+        "--clinvar-classes",
+        nargs="+",
+        choices=list(CLINVAR_CLASSES),
+        default=list(DEFAULT_CLINVAR_CLASSES),
+        metavar="CLASS",
+        help=(
+            "--mutation-source clinvar only: classifications to include, from "
+            f"{' '.join(CLINVAR_CLASSES)} (default: {' '.join(DEFAULT_CLINVAR_CLASSES)})."
+        ),
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        help="Minimum distinct COSMIC samples (or ClinVar submitters) for a mutation to be a hotspot",
+    )
     for kind, label in (("ltp", "LTP (low-throughput literature)"), ("htp", "HTP (high-throughput mass-spec)")):
         parser.add_argument(f"--psp-min-{kind}", type=int, default=None,
                             help=f"--ptm-source psp only: minimum {label} count (default: 0)")
@@ -93,7 +125,16 @@ def main() -> None:
     args = parser.parse_args()
     mode = args.mode
     ptm_source = args.ptm_source
+    mutation_source = args.mutation_source
     source_args = ["--ptm-source", ptm_source] if mode == "ptm-proximity" else []
+    source_args += ["--mutation-source", mutation_source]
+
+    # Step 1 alone reads the mutation filters
+    mutation_filter_args: list[str] = []
+    if mutation_source == "clinvar":
+        mutation_filter_args += ["--clinvar-classes", *args.clinvar_classes]
+    if args.min_samples is not None:
+        mutation_filter_args += ["--min-samples", str(args.min_samples)]
 
     # PSP site filters apply in step 1; step 1 validates the values itself
     psp_filter_args: list[str] = []
@@ -105,14 +146,15 @@ def main() -> None:
         if args.psp_disease_only:
             psp_filter_args.append("--psp-disease-only")
 
-    STEPS = pipeline_steps(mode, ptm_source)
-    INPUT_TSV = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
+    STEPS = pipeline_steps(mode, ptm_source, mutation_source)
+    INPUT_TSV = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source, mutation_source)
 
     print()
     print(_bar("═"))
     print("       Bio465 Capstone Pipeline")
     print(_bar("═"))
     print(f"  Mode         : {mode}")
+    print(f"  Mutations    : {MUTATION_SOURCE_LABELS[mutation_source]}")
     if mode == "ptm-proximity":
         print(f"  PTM source   : {ptm_source}")
     print(f"  Project root : {PROJECT_ROOT}")
@@ -128,7 +170,8 @@ def main() -> None:
 
     python_exe = sys.executable
 
-    step1_cmd = [python_exe, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode, *source_args, *psp_filter_args]
+    step1_cmd = [python_exe, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode, *source_args,
+                 *psp_filter_args, *mutation_filter_args]
 
     step2_cmd = [
         python_exe,

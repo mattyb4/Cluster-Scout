@@ -37,6 +37,7 @@ from ui.common import (
     _PSP_INPUT_FOLDER,
     _RED,
     _YELLOW,
+    CLINVAR_INPUT_DIR,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
     INTERACTORS_1433_INPUT_DIR,
@@ -54,6 +55,7 @@ from ui.common import (
     pipeline_steps,
     resolve_input_file,
     validate_1433_file,
+    validate_clinvar_file,
     validate_cosmic_file,
     validate_psp_folder,
     validate_ptmd_file,
@@ -131,6 +133,12 @@ class PipelineRunnerMixin:
         "psp_ptm_mutation_proximity_long.tsv",
         "mutation_cluster_db.tsv",
         "mutation_cluster_long.tsv",
+        "clinvar_ptm_mutation_proximity_db.tsv",
+        "clinvar_ptm_mutation_proximity_long.tsv",
+        "clinvar_psp_ptm_mutation_proximity_db.tsv",
+        "clinvar_psp_ptm_mutation_proximity_long.tsv",
+        "clinvar_mutation_cluster_db.tsv",
+        "clinvar_mutation_cluster_long.tsv",
     ]
 
     @property
@@ -185,7 +193,9 @@ class PipelineRunnerMixin:
         """
         problems: list[str] = []
 
-        needs_cosmic = mode in ("ptm-proximity", "mutation-clustering", "ca-coordinates")
+        uses_pipeline_source = mode in ("ptm-proximity", "mutation-clustering")
+        needs_clinvar = uses_pipeline_source and self._mutation_source() == "clinvar"
+        needs_cosmic = mode == "ca-coordinates" or (uses_pipeline_source and not needs_clinvar)
         needs_ptmd = mode == "ptm-proximity" and self._ptm_source() == "ptmd"
         needs_psp = mode == "ptm-proximity" and self._ptm_source() == "psp"
 
@@ -195,6 +205,15 @@ class PipelineRunnerMixin:
                 problems.extend(validate_cosmic_file(cosmic_file))
             except (FileNotFoundError, RuntimeError) as exc:
                 problems.append(str(exc))
+
+        if needs_clinvar:
+            try:
+                clinvar_file = resolve_input_file(input_dir(PROJECT_ROOT, CLINVAR_INPUT_DIR), (".txt", ".gz"))
+                problems.extend(validate_clinvar_file(clinvar_file))
+            except (FileNotFoundError, RuntimeError) as exc:
+                problems.append(str(exc))
+            if not self._clinvar_classes():
+                problems.append("Tick at least one ClinVar class")
 
         if needs_ptmd:
             try:
@@ -506,14 +525,14 @@ class PipelineRunnerMixin:
     _TIME_STEP1_BASE = 40               # base time for filtering/merging
     _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
 
-    def _run_precheck(self, mode: str, ptm_source: str = "ptmd") -> float:
+    def _run_precheck(self, mode: str, ptm_source: str = "ptmd", mutation_source: str = "cosmic") -> float:
         """Analyze caches and data to estimate total pipeline runtime. Returns seconds."""
         import pandas as pd
 
         self._q("log", "Initializing pipeline...")
         self._q("log", "")
 
-        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source, mutation_source)
         cache_dir = PROJECT_ROOT / "data" / "cache"
         models_dir = PROJECT_ROOT / "cif_models"
 
@@ -535,7 +554,22 @@ class PipelineRunnerMixin:
             except Exception:
                 pass
 
-        if n_proteins == 0:
+        if n_proteins == 0 and mutation_source == "clinvar":
+            # Step 1 hasn't run yet -- count the genes with a hotspot in ClinVar
+            # (reads the cached missense table; the first call builds that cache)
+            try:
+                from clinvar_input import load_clinvar_counts
+                clinvar_file = resolve_input_file(input_dir(PROJECT_ROOT, CLINVAR_INPUT_DIR), (".txt", ".gz"))
+                counts, _totals = load_clinvar_counts(clinvar_file, cache_dir, self._clinvar_classes())
+                try:
+                    min_samples = int(self._min_samples_var.get().strip() or 3)
+                except ValueError:
+                    min_samples = 3
+                n_proteins = counts.loc[counts["affected_cases"] >= min_samples, "gene"].nunique()
+                self._q("log", f"Step 1 hasn't run yet — estimated {n_proteins} proteins from ClinVar hotspots")
+            except Exception:
+                pass
+        elif n_proteins == 0:
             # Step 1 hasn't run yet -- estimate gene count directly from COSMIC by
             # applying the same somatic-status/hotspot filters step 1 will apply
             try:
@@ -686,9 +720,12 @@ class PipelineRunnerMixin:
 
         python = [sys.executable, "-u"]
         ptm_source = self._ptm_source() if mode == "ptm-proximity" else "ptmd"
+        mutation_source = self._mutation_source()
         source_args = ["--ptm-source", ptm_source] if mode == "ptm-proximity" else []
+        source_args += ["--mutation-source", mutation_source]
         psp_filter_args = self._psp_filter_args()[0] if ptm_source == "psp" else []
-        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source)
+        clinvar_args = ["--clinvar-classes", *self._clinvar_classes()] if mutation_source == "clinvar" else []
+        input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source, mutation_source)
         models_dir = PROJECT_ROOT / "cif_models"
 
         cutoff = self._cutoff_var.get().strip() or "10.0"
@@ -705,7 +742,7 @@ class PipelineRunnerMixin:
 
         cmds = [
             [*python, str(SCRIPTS_DIR / "1_filter.py"), "--mode", mode, *source_args, *psp_filter_args,
-             "--min-samples", min_samples],
+             *clinvar_args, "--min-samples", min_samples],
             [
                 *python, str(SCRIPTS_DIR / "2_download_structures.py"),
                 str(input_tsv),
@@ -726,14 +763,16 @@ class PipelineRunnerMixin:
                          "--output-dir", str(self._output_dir),
                          *(["--pp-exclude"] + pp_exclude if pp_exclude else [])])
 
-        steps = pipeline_steps(mode, ptm_source)
+        steps = pipeline_steps(mode, ptm_source, mutation_source)
         run_type = _detect_run_type()
         # PSP runs are far bigger than PTMD runs, so their past step times are
         # kept separately rather than skewing each other's estimates
         runtime_key = f"{mode}-psp" if ptm_source == "psp" else mode
+        if mutation_source != "cosmic":
+            runtime_key += f"-{mutation_source}"
         self._q("pipeline_start", len(steps), runtime_key, run_type)
 
-        estimated_total = self._run_precheck(mode, ptm_source)
+        estimated_total = self._run_precheck(mode, ptm_source, mutation_source)
         self._q("set_estimate", estimated_total)
 
         backups = self._backup_outputs()

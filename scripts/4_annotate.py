@@ -42,11 +42,14 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_utils import (  # noqa: E402
     AA3TO1,
+    DEFAULT_MUTATION_SOURCE,
     DEFAULT_PTM_SOURCE,
     INTERACTORS_1433_INPUT_DIR,
     MUT_RE,
+    MUTATION_SOURCES,
     PTM_SOURCES,
     SITE_RE,
+    cluster_output_paths,
     find_canonical_cif,
     fmt_time,
     hotspots_tsv_path,
@@ -702,34 +705,64 @@ def build_kinase_window(pos_to_aa: dict[int, str], site_pos: int) -> str | None:
     return "".join(chars)
 
 
-def _kinase_helper_command() -> list[str] | None:
+def _uv_script_command(script: Path, offline: bool = False) -> list[str] | None:
+    """`uv run --script` command for a helper that carries its own dependencies."""
     uv = shutil.which("uv")
-    return [uv, "run", "--quiet", "--script", str(_KIN_HELPER)] if uv else None
+    if not uv:
+        return None
+    return [uv, "run", "--quiet", *(["--offline"] if offline else []), "--script", str(script)]
 
 
-def _kinase_helper_env() -> dict[str, str]:
+def _uv_helper_env() -> dict[str, str]:
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)  # the project's env -- irrelevant to the helper's own
     env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
+def _kinase_helper_command() -> list[str] | None:
+    return _uv_script_command(_KIN_HELPER)
+
+
+_kinase_helper_env = _uv_helper_env
+
+
+def _check_uv_helper(script: Path, label: str, size_note: str, timeout: int) -> str | None:
+    """Build (first time) and verify a helper script's own uv environment.
+
+    The first build downloads the helper's dependencies, which can take a while,
+    and uv is run quietly, so say so up front. An offline check first tells an
+    already-built environment (instant, nothing printed) from one that still
+    has to be downloaded. Returns None if the helper works, else what went wrong.
+    """
+    command = _uv_script_command(script)
+    if command is None:
+        return f"uv isn't on PATH -- {label} runs in its own uv-managed environment (see scripts/{script.name})"
+    try:
+        cached = subprocess.run([*_uv_script_command(script, offline=True), "--check"], capture_output=True,
+                                text=True, encoding="utf-8", env=_uv_helper_env(), timeout=timeout)
+        if cached.returncode == 0 and '"ok": true' in cached.stdout:
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    print(f"  Setting up {label}: downloading dependencies ({size_note}). "
+          f"This may take several minutes the first time...", flush=True)
+    try:
+        proc = subprocess.run([*command, "--check"], capture_output=True, text=True, encoding="utf-8",
+                              env=_uv_helper_env(), timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"couldn't start the {label} helper ({exc})"
+    if proc.returncode != 0 or '"ok": true' not in proc.stdout:
+        last = (proc.stderr.strip().splitlines() or ["no error output"])[-1]
+        return f"the {label} helper's environment failed to set up ({last})"
+    print(f"  {label} is ready.", flush=True)
+    return None
+
+
 def check_kinase_helper() -> str | None:
     """Build (first time) and verify the Kinase Library helper's environment.
     Returns None if it works, else a description of what went wrong."""
-    command = _kinase_helper_command()
-    if command is None:
-        return ("uv isn't on PATH -- kinase predictions run in their own uv-managed environment "
-                "(see scripts/kinase_predictor.py)")
-    try:
-        proc = subprocess.run(command + ["--check"], capture_output=True, text=True, encoding="utf-8",
-                              env=_kinase_helper_env(), timeout=_KIN_HELPER_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"couldn't start the Kinase Library helper ({exc})"
-    if proc.returncode != 0 or '"ok": true' not in proc.stdout:
-        last = (proc.stderr.strip().splitlines() or ["no error output"])[-1]
-        return f"the Kinase Library helper's environment failed to set up ({last})"
-    return None
+    return _check_uv_helper(_KIN_HELPER, "the Kinase Library", "a few hundred MB", _KIN_HELPER_TIMEOUT)
 
 
 def _predict_chunk(windows: list[str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -1025,6 +1058,19 @@ _aiupred_session = requests.Session()
 # Modest concurrency: aiupred.elte.hu is a single-instance academic server, not a
 # scalable production API (unlike myvariant.info in Phase 2) — stay polite to it.
 _AIUPRED_MAX_WORKERS = 5
+# Write the cache file after this many newly fetched proteins
+_AIUPRED_SAVE_EVERY = 100
+# Why each protein's fetch failed this run: {uniprot_id: (reason, detail)}. Failed proteins
+# are not cached, so the next run retries them; this is what tells the user why.
+_aiupred_failures: dict[str, tuple[str, str]] = {}
+_aiupred_failures_lock = threading.Lock()
+_AIUPRED_FAILURE_LOG = "aiupred_failures.tsv"
+# AIUPred runs locally when it can (see scripts/aiupred_predictor.py): faster, and it
+# doesn't depend on the AIUPred web server. The web API is the fallback for proteins
+# the local run can't score (no usable structure sequence) or if its setup fails.
+_AIUPRED_HELPER = Path(__file__).resolve().parent / "aiupred_predictor.py"
+_AIUPRED_HELPER_TIMEOUT = 7200   # seconds per helper call; the first one may also build the environment
+_AIUPRED_LOCAL_CHUNK = 25        # proteins per helper process (results are saved after each chunk)
 
 # Maps response JSON keys to canonical type names stored in the cache
 _AIUPRED_KEY_MAP = {
@@ -1072,6 +1118,103 @@ def _aiupred_save_cache(cache: dict[tuple[str, str], dict[int, float]]) -> None:
     )
 
 
+def check_aiupred_helper() -> str | None:
+    """Build (first time) and verify the local AIUPred helper's environment.
+    Returns None if it works, else a description of what went wrong."""
+    return _check_uv_helper(_AIUPRED_HELPER, "local AIUPred", "PyTorch, a few hundred MB", _AIUPRED_HELPER_TIMEOUT)
+
+
+def _aiupred_local_sequences(uniprots: list[str]) -> dict[str, str]:
+    """Full canonical sequences from the downloaded AlphaFold models, for proteins that have one.
+
+    A protein is left out (and falls back to the web server) if it has no model, the model isn't a
+    single complete chain numbered 1..N, or it contains residues AIUPred can't take (X).
+    """
+    sequences: dict[str, str] = {}
+    for uid in uniprots:
+        uniprot_dir = MODELS_ROOT / uid
+        cif_file = find_canonical_cif(uniprot_dir) if uniprot_dir.is_dir() else None
+        chain = load_first_chain(cif_file) if cif_file else None
+        if chain is None:
+            continue
+        pos_to_aa = extract_sequence(chain)
+        if sorted(pos_to_aa) != list(range(1, len(pos_to_aa) + 1)) or "X" in pos_to_aa.values():
+            continue
+        sequences[uid] = "".join(pos_to_aa[i] for i in range(1, len(pos_to_aa) + 1))
+    return sequences
+
+
+def _aiupred_local_chunk(sequences: dict[str, str]) -> tuple[dict[str, dict[str, dict[int, float]]], dict[str, str]]:
+    """One helper process over *sequences*: ({uid: {type: {pos: score}}}, {uid: error})."""
+    command = _uv_script_command(_AIUPRED_HELPER)
+    scores: dict[str, dict[str, dict[int, float]]] = {}
+    errors: dict[str, str] = {}
+    if command is None:
+        return scores, {uid: "uv isn't on PATH" for uid in sequences}
+    try:
+        stdin = "".join(f"{uid}\t{seq}\n" for uid, seq in sequences.items())
+        proc = subprocess.run(command, input=stdin, capture_output=True, text=True, encoding="utf-8",
+                              env=_uv_helper_env(), timeout=_AIUPRED_HELPER_TIMEOUT)
+        output, stderr = proc.stdout, proc.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        output, stderr = "", str(exc)
+    for line in output.splitlines():
+        try:
+            result = json.loads(line)
+        except ValueError:
+            continue
+        uid = result.get("id")
+        if uid not in sequences:
+            continue
+        if "error" in result:
+            errors[uid] = result["error"]
+        elif all(len(result.get(t, ())) == len(sequences[uid]) for t in ("general", "binding")):
+            scores[uid] = {t: {i + 1: float(v) for i, v in enumerate(result[t])} for t in ("general", "binding")}
+        else:
+            errors[uid] = "the helper returned scores of the wrong length"
+    last = (stderr.strip().splitlines() or ["no output"])[-1]
+    for uid in sequences:
+        if uid not in scores and uid not in errors:
+            errors[uid] = f"the helper produced no result ({last})"
+    return scores, errors
+
+
+def _aiupred_run_local(need: list[str], cache: dict, on_progress: Callable[[int, str], None]) -> set[str]:
+    """Score *need* with the local helper, updating *cache* and saving it after each chunk.
+
+    Returns the proteins scored. Anything missing (no usable sequence, a helper error, or the
+    helper's environment failing to set up) is left for the web server, and why is printed.
+    """
+    sequences = _aiupred_local_sequences(need)
+    if not sequences:
+        print("  Local AIUPred: none of these proteins has a usable AlphaFold sequence; using the web server")
+        return set()
+    problem = check_aiupred_helper()
+    if problem:
+        print(f"  Warning: local AIUPred unavailable ({problem}); falling back to the AIUPred web server")
+        return set()
+    print(f"  Scoring {len(sequences)} proteins locally ({len(need) - len(sequences)} have no usable "
+          f"AlphaFold sequence and use the web server)")
+    scored: set[str] = set()
+    errors: dict[str, str] = {}
+    items = list(sequences.items())
+    chunks = [dict(items[i:i + _AIUPRED_LOCAL_CHUNK]) for i in range(0, len(items), _AIUPRED_LOCAL_CHUNK)]
+    for chunk in tqdm(chunks, desc="  AIUPred/local", unit="chunk"):
+        scores, chunk_errors = _aiupred_local_chunk(chunk)
+        for uid, by_type in scores.items():
+            for t, per_position in by_type.items():
+                cache[(uid, t)] = per_position
+        scored.update(scores)
+        errors.update(chunk_errors)
+        if scores:
+            _aiupred_save_cache(cache)
+        on_progress(len(scored) + len(errors), f"Local AIUPred: {len(scored) + len(errors)}/{len(sequences)}")
+    if errors:
+        print(f"  Warning: local AIUPred failed for {len(errors)} proteins ({next(iter(errors.values()))}); "
+              f"trying the AIUPred web server for those")
+    return scored
+
+
 def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, float]]:
     """Fetch AIUPred scores for one protein, returning all score arrays in the response.
 
@@ -1080,14 +1223,21 @@ def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, flo
     """
     params: dict[str, str] = {"accession": uniprot_id, "smoothing": "default",
                                "analysis_type": api_type}
+
+    def fail(reason: str, detail: str = "") -> dict[str, dict[int, float]]:
+        with _aiupred_failures_lock:
+            _aiupred_failures[uniprot_id] = (reason, detail[:300])
+        return {}
+
     try:
         resp = _aiupred_session.get(_AIUPRED_API_URL, params=params, timeout=60)
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
-        return {}
+    except Exception as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return fail(f"HTTP {status}" if status else type(exc).__name__, str(exc))
     if not isinstance(data, dict):
-        return {}
+        return fail("unexpected response", f"expected a JSON object, got {type(data).__name__}")
     result: dict[str, dict[int, float]] = {}
     for key, val in data.items():
         type_name = _AIUPRED_KEY_MAP.get(key)
@@ -1095,19 +1245,49 @@ def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, flo
             continue
         if isinstance(val, list) and val and isinstance(val[0], (int, float)):
             result[type_name] = {i + 1: float(s) for i, s in enumerate(val)}
+    if not result:
+        return fail("no scores in response", f"response keys: {sorted(data)[:6]}")
     return result
+
+
+def _report_aiupred_failures(log_dir: Path | None, n_attempted: int) -> None:
+    """Print why AIUPred fetches failed and write the per-protein detail to a log file."""
+    if not _aiupred_failures:
+        return
+    by_reason: dict[str, int] = {}
+    for reason, _ in _aiupred_failures.values():
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    summary = ", ".join(f"{n} x {reason}" for reason, n in sorted(by_reason.items(), key=lambda kv: -kv[1]))
+    print(f"  WARNING: AIUPred returned no scores for {len(_aiupred_failures)} of {n_attempted} "
+          f"proteins ({summary}).")
+    print("  Those proteins have blank AIUPred columns and are not cached, so the next run retries them.")
+    if log_dir is None:
+        return
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / _AIUPRED_FAILURE_LOG
+        pd.DataFrame(
+            [{"uniprot_id": uid, "reason": reason, "detail": detail}
+             for uid, (reason, detail) in sorted(_aiupred_failures.items())]
+        ).to_csv(log_path, sep="\t", index=False)
+        print(f"  Per-protein failure details: {log_path}")
+    except OSError as exc:
+        print(f"  Could not write the AIUPred failure log: {exc}")
 
 
 def run_aiupred_phase(
     df: pd.DataFrame, phase_idx: int = 3, num_phases: int = _NUM_PHASES,
+    log_dir: Path | None = None,
 ) -> dict[str, dict[str, dict[int, float]]]:
     """Phase 4: fetch general and binding disorder scores for each protein.
 
     Makes one API call per protein (binding), which yields both general and
     binding scores. Returns {type_name: {uniprot_id: {position: score}}} for
-    types general/binding.
+    types general/binding. Proteins whose fetch fails are reported (with the
+    reason) at the end, and written to ``log_dir`` when given.
     """
     print("\n── Phase 4: AIUPred disorder scores (general + binding) ──")
+    _aiupred_failures.clear()
     cache = _aiupred_load_cache()
     uniprots = [u for u in df["UniProt"].unique() if u]
 
@@ -1117,27 +1297,47 @@ def run_aiupred_phase(
     ]
     total_fetches = sum(len(n) for _, n in needs)
     done = 0
-    any_new = False
 
     for api_type, need in needs:
         if not need:
             print(f"  {api_type}: all {len(uniprots)} proteins cached")
             continue
-        print(f"  Fetching {len(need)} proteins via {api_type} call")
-        with ThreadPoolExecutor(max_workers=_AIUPRED_MAX_WORKERS) as pool:
-            futures = {pool.submit(fetch_aiupred_all, api_type, uid): uid for uid in need}
-            for future in tqdm(as_completed(futures), total=len(futures), desc=f"  AIUPred/{api_type}"):
-                uid = futures[future]
-                for t, scores in future.result().items():
-                    cache[(uid, t)] = scores
-                done += 1
-                _emit_progress(phase_idx, done / max(total_fetches, 1) * 100,
-                               f"AIUPred {uid}: {done}/{total_fetches}", num_phases)
-        any_new = True
+        scored_locally = _aiupred_run_local(
+            need, cache,
+            lambda n, desc: _emit_progress(phase_idx, (done + n) / max(total_fetches, 1) * 100, desc, num_phases),
+        )
+        done += len(scored_locally)
+        need = [uid for uid in need if uid not in scored_locally]
+        if not need:
+            continue
+        print(f"  Fetching {len(need)} proteins via {api_type} call (AIUPred web server)")
+        # Save as we go (and on interruption) so a cancelled or crashed run keeps
+        # everything fetched so far; the next run only fetches what is still missing.
+        unsaved = 0
+        try:
+            with ThreadPoolExecutor(max_workers=_AIUPRED_MAX_WORKERS) as pool:
+                futures = {pool.submit(fetch_aiupred_all, api_type, uid): uid for uid in need}
+                for future in tqdm(as_completed(futures), total=len(futures), desc=f"  AIUPred/{api_type}"):
+                    uid = futures[future]
+                    fetched = future.result()
+                    if not fetched and len(_aiupred_failures) == 1:
+                        reason, detail = _aiupred_failures[uid]
+                        tqdm.write(f"  AIUPred request failed for {uid}: {reason} ({detail[:120]})"
+                                   " -- continuing; a summary follows")
+                    for t, scores in fetched.items():
+                        cache[(uid, t)] = scores
+                    unsaved += bool(fetched)
+                    done += 1
+                    if unsaved >= _AIUPRED_SAVE_EVERY:
+                        _aiupred_save_cache(cache)
+                        unsaved = 0
+                    _emit_progress(phase_idx, done / max(total_fetches, 1) * 100,
+                                   f"AIUPred {uid}: {done}/{total_fetches}", num_phases)
+        finally:
+            if unsaved:
+                _aiupred_save_cache(cache)
 
-    if any_new:
-        _aiupred_save_cache(cache)
-
+    _report_aiupred_failures(log_dir, total_fetches)
     return {
         t: {uid: cache.get((uid, t), {}) for uid in uniprots}
         for t in ("general", "binding")
@@ -1423,9 +1623,10 @@ def annotate_cluster_long_format(
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
-                            ptm_source: str = DEFAULT_PTM_SOURCE) -> None:
+                            ptm_source: str = DEFAULT_PTM_SOURCE,
+                            mutation_source: str = DEFAULT_MUTATION_SOURCE) -> None:
     """Run all 5 annotation phases on the PTM Proximity proximity database."""
-    ptm_paths = ptm_output_paths(output_dir, ptm_source)
+    ptm_paths = ptm_output_paths(output_dir, ptm_source, mutation_source)
     proximity_db = ptm_paths["db"]
     print(f"Reading proximity DB: {proximity_db}")
     df = pd.read_csv(proximity_db, sep="\t", encoding="utf-16", dtype=str,
@@ -1442,7 +1643,8 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
         "Phase 1 (14-3-3)": (0, _NUM_PHASES, lambda: run_1433_phase(df_1433)),
         "Phase 2 (PolyPhen-2)": (1, _NUM_PHASES, lambda: run_polyphen_phase(df_pp)),
         "Phase 3 (Kinase)": (2, _NUM_PHASES, lambda: run_kinase_phase(df_kin)),
-        "Phase 4 (AIUPred)": (3, _NUM_PHASES, lambda: run_aiupred_phase(df[["UniProt"]].copy())),
+        "Phase 4 (AIUPred)": (3, _NUM_PHASES, lambda: run_aiupred_phase(
+            df[["UniProt"]].copy(), log_dir=output_dir / "logs")),
         "Phase 5 (InterPro)": (4, _NUM_PHASES, lambda: run_interpro_phase(df[["UniProt"]].copy())),
     })
     score_maps, confirmed_sites = results["Phase 1 (14-3-3)"]
@@ -1511,9 +1713,11 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
         print(f"\nNo long-format DB found at {long_db} — skipping")
 
 
-def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> None:
+def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str],
+                                  mutation_source: str = DEFAULT_MUTATION_SOURCE) -> None:
     """Run PolyPhen-2/AIUPred/InterPro (no 14-3-3/kinase) on the Mutation Clustering database."""
-    cluster_db = output_dir / "mutation_cluster_db.tsv"
+    cluster_paths = cluster_output_paths(output_dir, mutation_source)
+    cluster_db = cluster_paths["db"]
     print(f"Reading mutation cluster DB: {cluster_db}")
     df = pd.read_csv(cluster_db, sep="\t", encoding="utf-16", dtype=str,
                      keep_default_na=False)
@@ -1524,7 +1728,8 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
     results = _run_phases({
         "Phase 2 (PolyPhen-2)": (0, 3, lambda: run_polyphen_phase(
             df_pp, bare_mutation_cols=("anchor_mutation",), phase_idx=0, num_phases=3)),
-        "Phase 4 (AIUPred)": (1, 3, lambda: run_aiupred_phase(df[["UniProt"]].copy(), phase_idx=1, num_phases=3)),
+        "Phase 4 (AIUPred)": (1, 3, lambda: run_aiupred_phase(
+            df[["UniProt"]].copy(), phase_idx=1, num_phases=3, log_dir=output_dir / "logs")),
         "Phase 5 (InterPro)": (2, 3, lambda: run_interpro_phase(df[["UniProt"]].copy(), phase_idx=2, num_phases=3)),
     })
     pp_cache = results["Phase 2 (PolyPhen-2)"]
@@ -1577,7 +1782,7 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str]) -> No
     df.to_csv(cluster_db, sep="\t", index=False, encoding="utf-16")
     print(f"\nUpdated mutation cluster DB written to: {cluster_db}")
 
-    long_db = output_dir / "mutation_cluster_long.tsv"
+    long_db = cluster_paths["long"]
     if long_db.exists():
         print(f"\nAnnotating long-format cluster DB: {long_db}")
         df_long = pd.read_csv(long_db, sep="\t", encoding="utf-16", dtype=str,
@@ -1617,6 +1822,12 @@ def main() -> None:
         help="Which PTM source's ptm-proximity output to annotate: 'ptmd' (default) or 'psp'",
     )
     parser.add_argument(
+        "--mutation-source",
+        choices=MUTATION_SOURCES,
+        default=DEFAULT_MUTATION_SOURCE,
+        help="Which mutation source's output to annotate: 'cosmic' (default) or 'clinvar'",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT_DIR),
         help="Directory containing the output database (default: Output/)",
@@ -1638,14 +1849,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.prefetch_1433:
-        prefetch_1433(hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity", args.ptm_source))
+        prefetch_1433(hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity", args.ptm_source, args.mutation_source))
         return
 
     output_dir = Path(args.output_dir)
     if args.mode == "mutation-clustering":
-        _annotate_mutation_clustering(output_dir, args.pp_exclude)
+        _annotate_mutation_clustering(output_dir, args.pp_exclude, args.mutation_source)
     else:
-        _annotate_ptm_proximity(output_dir, args.pp_exclude, args.ptm_source)
+        _annotate_ptm_proximity(output_dir, args.pp_exclude, args.ptm_source, args.mutation_source)
 
 
 if __name__ == "__main__":

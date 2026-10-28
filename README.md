@@ -22,6 +22,7 @@ The pipeline requires three input data files. Each goes in its own folder under 
 | Folder | File | Source |
 |---|---|---|
 | `data/input/cosmic/` | COSMIC Mutant Census TSV (600+ MB) | [COSMIC](https://cancer.sanger.ac.uk/cosmic) |
+| `data/input/ClinVar/` | *Optional:* ClinVar `variant_summary.txt` (or `.txt.gz`), ~4 GB unzipped | [ClinVar FTP](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) |
 | `data/input/ptmd/` | PTMD disease-associated PTMs TSV | [PTMD 2.0](https://ptmd.biocuckoo.cn/download.php) |
 | `data/input/1433_interactors/` | 14-3-3 confirmed interactors Excel | Provided in this repository |
 | `data/input/phosphositeplus/` | *Optional:* PhosphoSitePlus download (a folder of files) | [PhosphoSitePlus](https://www.phosphosite.org) (free account required) |
@@ -94,6 +95,8 @@ uv run main.py --mode ptm-proximity
 ```bash
 uv run main.py --mode mutation-clustering
 ```
+
+**Mutation sources:** both modes take their mutations from COSMIC by default. `--mutation-source clinvar` uses ClinVar's `variant_summary` file instead: GRCh38 missense variants in the classifications chosen with `--clinvar-classes` (from `P LP VUS LB B CONFLICTING`, default `P LP`), counted by ClinVar submitters, so **Min samples** (`--min-samples`, default 3) means "at least this many submitters". Download `variant_summary.txt.gz` from the ClinVar FTP site and put it (zipped or not) in `data/input/ClinVar/`. The first run reads the file once (about 40 seconds) and caches a small table of its missense variants, rebuilt automatically when the file changes. ClinVar runs write their own files with a `clinvar_` prefix (`Output/clinvar_ptm_mutation_proximity_db.tsv`, `Output/clinvar_mutation_cluster_db.tsv`, `data/steps/PTMD_ClinVar_hotspots_by_protein.tsv`), so COSMIC and ClinVar results can sit side by side. Column names are unchanged (e.g. `total_cosmic_missense_patients`, `patient_count`); with ClinVar they hold submitter counts. In the app, pick the source with the **Mutation source** toggle, and the classes with the **ClinVar classes** checkboxes.
 
 **PTM sources:** PTM-proximity mode takes its PTM sites from PTMD by default. `--ptm-source psp` uses PhosphoSitePlus instead: every human site in the download (not only disease-associated ones), with each site's evidence counts and disease associations. PSP runs write their own files with a `psp_` prefix (`Output/psp_ptm_mutation_proximity_db.tsv`, `data/steps/PSP_COSMIC_hotspots_by_protein.tsv`, `Output/logs/psp_ptm_skipped.tsv`), so PTMD and PSP results can both exist and be compared. In the app, pick the source with the **PTM source** toggle under the mode selector.
 
@@ -335,7 +338,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 **Kinase predictions** are generated locally using the Kinase Library package and only computed for phosphorylation sites (Ser/Thr/Tyr). The Kinase Library needs older numpy/pandas versions than the rest of the project, so it runs in its own environment: `scripts/kinase_predictor.py` declares it as its own dependency (versions pinned in `scripts/kinase_predictor.py.lock`), and step 4 runs that script with `uv run`. The first run builds that environment automatically (about a minute, a few hundred MB, cached afterwards). Don't install `kinase-library` into the project environment: it would downgrade numpy/pandas, and the next `uv sync` removes it again. The Kinase Library is licensed CC BY-NC-SA 3.0.
 
-**AIUPred disorder scores** are computed locally using AIUPred, once per protein, for both general intrinsic disorder and binding-region disorder.
+**AIUPred disorder scores** are computed locally with the [AIUPred](https://github.com/doszilab/AIUPred) package (MIT license), once per protein, for both general intrinsic disorder and binding-region disorder. Like the Kinase Library, it runs in its own `uv`-managed environment (`scripts/aiupred_predictor.py`, pinned in `aiupred_predictor.py.lock`) because it needs PyTorch. The first run downloads that environment (PyTorch, about 120 MB of downloads, usually a few minutes) and says so in the log; later runs reuse it. On a CPU it scores roughly 1,000 residues per second, so a first run over a couple of thousand proteins takes on the order of half an hour. Scores come from the protein's AlphaFold sequence and are cached in `data/cache/aiupred_disorder.tsv`, so only proteins not seen before are scored. A protein with no usable AlphaFold sequence, or any protein if the local setup fails, falls back to the AIUPred web server (`aiupred.elte.hu`); if that is unreachable too, those proteins get blank AIUPred columns and are retried next run, with the reason printed at the end of step 4 and written to `Output/logs/aiupred_failures.tsv`. Local scores matched the web server's to within 0.002 on a test of 60 proteins.
 
 **`ptm_diseases` is pan-cancer:** The `ptm_diseases` column in the output reflects which diseases the PTM site is associated with in PTMD. The nearby COSMIC mutations are pan-cancer and were not filtered by cancer type, so a nearby mutation appearing in the output does not imply it co-occurs in the same cancer type as the PTM disease association.
 

@@ -14,6 +14,11 @@ the output is data/steps/PSP_COSMIC_hotspots_by_protein.tsv.
 reviewed human UniProt accession, with no PTM requirement. Writes
 data/steps/COSMIC_hotspots_by_protein.tsv.
 
+--mutation-source clinvar takes the mutations from ClinVar's variant_summary
+file instead (missense variants in the classes chosen with --clinvar-classes,
+counted by ClinVar submitters; see clinvar_input.py). Its step-1 files carry
+"ClinVar" where COSMIC's carry "COSMIC" (e.g. PTMD_ClinVar_hotspots_by_protein.tsv).
+
 Both modes also map UniProt accessions to gene symbols (or vice versa) via
 the UniProt REST API, and put COSMIC's mutation positions onto the canonical
 AlphaFold-modeled sequence when COSMIC numbers a protein by a different
@@ -32,11 +37,21 @@ import requests
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from clinvar_input import (  # noqa: E402
+    CLINVAR_CLASSES,
+    DEFAULT_CLINVAR_CLASSES,
+    ClinVarInputError,
+    load_clinvar_counts,
+)
 from cosmic_numbering import fetch_isoform_sequences, number_protein  # noqa: E402
 from pipeline_utils import (  # noqa: E402
+    CLINVAR_INPUT_DIR,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
+    DEFAULT_MUTATION_SOURCE,
     DEFAULT_PTM_SOURCE,
+    MUTATION_SOURCE_LABELS,
+    MUTATION_SOURCES,
     PSP_INPUT_DIR,
     PTM_SOURCES,
     PTMD_INPUT_DIR,
@@ -51,9 +66,6 @@ from psp_input import PspInputError, filter_psp_sites, load_psp_diseases, load_p
 
 PROJECT_ROOT = project_root(__file__)
 HOTSPOT_MIN_AFFECTED_CASES = 3
-
-UNMATCHED_GENES_LOG = ptm_output_paths(PROJECT_ROOT / "Output", "ptmd")["unmatched"]
-PSP_UNMATCHED_GENES_LOG = ptm_output_paths(PROJECT_ROOT / "Output", "psp")["unmatched"]
 
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 
@@ -321,24 +333,49 @@ def _load_and_filter_cosmic(cosmic_file):
         .reset_index(name="affected_cases")
         .rename(columns={"GENE_SYMBOL": "gene"})
     )
-    cosmic = cosmic[cosmic["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
+    return _hotspots_from_counts(cosmic), gene_to_transcript, gene_to_total_missense_patients
 
-    cosmic["mutation"] = cosmic["aa_change"]
+
+def _hotspots_from_counts(counts):
+    """Keep the (gene, aa_change) rows with >= HOTSPOT_MIN_AFFECTED_CASES cases
+    and add the 'mutation' and 'mutation_with_count' ("V600E (42)") columns."""
+    hotspots = counts[counts["affected_cases"] >= HOTSPOT_MIN_AFFECTED_CASES].copy()
+    hotspots["mutation"] = hotspots["aa_change"]
     # .apply(axis=1) on an empty frame returns a DataFrame, not a Series -- guard
     # against that so a "zero rows survived filtering" input doesn't crash here.
-    cosmic["mutation_with_count"] = (
-        cosmic.apply(format_mutation_with_count, axis=1) if not cosmic.empty
+    hotspots["mutation_with_count"] = (
+        hotspots.apply(format_mutation_with_count, axis=1) if not hotspots.empty
         else pd.Series(dtype=str)
     )
+    return hotspots
 
-    return cosmic, gene_to_transcript, gene_to_total_missense_patients
+
+def _load_and_filter_clinvar(clinvar_file, classes):
+    """ClinVar counterpart of _load_and_filter_cosmic: the same
+    (hotspots, gene -> transcript, gene -> total) triple, from ClinVar's
+    variant_summary. ClinVar has no per-gene transcript table, so the
+    transcript mapping is empty (nothing downstream reads it)."""
+    counts, gene_totals = load_clinvar_counts(clinvar_file, CACHE_DIR, classes)
+    return _hotspots_from_counts(counts), {}, gene_totals
+
+
+def _load_mutations(mutation_source, clinvar_classes):
+    """Load the chosen source's mutations, shared by both pipeline modes:
+    (hotspots, gene -> transcript, gene -> total missense patients)."""
+    if mutation_source == "clinvar":
+        clinvar_file = resolve_input_file(input_dir(PROJECT_ROOT, CLINVAR_INPUT_DIR), (".txt", ".gz"))
+        print(f"ClinVar file: {clinvar_file.name} (classes: {', '.join(clinvar_classes)})")
+        return _load_and_filter_clinvar(clinvar_file, clinvar_classes)
+    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    print(f"COSMIC file: {cosmic_file.name}")
+    return _load_and_filter_cosmic(cosmic_file)
 
 
 ISOFORM_SEQUENCE_CACHE_FILE = "uniprot_isoform_sequences.tsv"
 MUTATION_WITH_COUNT_RE = re.compile(r"^(\S+) \((\d+)\)$")
 
 
-def apply_canonical_numbering(table):
+def apply_canonical_numbering(table, source_label="COSMIC"):
     """Rewrite each protein's mutations_on_protein ('R248Q (5); ...') in the
     canonical sequence's numbering, and add the columns recording what changed:
 
@@ -382,7 +419,7 @@ def apply_canonical_numbering(table):
     table["cosmic_mutation_labels"] = labels_col
     table["unmapped_mutations"] = unmapped_col
     n_renumbered = sum(1 for iso in isoform_col if iso)
-    print(f"  {n_renumbered} proteins use a non-canonical isoform's numbering in COSMIC: "
+    print(f"  {n_renumbered} proteins use a non-canonical isoform's numbering in {source_label}: "
           f"{n_moved} mutations moved to canonical positions, {n_unmapped} couldn't be placed "
           f"({n_ambiguous} of them because equally good alignments disagree, and all of the mutations of {n_poor_fit} proteins no UniProt isoform explains; kept with COSMIC's label, tagged (isoform?) in step 3)")
     return table
@@ -538,33 +575,36 @@ def _build_psp_ptm_table(psp_filters=None):
     return psp_grouped, sites["gene"].nunique()
 
 
-def _canonical_numbering_step(table):
-    """COSMIC sometimes numbers a protein by a different isoform than the
-    canonical AlphaFold-modeled sequence -- move those mutations into
+def _canonical_numbering_step(table, source_label="COSMIC"):
+    """The mutation source sometimes numbers a protein by a different isoform
+    than the canonical AlphaFold-modeled sequence -- move those mutations into
     canonical numbering so they're measured from the right residue."""
-    print("Putting COSMIC mutations in canonical-sequence numbering...")
+    print(f"Putting {source_label} mutations in canonical-sequence numbering...")
     t0 = time.time()
-    table = apply_canonical_numbering(table)
+    table = apply_canonical_numbering(table, source_label)
     print(f"  Canonical numbering completed in {fmt_time(time.time() - t0)}")
     return table
 
 
-def _run_ptm_proximity_filter(output_file, ptm_source=DEFAULT_PTM_SOURCE, psp_filters=None):
+def _run_ptm_proximity_filter(output_file, ptm_source=DEFAULT_PTM_SOURCE, psp_filters=None,
+                              mutation_source=DEFAULT_MUTATION_SOURCE, clinvar_classes=DEFAULT_CLINVAR_CLASSES):
     """Run the PTM-proximity pipeline mode: merge PTM sites (from PTMD, or
     PhosphoSitePlus with ptm_source="psp", optionally narrowed by
-    *psp_filters*) with COSMIC hotspots, keeping only genes with both."""
-    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    *psp_filters*) with the mutation source's hotspots, keeping only genes
+    with both."""
+    mut_label = MUTATION_SOURCE_LABELS[mutation_source]
+    unmatched_log = ptm_output_paths(PROJECT_ROOT / "Output", ptm_source, mutation_source)["unmatched"]
     if ptm_source == "psp":
-        source_name, unmatched_log = "PhosphoSitePlus", PSP_UNMATCHED_GENES_LOG
+        source_name = "PhosphoSitePlus"
         ptm_grouped, n_ptm_genes = _build_psp_ptm_table(psp_filters)
     else:
-        source_name, unmatched_log = "PTMD", UNMATCHED_GENES_LOG
+        source_name = "PTMD"
         ptm_grouped, n_ptm_genes = _build_ptmd_ptm_table()
 
-    print(f"COSMIC file: {cosmic_file.name}")
-    cosmic, _gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
+    cosmic, _gene_to_transcript, gene_to_total_missense_patients = _load_mutations(
+        mutation_source, clinvar_classes)
 
-    print("Filtering COSMIC mutations and aggregating by gene...")
+    print(f"Filtering {mut_label} mutations and aggregating by gene...")
     # Aggregate hotspot mutations by gene
     cosmic_grouped = (
         cosmic.groupby("gene", as_index=False)
@@ -581,17 +621,17 @@ def _run_ptm_proximity_filter(output_file, ptm_source=DEFAULT_PTM_SOURCE, psp_fi
                    if c not in ("uniprot_id", "gene", "ptms_on_protein")]
     merged = merged[["uniprot_id", "gene", "ptms_on_protein", "mutations_on_protein", *source_cols]]
 
-    # Log PTM-source proteins with no matching COSMIC hotspot mutations for their gene
+    # Log PTM-source proteins with no matching hotspot mutations for their gene
     # (gene-name mismatch, or no mutation met HOTSPOT_MIN_AFFECTED_CASES) before dropping them
     unmatched = merged[merged["mutations_on_protein"].isna()].copy()
     unmatched_log.parent.mkdir(parents=True, exist_ok=True)
     unmatched[["uniprot_id", "gene", "ptms_on_protein"]].to_csv(
         unmatched_log, sep="\t", index=False, encoding="utf-16"
     )
-    print(f"Wrote {len(unmatched)} proteins with no matching COSMIC hotspot mutations to: {unmatched_log}")
+    print(f"Wrote {len(unmatched)} proteins with no matching {mut_label} hotspot mutations to: {unmatched_log}")
 
     merged = merged[merged["mutations_on_protein"].notna()].copy()
-    merged = _canonical_numbering_step(merged)
+    merged = _canonical_numbering_step(merged, mut_label)
 
     # For comparison against nearby/distant mutation patient counts computed in step 3
     merged["total_cosmic_missense_patients"] = merged["gene"].map(gene_to_total_missense_patients)
@@ -602,19 +642,19 @@ def _run_ptm_proximity_filter(output_file, ptm_source=DEFAULT_PTM_SOURCE, psp_fi
     print("Done.")
     print(f"Hotspot minimum affected cases: {HOTSPOT_MIN_AFFECTED_CASES}")
     print(f"{source_name} PTM genes: {n_ptm_genes}")
-    print(f"COSMIC hotspot genes: {cosmic['gene'].nunique()}")
+    print(f"{mut_label} hotspot genes: {cosmic['gene'].nunique()}")
     print(f"Final merged proteins: {len(merged)}")
     print(f"Output saved to: {output_file}")
 
 
-def _run_mutation_clustering_filter(output_file):
-    """Run the mutation-clustering pipeline mode: keep all recurrent COSMIC hotspots mapped to UniProt,
-    regardless of PTMs."""
-    cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
-    print(f"COSMIC file: {cosmic_file.name}")
-
-    print("Loading COSMIC file...")
-    cosmic, _gene_to_transcript, gene_to_total_missense_patients = _load_and_filter_cosmic(cosmic_file)
+def _run_mutation_clustering_filter(output_file, mutation_source=DEFAULT_MUTATION_SOURCE,
+                                    clinvar_classes=DEFAULT_CLINVAR_CLASSES):
+    """Run the mutation-clustering pipeline mode: keep all recurrent hotspots of the
+    mutation source mapped to UniProt, regardless of PTMs."""
+    mut_label = MUTATION_SOURCE_LABELS[mutation_source]
+    print(f"Loading {mut_label} mutations...")
+    cosmic, _gene_to_transcript, gene_to_total_missense_patients = _load_mutations(
+        mutation_source, clinvar_classes)
 
     print("Aggregating hotspot mutations by gene...")
     cosmic_grouped = (
@@ -634,7 +674,7 @@ def _run_mutation_clustering_filter(output_file):
     result = result.rename(columns={"UniProt": "uniprot_id"})
     result = result[["uniprot_id", "gene", "mutations_on_protein"]]
 
-    result = _canonical_numbering_step(result)
+    result = _canonical_numbering_step(result, mut_label)
 
     # For comparison against nearby/distant mutation patient counts computed in step 3
     result["total_cosmic_missense_patients"] = result["gene"].map(gene_to_total_missense_patients)
@@ -644,7 +684,7 @@ def _run_mutation_clustering_filter(output_file):
 
     print("Done.")
     print(f"Hotspot minimum affected cases: {HOTSPOT_MIN_AFFECTED_CASES}")
-    print(f"COSMIC hotspot genes: {cosmic['gene'].nunique()}")
+    print(f"{mut_label} hotspot genes: {cosmic['gene'].nunique()}")
     print(f"Genes mapped to UniProt: {len(result)}")
     print(f"Genes not mapped to UniProt (excluded): {unmapped}")
     print(f"Output saved to: {output_file}")
@@ -678,6 +718,21 @@ def main():
         default=DEFAULT_PTM_SOURCE,
         help="PTM site data for ptm-proximity mode: 'ptmd' (default) or 'psp' (PhosphoSitePlus)",
     )
+    parser.add_argument(
+        "--mutation-source",
+        choices=MUTATION_SOURCES,
+        default=DEFAULT_MUTATION_SOURCE,
+        help="Mutation data: 'cosmic' (default) or 'clinvar' (ClinVar variant_summary)",
+    )
+    parser.add_argument(
+        "--clinvar-classes",
+        nargs="+",
+        choices=list(CLINVAR_CLASSES),
+        default=list(DEFAULT_CLINVAR_CLASSES),
+        metavar="CLASS",
+        help=f"ClinVar source only: classifications to include, from {' '.join(CLINVAR_CLASSES)} "
+             f"(default: {' '.join(DEFAULT_CLINVAR_CLASSES)})",
+    )
     parser.add_argument("--psp-min-ltp", type=_non_negative_int, default=0,
                         help="PhosphoSitePlus source only: minimum LTP (low-throughput literature) count")
     parser.add_argument("--psp-max-ltp", type=_non_negative_int, default=None,
@@ -692,7 +747,8 @@ def main():
         "--min-samples",
         type=int,
         default=HOTSPOT_MIN_AFFECTED_CASES,
-        help=f"Minimum distinct COSMIC samples for a mutation to be a hotspot (default: {HOTSPOT_MIN_AFFECTED_CASES})",
+        help="Minimum distinct COSMIC samples (or ClinVar submitters) for a mutation to be a hotspot "
+             f"(default: {HOTSPOT_MIN_AFFECTED_CASES})",
     )
     args = parser.parse_args()
     HOTSPOT_MIN_AFFECTED_CASES = args.min_samples
@@ -706,17 +762,21 @@ def main():
         "disease_only": args.psp_disease_only,
     }
 
-    output_file = hotspots_tsv_path(PROJECT_ROOT, args.mode, args.ptm_source)
+    output_file = hotspots_tsv_path(PROJECT_ROOT, args.mode, args.ptm_source, args.mutation_source)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == "mutation-clustering":
-        _run_mutation_clustering_filter(output_file)
-    else:
-        try:
-            _run_ptm_proximity_filter(output_file, args.ptm_source, psp_filters)
-        except PspInputError as exc:
-            print(f"\nPhosphoSitePlus input problem:\n{exc}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        if args.mode == "mutation-clustering":
+            _run_mutation_clustering_filter(output_file, args.mutation_source, args.clinvar_classes)
+        else:
+            _run_ptm_proximity_filter(output_file, args.ptm_source, psp_filters,
+                                      args.mutation_source, args.clinvar_classes)
+    except PspInputError as exc:
+        print(f"\nPhosphoSitePlus input problem:\n{exc}", file=sys.stderr)
+        sys.exit(1)
+    except ClinVarInputError as exc:
+        print(f"\nClinVar input problem:\n{exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

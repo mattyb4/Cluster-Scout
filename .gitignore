@@ -16,6 +16,7 @@ __pycache__/
 data/input/cosmic/
 data/input/ptmd/
 data/input/phosphositeplus/
+data/input/ClinVar/
 data/cif_comparison/
 # Raw PhosphoSitePlus downloads (licensed; large)
 phosphositeplus_downloads*/
@@ -40,6 +41,7 @@ Output/psp_ptm_mutation_proximity_db.tsv
 Output/psp_ptm_mutation_proximity_long.tsv
 Output/mutation_cluster_db.tsv
 Output/mutation_cluster_long.tsv
+Output/clinvar_*.tsv
 Output/radius_sweep.*
 Output/*.png
 Output/coordinates/
@@ -53,6 +55,7 @@ Output/logs/download_errors.tsv
 Output/logs/ptm_skipped.tsv
 Output/logs/psp_ptm_skipped.tsv
 Output/logs/mutation_cluster_skipped.tsv
+Output/logs/clinvar_*.tsv
 Output/logs/ptm_genes_without_cosmic_mutations.tsv
 Output/logs/psp_ptm_genes_without_cosmic_mutations.tsv
 Output/logs/pipeline_runtimes.json
