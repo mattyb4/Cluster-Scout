@@ -144,10 +144,10 @@ class TestAnnotateLongFormat:
         assert row["ptm_aiupred_general"] == "" and row["mut_aiupred_binding"] == "", (
             "with disorder_maps=None, every AIUPred column must be blank rather than raise"
         )
-        assert row["ptm_is_disordered"] == "no" and row["mut_is_binding"] == "no", (
-            f"a blank/empty score must classify as 'no' (falsy), not crash trying to "
-            f"float('') -- got ptm_is_disordered={row['ptm_is_disordered']!r} "
-            f"mut_is_binding={row['mut_is_binding']!r}"
+        assert row["ptm_is_disordered"] == "" and row["mut_is_binding"] == "", (
+            f"with no score the yes/no flag must be blank ('no' would claim it was scored and isn't "
+            f"disordered/binding), and must not crash on float('') -- got "
+            f"ptm_is_disordered={row['ptm_is_disordered']!r} mut_is_binding={row['mut_is_binding']!r}"
         )
         assert row["ptm_domain"] == "" and row["mutation_domain"] == "", (
             "with domain_maps=None, both domain columns must be blank rather than raise"
@@ -246,7 +246,7 @@ class TestAnnotateClusterLongFormat:
             "with disorder_maps/domain_maps omitted (default None), both must be "
             "blank rather than raise"
         )
-        assert row["mut_is_disordered"] == "no" and row["mut_is_binding"] == "no", (
-            f"a blank score must classify as 'no', not crash on float(''), got "
+        assert row["mut_is_disordered"] == "" and row["mut_is_binding"] == "", (
+            f"a blank score must leave the flag blank, not 'no', and not crash on float(''), got "
             f"disordered={row['mut_is_disordered']!r} binding={row['mut_is_binding']!r}"
         )

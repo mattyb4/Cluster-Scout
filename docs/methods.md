@@ -15,6 +15,18 @@ Implemented in `scripts/4_annotate.py` (step 4). Each mutation gets the PolyPhen
 
 ---
 
+## AIUPred disorder and binding-region scores
+
+Implemented in `scripts/4_annotate.py` (step 4) and `scripts/aiupred_predictor.py`. Each protein gets per-residue **AIUPred** scores from the AIUPred package (Erdős & Dosztányi, MIT license), pinned to commit `c5cd78d` and run in its own environment because it needs PyTorch.
+
+- **Scores:** `predict_disorder` gives the general disorder score (column `*_aiupred_general`) and `predict_binding` with its default smoothing gives the binding-region score (`*_aiupred_binding`), both 0–1 per residue. A residue is flagged disordered or binding ("yes") when its score is above 0.5.
+- **Sequence:** the protein's complete canonical AlphaFold model sequence (numbered 1..N, standard residues only), so positions are in the same numbering as the rest of the output. Proteins without such a model are scored by the AIUPred web server (`aiupred.elte.hu`, the same models, queried by UniProt accession) instead, as are all proteins if the local environment can't be set up.
+- **Agreement with the web server:** on 60 proteins whose web-server scores were already cached, local scores differed from them by at most 0.00001 (general) and 0.002 (binding), with no length mismatches. Locally and web-scored proteins are therefore stored together in one cache.
+- **Caching and failures:** scores are cached per protein in `data/cache/aiupred_disorder.tsv` (saved after every chunk of 25 proteins locally, every 100 from the web server). A protein neither route can score is not cached, so it is retried on the next run; its score columns and its yes/no flags are blank (a flag is "no" only when a score exists and is at most 0.5). The reason for each failure is printed at the end of step 4 and written to `Output/logs/aiupred_failures.tsv`.
+- **Speed:** about 1,000 residues per second on a CPU (parallel helper processes don't improve on this).
+
+---
+
 ## ClinVar as a mutation source
 
 Source file: ClinVar's `variant_summary.txt` (one row per variant per genome assembly).

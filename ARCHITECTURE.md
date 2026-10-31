@@ -66,7 +66,7 @@ The numbers ARE the data flow — each step reads what the previous step wrote:
 | `3_find_nearby_mutations.py` | Compute 3D distances PTM↔mutation | step-1 TSV + CIFs | `Output/*_db.tsv` |
 | `4_annotate.py` | Add 14-3-3, PolyPhen, kinase, AIUPred, InterPro | step-3 output | annotated `Output/*_db.tsv` |
 
-Step 4 only runs in `ptm-proximity` mode (see §3.3).
+Step 4 runs in both modes; in `mutation-clustering` it skips the PTM-specific 14-3-3 and kinase annotations (see §3.3).
 
 ### 3.2 `main.py` — the CLI orchestrator
 
@@ -85,8 +85,8 @@ There are two modes, defined as `PTM_PROXIMITY_STEPS` and
 
 - **ptm-proximity** (default) — the full 4-step pipeline; finds mutations near
   PTM sites.
-- **mutation-clustering** — steps 1–3 only, no PTM requirement; finds mutations
-  that cluster near each other.
+- **mutation-clustering** — no PTM requirement; finds mutations that cluster
+  near each other. Step 4 runs PolyPhen, AIUPred and InterPro only.
 
 The two modes write to **separate** step-1 output files
 (`hotspots_tsv_path()`), because their schemas differ and sharing a path caused
@@ -103,6 +103,20 @@ Steps 3 and 4 then run identically, with step 3 adding the PSP-only output
 columns. Each source has its own step-1 file and output files
 (`hotspots_tsv_path(root, mode, ptm_source)`, `ptm_output_paths()`), for the
 same no-overwrite reason as the modes.
+
+**Mutation sources.** Both modes take their mutations from COSMIC (default) or
+ClinVar (`--mutation-source clinvar`, passed to steps 1, 3 and 4). Only step 1
+knows the difference: `scripts/clinvar_input.py` reduces ClinVar's
+`variant_summary.txt` (GRCh38 missense variants in the chosen classifications,
+counted by submitters) to a small cache, and step 1 then applies the usual
+Min-samples threshold and canonical-isoform renumbering, so steps 2–4 see the
+same per-protein columns either way. COSMIC file and column names are
+unchanged; ClinVar runs get their own `clinvar_`-tagged step-1 and output files
+(`hotspots_tsv_path(..., mutation_source)`, `ptm_output_paths()`,
+`cluster_output_paths()`) so the sources never overwrite each other. Count
+columns such as `total_cosmic_missense_patients` keep their names but hold
+submitter counts for ClinVar; the Results tab relabels the "COSMIC label"
+columns and has a COSMIC/ClinVar toggle.
 
 ### 3.4 `pipeline_utils.py` — shared backend utilities
 

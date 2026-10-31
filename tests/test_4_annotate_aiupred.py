@@ -424,3 +424,18 @@ class TestHelperSetupMessage:
         monkeypatch.setattr(subprocess, "run", lambda *a, **k: completed("", 1, "boom\nNo matching distribution"))
         problem = mod.check_aiupred_helper()
         assert problem and "No matching distribution" in problem
+
+
+class TestAiupredFlag:
+    def test_flag_is_blank_without_a_score_and_yes_no_with_one(self):
+        assert mod.aiupred_flag("") == "", "no score must stay blank, not read as 'no'"
+        assert mod.aiupred_flag(None) == ""
+        assert mod.aiupred_flag("0.501") == "yes" and mod.aiupred_flag("0.500") == "no"
+        assert mod.aiupred_flag("0.000") == "no", "a real score of zero is a 'no', not a missing score"
+
+    def test_unscored_protein_gets_blank_flags_but_scored_protein_does_not(self):
+        df = pd.DataFrame({"ptm_aiupred_general": ["0.900", "", "0.100"],
+                           "ptm_aiupred_binding": ["", "", "0.700"]})
+        flags = df["ptm_aiupred_general"].apply(mod.aiupred_flag).tolist()
+        assert flags == ["yes", "", "no"]
+        assert df["ptm_aiupred_binding"].apply(mod.aiupred_flag).tolist() == ["", "", "yes"]

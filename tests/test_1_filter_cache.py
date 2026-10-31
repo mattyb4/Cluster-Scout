@@ -39,7 +39,7 @@ class TestFetchUniprotGeneMapping:
     def test_fetches_and_caches(self, mod, monkeypatch):
         calls = []
 
-        def fake_get(url, params=None):
+        def fake_get(url, params=None, **kwargs):
             calls.append(params)
             return FakeResponse(
                 "Entry\tGene Names\nP04637\tTP53 p53\n",
@@ -58,7 +58,7 @@ class TestFetchUniprotGeneMapping:
     def test_second_call_is_served_from_cache(self, mod, monkeypatch):
         calls = []
 
-        def fake_get(url, params=None):
+        def fake_get(url, params=None, **kwargs):
             calls.append(params)
             return FakeResponse("Entry\tGene Names\nP04637\tTP53 p53\n")
 
@@ -78,7 +78,7 @@ class TestFetchUniprotGeneMapping:
     def test_strips_variant_suffix(self, mod, monkeypatch):
         monkeypatch.setattr(
             mod.requests, "get",
-            lambda url, params=None: FakeResponse("Entry\tGene Names\nQ16613\tBAD1\n"),
+            lambda url, params=None, **kwargs: FakeResponse("Entry\tGene Names\nQ16613\tBAD1\n"),
         )
 
         df = mod.fetch_uniprot_gene_mapping(["Q16613_VAR_A129T"])
@@ -90,7 +90,7 @@ class TestFetchUniprotGeneMapping:
     def test_not_found_accession_is_cached_and_excluded(self, mod, monkeypatch):
         monkeypatch.setattr(
             mod.requests, "get",
-            lambda url, params=None: FakeResponse("Entry\tGene Names\n"),
+            lambda url, params=None, **kwargs: FakeResponse("Entry\tGene Names\n"),
         )
 
         df = mod.fetch_uniprot_gene_mapping(["P99999"])
@@ -118,7 +118,7 @@ class TestFetchGeneToUniprotMapping:
     def test_fetches_and_caches(self, mod, monkeypatch):
         calls = []
 
-        def fake_get(url, params=None):
+        def fake_get(url, params=None, **kwargs):
             calls.append(params)
             return FakeResponse("Entry\tGene Names\nQ06124\tPTPN11\n")
 
@@ -141,7 +141,7 @@ class TestFetchGeneToUniprotMapping:
     def test_unmapped_gene_is_cached_and_excluded(self, mod, monkeypatch):
         monkeypatch.setattr(
             mod.requests, "get",
-            lambda url, params=None: FakeResponse("Entry\tGene Names\n"),
+            lambda url, params=None, **kwargs: FakeResponse("Entry\tGene Names\n"),
         )
 
         df = mod.fetch_gene_to_uniprot_mapping(["NOTAGENE"])
@@ -154,4 +154,76 @@ class TestFetchGeneToUniprotMapping:
         assert cache["NOTAGENE"] == ("",), (
             "the unmapped result must be cached (empty-string UniProt) to avoid re-querying "
             "the same unmapped gene on every future run"
+        )
+
+
+class TestUniprotOutage:
+    """UniProt's search endpoint goes down for stretches: retry, then fail briefly."""
+
+    @pytest.fixture(autouse=True)
+    def no_sleep(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+    def test_temporary_failure_is_retried(self, mod, monkeypatch):
+        responses = [FakeResponse("", status_code=503),
+                     FakeResponse("Entry\tGene Names\nP04637\tTP53 p53\n")]
+        monkeypatch.setattr(mod.requests, "get", lambda url, params=None, **kw: responses.pop(0))
+
+        df = mod.fetch_uniprot_gene_mapping(["P04637"])
+        assert df.to_dict("records") == [{"UniProt": "P04637", "gene": "TP53"}], (
+            f"a 503 followed by a good response should succeed on retry, got {df.to_dict('records')}"
+        )
+
+    def test_persistent_outage_raises_short_message_without_the_url(self, mod, monkeypatch):
+        monkeypatch.setattr(mod.requests, "get", lambda url, params=None, **kw: FakeResponse("", status_code=503))
+
+        with pytest.raises(mod.UniProtUnavailableError) as exc:
+            mod.fetch_uniprot_gene_mapping(["P04637"])
+        message = str(exc.value)
+        assert "HTTP 503" in message and "try again" in message, (
+            f"the message should name the cause and say to retry, got {message!r}"
+        )
+        assert "accession:" not in message and len(message) < 300, (
+            f"the (very long) query URL must not appear in the message, got {message!r}"
+        )
+
+    def test_timeout_is_reported_as_such(self, mod, monkeypatch):
+        def fake_get(url, params=None, **kw):
+            raise mod.requests.Timeout()
+
+        monkeypatch.setattr(mod.requests, "get", fake_get)
+        with pytest.raises(mod.UniProtUnavailableError, match="timed out"):
+            mod.fetch_gene_to_uniprot_mapping(["PTPN11"])
+
+    def test_client_error_is_not_retried(self, mod, monkeypatch):
+        calls = []
+
+        def fake_get(url, params=None, **kw):
+            calls.append(1)
+            return FakeResponse("", status_code=400)
+
+        monkeypatch.setattr(mod.requests, "get", fake_get)
+        with pytest.raises(mod.UniProtUnavailableError, match="HTTP 400"):
+            mod.fetch_uniprot_gene_mapping(["P04637"])
+        assert len(calls) == 1, f"a 400 won't fix itself, so it shouldn't be retried; got {len(calls)} calls"
+
+    def test_batches_fetched_before_the_outage_are_saved(self, mod, monkeypatch):
+        ids = [f"P{n:05d}" for n in range(150)]  # two batches of 100
+        calls = []
+
+        def fake_get(url, params=None, **kw):
+            calls.append(1)
+            if len(calls) > 1:
+                return FakeResponse("", status_code=503)
+            batch = [q.split(":")[1] for q in params["query"].split(" OR ")]
+            body = "".join(f"{u}\tG{u}\n" for u in batch)
+            return FakeResponse("Entry\tGene Names\n" + body)
+
+        monkeypatch.setattr(mod.requests, "get", fake_get)
+        with pytest.raises(mod.UniProtUnavailableError):
+            mod.fetch_uniprot_gene_mapping(ids)
+
+        cache = mod._load_cache(mod.UNIPROT_GENE_CACHE_FILE, ["UniProt", "gene"])
+        assert len(cache) == 100, (
+            f"the first batch finished before the outage and should be on disk, found {len(cache)} entries"
         )

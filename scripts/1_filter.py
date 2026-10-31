@@ -171,6 +171,46 @@ def parse_mutation_site(val):
         return re.findall(r"[A-Z]\d+[A-Z*]", text)
 
 
+class UniProtUnavailableError(Exception):
+    """UniProt's API kept failing after retries; the message is shown to the user as is."""
+
+
+_UNIPROT_RETRIES = 3
+_UNIPROT_BACKOFF = 2.0   # seconds; doubles after each failed attempt
+_UNIPROT_TIMEOUT = 60
+
+
+def _uniprot_get(url, params, what):
+    """GET from the UniProt REST API, retrying temporary failures.
+
+    Timeouts, dropped connections, HTTP 429 and 5xx responses are retried with
+    a growing pause. If they persist (UniProt's search endpoint does go down for
+    stretches), raises UniProtUnavailableError with a short message rather than
+    letting a traceback with a very long query URL reach the log.
+    """
+    reason = ""
+    for attempt in range(_UNIPROT_RETRIES):
+        try:
+            resp = requests.get(url, params=params, timeout=_UNIPROT_TIMEOUT)
+        except requests.Timeout:
+            reason = "the request timed out"
+        except requests.RequestException as exc:
+            reason = f"couldn't connect ({type(exc).__name__})"
+        else:
+            if resp.status_code < 400:
+                return resp
+            reason = f"HTTP {resp.status_code}"
+            if resp.status_code != 429 and resp.status_code < 500:
+                break  # a client error won't fix itself on retry
+        if attempt < _UNIPROT_RETRIES - 1:
+            time.sleep(_UNIPROT_BACKOFF * 2 ** attempt)
+    raise UniProtUnavailableError(
+        f"UniProt isn't responding while {what} ({reason}). This is usually a temporary "
+        "problem on UniProt's side: anything already fetched has been saved, so try again "
+        "in a few minutes."
+    )
+
+
 UNIPROT_GENE_CACHE_FILE = "uniprot_gene_mapping.tsv"
 
 
@@ -202,8 +242,11 @@ def fetch_uniprot_gene_mapping(uniprot_ids, batch_size=100):
             params = {"query": query, "fields": "accession,gene_names", "format": "tsv", "size": batch_size}
 
             while url:
-                resp = requests.get(url, params=params)
-                resp.raise_for_status()
+                try:
+                    resp = _uniprot_get(url, params, f"fetching gene names (batch {batch_num}/{total_batches})")
+                except UniProtUnavailableError:
+                    _save_cache(UNIPROT_GENE_CACHE_FILE, cache, ["UniProt", "gene"])  # keep finished batches
+                    raise
                 if uniprot_release is None:
                     uniprot_release = resp.headers.get("X-UniProt-Release")
                 lines = resp.text.strip().split("\n")
@@ -271,8 +314,11 @@ def fetch_gene_to_uniprot_mapping(gene_names, batch_size=20):
             }
 
             while url:
-                resp = requests.get(url, params=params)
-                resp.raise_for_status()
+                try:
+                    resp = _uniprot_get(url, params, f"looking up gene accessions (batch {batch_num}/{total_batches})")
+                except UniProtUnavailableError:
+                    _save_cache(GENE_TO_UNIPROT_CACHE_FILE, cache, ["gene", "UniProt"])  # keep finished batches
+                    raise
                 lines = resp.text.strip().split("\n")
                 for line in lines[1:]:
                     parts = line.split("\t")
@@ -776,6 +822,9 @@ def main():
         sys.exit(1)
     except ClinVarInputError as exc:
         print(f"\nClinVar input problem:\n{exc}", file=sys.stderr)
+        sys.exit(1)
+    except UniProtUnavailableError as exc:
+        print(f"\n{exc}", file=sys.stderr)
         sys.exit(1)
 
 

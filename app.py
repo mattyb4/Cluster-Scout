@@ -178,7 +178,6 @@ class App(
         self._steps_done = 0
         self._total_steps = 0
         self._step_times: list[float] = []
-        self._historical_times: list[float] | None = None
         self._ui_scale = 1.0
         self._zoom_indicator_hide_job: str | None = None
 

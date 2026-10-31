@@ -1215,6 +1215,14 @@ def _aiupred_run_local(need: list[str], cache: dict, on_progress: Callable[[int,
     return scored
 
 
+def aiupred_flag(score: str) -> str:
+    """"yes"/"no" for an AIUPred score string (above 0.5 is "yes"); blank when there is no score,
+    so a protein AIUPred couldn't score isn't reported as "no"."""
+    if score in ("", None):
+        return ""
+    return "yes" if float(score) > 0.5 else "no"
+
+
 def fetch_aiupred_all(api_type: str, uniprot_id: str) -> dict[str, dict[int, float]]:
     """Fetch AIUPred scores for one protein, returning all score arrays in the response.
 
@@ -1544,18 +1552,10 @@ def annotate_long_format(
     for t in _ATYPES:
         df[f"ptm_aiupred_{t}"] = ptm_disorder[t]
         df[f"mut_aiupred_{t}"] = mut_disorder[t]
-    df["ptm_is_disordered"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in ptm_disorder["general"]
-    ]
-    df["ptm_is_binding"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in ptm_disorder["binding"]
-    ]
-    df["mut_is_disordered"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["general"]
-    ]
-    df["mut_is_binding"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["binding"]
-    ]
+    df["ptm_is_disordered"] = [aiupred_flag(v) for v in ptm_disorder["general"]]
+    df["ptm_is_binding"] = [aiupred_flag(v) for v in ptm_disorder["binding"]]
+    df["mut_is_disordered"] = [aiupred_flag(v) for v in mut_disorder["general"]]
+    df["mut_is_binding"] = [aiupred_flag(v) for v in mut_disorder["binding"]]
     df["ptm_domain"] = ptm_domains
     df["mutation_domain"] = mut_domains
 
@@ -1609,12 +1609,8 @@ def annotate_cluster_long_format(
     df["polyphen_class"] = pp_classes
     for t in _ATYPES:
         df[f"mut_aiupred_{t}"] = mut_disorder[t]
-    df["mut_is_disordered"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["general"]
-    ]
-    df["mut_is_binding"] = [
-        "yes" if v and float(v) > 0.5 else "no" for v in mut_disorder["binding"]
-    ]
+    df["mut_is_disordered"] = [aiupred_flag(v) for v in mut_disorder["general"]]
+    df["mut_is_binding"] = [aiupred_flag(v) for v in mut_disorder["binding"]]
     df["mutation_domain"] = mut_domains
 
 
@@ -1668,12 +1664,8 @@ def _annotate_ptm_proximity(output_dir: Path, pp_exclude: list[str],
             ps = disorder_maps[atype].get(uid, {})
             col_vals.append(f"{ps[pos]:.3f}" if pos in ps else "")
         df[f"ptm_aiupred_{atype}"] = col_vals
-    df["ptm_is_disordered"] = df["ptm_aiupred_general"].apply(
-        lambda v: "yes" if v and float(v) > 0.5 else "no"
-    )
-    df["ptm_is_binding"] = df["ptm_aiupred_binding"].apply(
-        lambda v: "yes" if v and float(v) > 0.5 else "no"
-    )
+    df["ptm_is_disordered"] = df["ptm_aiupred_general"].apply(aiupred_flag)
+    df["ptm_is_binding"] = df["ptm_aiupred_binding"].apply(aiupred_flag)
 
     domain_maps = results["Phase 5 (InterPro)"]
     col_vals = []
@@ -1757,12 +1749,8 @@ def _annotate_mutation_clustering(output_dir: Path, pp_exclude: list[str],
             ps = disorder_maps[atype].get(uid, {})
             col_vals.append(f"{ps[pos]:.3f}" if pos in ps else "")
         df[f"anchor_aiupred_{atype}"] = col_vals
-    df["anchor_is_disordered"] = df["anchor_aiupred_general"].apply(
-        lambda v: "yes" if v and float(v) > 0.5 else "no"
-    )
-    df["anchor_is_binding"] = df["anchor_aiupred_binding"].apply(
-        lambda v: "yes" if v and float(v) > 0.5 else "no"
-    )
+    df["anchor_is_disordered"] = df["anchor_aiupred_general"].apply(aiupred_flag)
+    df["anchor_is_binding"] = df["anchor_aiupred_binding"].apply(aiupred_flag)
 
     domain_maps = results["Phase 5 (InterPro)"]
     col_vals = []

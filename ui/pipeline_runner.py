@@ -42,17 +42,19 @@ from ui.common import (
     COSMIC_SOMATIC_STATUSES,
     INTERACTORS_1433_INPUT_DIR,
     PROJECT_ROOT,
+    PSP_INPUT_DIR,
     PTMD_INPUT_DIR,
     SCRIPTS_DIR,
     _cache_entry_count,
     _detect_run_type,
     _fmt_time,
-    _load_runtimes,
     _save_runtimes,
+    cluster_output_paths,
     discover_psp_files,
     hotspots_tsv_path,
     input_dir,
     pipeline_steps,
+    ptm_output_paths,
     resolve_input_file,
     validate_1433_file,
     validate_clinvar_file,
@@ -74,13 +76,11 @@ class PipelineRunnerMixin:
 
         text = f"Elapsed: {_fmt_time(elapsed)}"
 
-        est = getattr(self, "_precheck_estimate", None)
-        hist = self._historical_times
-        # Real timing from a past run of this (mode, run_type) beats the heuristic
-        # precheck -- it reflects this machine's actual conditions, not generic constants
-        if hist and len(hist) == self._total_steps:
-            text += f"  |  Est. total: ~{_fmt_time(sum(hist))}"
-        elif est is not None:
+        # Same figure the console prints: the heuristic precheck, set once at startup.
+        # Past runs' measured times (_load_runtimes) are deliberately not used: they
+        # can't tell a warm run from a partially cold one.
+        est =getattr(self, "_precheck_estimate", None)
+        if est is not None:
             text += f"  |  Est. total: ~{_fmt_time(est)}"
         elif self._step_times:
             avg = sum(self._step_times) / len(self._step_times)
@@ -509,24 +509,96 @@ class PipelineRunnerMixin:
     # Per-item time estimates (seconds) for runtime calculation. For steps backed
     # by a ThreadPoolExecutor, the raw per-request time is divided by that worker
     # count so the estimate reflects concurrent, not sequential, execution.
-    # Step 2 is request-rate-bound: ~3 requests per protein (metadata + CIF + PAE) at
-    # scripts/2_download_structures.py's _DEFAULT_MAX_RPS (2/s).
-    _TIME_PER_CIF_DOWNLOAD = 1.6
-    _TIME_PER_UNIPROT_BATCH = 1.5       # ~100 IDs per batch, sequential
-    _TIME_PER_ISOFORM_BATCH = 3.0       # ~25 proteins per batch, sequential (cosmic_numbering.py)
+    # Step 2 is request-rate-bound at scripts/2_download_structures.py's _DEFAULT_MAX_RPS
+    # (2/s): every protein costs one metadata request (the AlphaFold version check runs
+    # even when the CIF is cached), and an uncached one adds a CIF and a PAE download.
+    # Measured: ~0.5 s/protein warm, ~1.5 s/protein cold.
+    _TIME_PER_CIF_CHECK = 0.5
+    _TIME_PER_CIF_DOWNLOAD = 1.0
+    _TIME_PER_UNIPROT_BATCH = 1.8       # ~100 IDs per batch, sequential (measured cold: 147 batches in ~270 s)
+    _TIME_PER_ISOFORM_BATCH = 2.5       # ~25 proteins per batch, sequential (cosmic_numbering.py)
     _TIME_PER_1433_FETCH = 0.2          # already amortized, 5 concurrent workers
-    _TIME_PER_PP_FETCH = 0.15            # sequential, paced (scripts/4_annotate.py: _PP_REQUEST_DELAY + real API latency)
-    _KINASE_WORKERS = 6                 # scripts/4_annotate.py: _KIN_MAX_WORKERS
-    _TIME_PER_KINASE_PREDICT = 1.0 / _KINASE_WORKERS
-    _AIUPRED_WORKERS = 5                # scripts/4_annotate.py: _AIUPRED_MAX_WORKERS
-    _TIME_PER_AIUPRED_FETCH = 4.5 / _AIUPRED_WORKERS
-    _TIME_PER_INTERPRO_FETCH = 0.3      # already amortized, 5 concurrent workers
-    _TIME_PER_PROTEIN_STEP3 = 0.35
-    _TIME_STEP1_BASE = 40               # base time for filtering/merging
-    _TIME_STEP4_BASE = 40               # base time for reading/writing the proximity DB
+    # PolyPhen: sequential and paced (4_annotate.py: _PP_REQUEST_DELAY + API latency).
+    # Measured cold: ~0.2 s per pair. Usually the slowest phase, so it sets step 4's length.
+    _TIME_PER_PP_FETCH = 0.2
+    # Step 4 only annotates hotspot proteins that have results in step 3's table: about
+    # 84% of COSMIC's and 54% of ClinVar's (ClinVar hotspots rarely sit near a PTM), and
+    # those average ~14.5 (COSMIC) / ~5.5 (ClinVar) PolyPhen pairs each. Measured over the
+    # PTMD/COSMIC, PSP/COSMIC and both ClinVar runs; used when no earlier run's table says
+    # exactly which proteins and pairs a run will need.
+    _ANNOTATED_FRACTION = {"cosmic": 0.84, "clinvar": 0.54}
+    _PP_PAIRS_PER_ANNOTATED_PROTEIN = {"cosmic": 14.5, "clinvar": 5.5}
+    # Kinase: one prediction per phosphosite window, ~5.7 windows per protein; measured
+    # ~0.15 s per window with scripts/4_annotate.py's _KIN_MAX_WORKERS (6) workers
+    _TIME_PER_KINASE_PREDICT = 0.15
+    _KINASE_WINDOWS_PER_PROTEIN = 5.7
+    # AIUPred is scored locally (scripts/aiupred_predictor.py, ~1,000 residues/s on CPU),
+    # so this is ~600 residues per protein, sequential. Proteins the local helper can't
+    # score fall back to the slower web server, which this doesn't model.
+    _TIME_PER_AIUPRED_FETCH = 1.5       # measured cold, with the other step 4 phases competing for the CPU
+    _TIME_PER_INTERPRO_FETCH = 1.2      # measured cold (web API, 5 concurrent workers)
+    _TIME_PER_PROTEIN_STEP3 = 0.12      # measured ~0.10-0.14 s/protein (0.14 cold)
+    _TIME_STEP1_BASE = 30               # base time for filtering/merging
+    _TIME_STEP4_BASE = 55               # base time for reading/writing the proximity DB
 
-    def _run_precheck(self, mode: str, ptm_source: str = "ptmd", mutation_source: str = "cosmic") -> float:
-        """Analyze caches and data to estimate total pipeline runtime. Returns seconds."""
+    @staticmethod
+    def _uncached(ids: set[str] | None, cached_ids: set[str], n_proteins: int) -> int:
+        """How many of this run's proteins a cache is missing.
+
+        With the run's protein list, count the real overlap; a cache full of other
+        runs' proteins would otherwise look like it covers this one. Without a list
+        at all, fall back to comparing sizes.
+        """
+        if ids is not None:
+            return len(ids - cached_ids)
+        return max(0, n_proteins - len(cached_ids))
+
+    @staticmethod
+    def _ptm_accessions(ptm_source: str) -> set[str] | None:
+        """Every UniProt accession in the PTM input (None if it can't be read), which is
+        what step 1 maps to gene names. Reads only the accession column (PTMD) or the
+        site tables (PhosphoSitePlus): about a second or two."""
+        import pandas as pd
+        try:
+            if ptm_source == "psp":
+                from psp_input import load_psp_sites
+                sites = load_psp_sites(input_dir(PROJECT_ROOT, PSP_INPUT_DIR), log=lambda *a, **k: None)
+                return set(sites["UniProt"].dropna())
+            ptmd_file = resolve_input_file(input_dir(PROJECT_ROOT, PTMD_INPUT_DIR), (".tsv",))
+            ptmd = pd.read_csv(ptmd_file, sep="\t", usecols=["UniProt", "State"], low_memory=False)
+            return set(ptmd.loc[ptmd["State"] == "N", "UniProt"].dropna().str.split("_").str[0])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _uncached_pp_pairs(db_path: Path, cached: set[tuple[str, str]]) -> int | None:
+        """PolyPhen pairs the previous run's proximity table lists that aren't cached
+        (None if there is no readable table, so the caller falls back to an estimate)."""
+        import pandas as pd
+        cols = ["gene", "mutations_within_5_positions", "mutations_more_than_5_positions"]
+        try:
+            if not db_path.exists():
+                return None
+            prev = pd.read_csv(db_path, sep="\t", encoding="utf-16", dtype=str,
+                               keep_default_na=False, usecols=cols)
+        except Exception:
+            return None
+        entry_re = re.compile(r"^[A-Z]\d+[A-Z*]")
+        pairs = set()
+        for gene, *cells in prev.itertuples(index=False):
+            for cell in cells:
+                for entry in cell.split(", "):
+                    m = entry_re.match(entry.strip())
+                    if gene and m:
+                        pairs.add((gene, m.group(0)))
+        return len(pairs - cached) if pairs else None
+
+    def _run_precheck(self, mode: str, ptm_source: str = "ptmd",
+                      mutation_source: str = "cosmic") -> tuple[list[float], int]:
+        """Estimate each step's runtime from the caches and data.
+
+        Returns ([step 1..N seconds], protein count).
+        """
         import pandas as pd
 
         self._q("log", "Initializing pipeline...")
@@ -540,10 +612,13 @@ class PipelineRunnerMixin:
         # otherwise step 1 hasn't run yet, so estimate from the raw input files.
         n_proteins = 0
         n_mutations = 0
+        ids: set[str] | None = None  # this run's proteins, once step 1 has produced them
+        hotspot_genes_found: set[str] = set()  # raw-input hotspot genes, used to predict ids below
         if input_tsv.exists():
             try:
                 df = pd.read_csv(input_tsv, sep="\t", usecols=["uniprot_id", "mutations_on_protein"], dtype=str)
-                n_proteins = df["uniprot_id"].nunique()
+                ids = set(df["uniprot_id"].dropna())
+                n_proteins = len(ids)
                 # Total hotspot mutations across all target proteins -- the real scale of
                 # PolyPhen work for mutation-clustering mode, where nearly every recurrent
                 # mutation gets scored (unlike ptm-proximity, where only mutations near a
@@ -565,7 +640,8 @@ class PipelineRunnerMixin:
                     min_samples = int(self._min_samples_var.get().strip() or 3)
                 except ValueError:
                     min_samples = 3
-                n_proteins = counts.loc[counts["affected_cases"] >= min_samples, "gene"].nunique()
+                hotspot_genes_found = set(counts.loc[counts["affected_cases"] >= min_samples, "gene"])
+                n_proteins = len(hotspot_genes_found)
                 self._q("log", f"Step 1 hasn't run yet — estimated {n_proteins} proteins from ClinVar hotspots")
             except Exception:
                 pass
@@ -584,32 +660,69 @@ class PipelineRunnerMixin:
                     min_samples = 3
                 affected_cases = cosmic_df.groupby(["GENE_SYMBOL", "MUTATION_AA"])["COSMIC_SAMPLE_ID"].nunique()
                 hotspot_genes = affected_cases[affected_cases >= min_samples].index.get_level_values("GENE_SYMBOL")
-                n_proteins = hotspot_genes.nunique()
+                hotspot_genes_found = set(hotspot_genes)
+                n_proteins = len(hotspot_genes_found)
                 self._q("log", f"Step 1 hasn't run yet — estimated {n_proteins} proteins from COSMIC hotspots")
             except Exception:
                 pass
 
         # Step 1: UniProt API cache
-        gene_cache = cache_dir / "uniprot_gene_mapping.tsv"
-        cached_genes = 0
-        if gene_cache.exists():
+        def cached_set(path: Path, column: str) -> set[str]:
+            """Distinct values of one column of a cache TSV (empty if it's missing/unreadable)."""
+            if not path.exists():
+                return set()
             try:
-                cached_genes = len(pd.read_csv(gene_cache, sep="\t", dtype=str))
+                return set(pd.read_csv(path, sep="\t", dtype=str, usecols=[column],
+                                       keep_default_na=False)[column])
+            except Exception:
+                return set()
+
+        # The accession -> gene mapping covers every protein in the PTM source (~15-18k),
+        # not just the hotspot proteins, so a cold run makes well over a hundred batches.
+        gene_cached = cached_set(cache_dir / "uniprot_gene_mapping.tsv", "UniProt")
+        cached_genes = len(gene_cached)
+        ptm_accessions = self._ptm_accessions(ptm_source) if mode == "ptm-proximity" else None
+        if ptm_accessions is not None:
+            uncached_genes = len(ptm_accessions - gene_cached)
+            uncached_batches = -(-uncached_genes // 100)
+        elif mode == "ptm-proximity":
+            uncached_genes = self._uncached(ids, gene_cached, n_proteins)
+            uncached_batches = uncached_genes // 100 + 1 if uncached_genes else 0
+        else:
+            # mutation-clustering maps the hotspot genes to accessions instead (20 per batch)
+            gene_to_uniprot = cached_set(cache_dir / "gene_to_uniprot_mapping.tsv", "gene")
+            uncached_batches = -(-max(0, n_proteins - len(gene_to_uniprot)) // 20)
+
+        # Step 1 hasn't produced this run's protein list yet, but it can be predicted: the
+        # hotspot genes (from the raw input) matched to PTM-source accessions through the
+        # accession -> gene cache. This is what lets a first run of a new source combination
+        # (say PSP/ClinVar after PTMD/COSMIC) see how much of the other caches it can reuse.
+        gene_map: dict[str, str] = {}
+        gene_cache_file = cache_dir / "uniprot_gene_mapping.tsv"
+        if gene_cache_file.exists():
+            try:
+                gm = pd.read_csv(gene_cache_file, sep="	", dtype=str, keep_default_na=False)
+                gene_map = dict(zip(gm["UniProt"], gm["gene"]))
             except Exception:
                 pass
-        uncached_batches = max(0, (n_proteins - cached_genes)) // 100 + 1 if n_proteins > cached_genes else 0
+        if ids is None and ptm_accessions and hotspot_genes_found and gene_map:
+            covered = {a for a in ptm_accessions if gene_map.get(a)}
+            coverage = len(covered) / len(ptm_accessions)
+            predicted = {a for a in covered if gene_map[a] in hotspot_genes_found}
+            if coverage >= 0.5 and predicted:
+                # Accessions whose gene isn't cached yet can't be matched; they're left out
+                # rather than scaled for, since hotspot genes are mostly well-studied ones
+                # that the cache covers (PSP/ClinVar's predicted 2,053 vs. an actual 2,149)
+                ids = predicted
+                n_proteins = len(ids)
+                self._q("log", f"  ...of which {n_proteins} have PTM data (matched through cached gene mappings)")
 
         # Step 1 also fetches every protein's isoform sequences (for canonical
         # numbering): a separate, sequential, batch-of-25 UniProt lookup not
         # covered by the gene-mapping cache above. One cache row per isoform.
-        isoform_cache = cache_dir / "uniprot_isoform_sequences.tsv"
-        cached_isoform = 0
-        if isoform_cache.exists():
-            try:
-                cached_isoform = pd.read_csv(isoform_cache, sep="\t", dtype=str)["query_accession"].nunique()
-            except Exception:
-                pass
-        uncached_isoform_genes = max(0, n_proteins - cached_isoform)
+        isoform_cached = cached_set(cache_dir / "uniprot_isoform_sequences.tsv", "query_accession")
+        cached_isoform = len(isoform_cached)
+        uncached_isoform_genes = self._uncached(ids, isoform_cached, n_proteins)
         uncached_isoform_batches = uncached_isoform_genes // 25 + 1 if uncached_isoform_genes else 0
 
         step1_est = (self._TIME_STEP1_BASE + uncached_batches * self._TIME_PER_UNIPROT_BATCH
@@ -618,12 +731,22 @@ class PipelineRunnerMixin:
                 f"{cached_isoform} proteins' isoform sequences cached")
 
         # Step 2: CIF downloads
-        cifs_present = 0
+        cif_ids: set[str] = set()
         if models_dir.exists():
-            cifs_present = sum(1 for d in models_dir.iterdir()
-                               if d.is_dir() and any(d.glob("*.cif")))
-        cifs_needed = max(0, n_proteins - cifs_present)
-        step2_est = cifs_needed * self._TIME_PER_CIF_DOWNLOAD + 5
+            cif_ids = {d.name for d in models_dir.iterdir()
+                       if d.is_dir() and any(d.glob("*.cif"))}
+        # Proteins AlphaFold has no model for never get a CIF, so they'd count as
+        # missing on every run; step 2's report from the last run names them.
+        unavailable = set()
+        try:
+            report = pd.read_csv(self._output_dir / "logs" / "download_report.tsv", sep="	", dtype=str,
+                                 keep_default_na=False, usecols=["UniProt", "status"])
+            unavailable = set(report.loc[report["status"].str.startswith("NO_"), "UniProt"])
+        except Exception:
+            pass
+        cifs_present = len(cif_ids) if ids is None else len(ids & cif_ids)
+        cifs_needed = self._uncached(ids, cif_ids | unavailable, n_proteins)
+        step2_est = n_proteins * self._TIME_PER_CIF_CHECK + cifs_needed * self._TIME_PER_CIF_DOWNLOAD
         self._q("log", f"Step 2: {cifs_present} CIF files present"
                 + (f", ~{cifs_needed} to download" if cifs_needed else " (all cached)"))
 
@@ -637,51 +760,99 @@ class PipelineRunnerMixin:
         if mode in ("ptm-proximity", "mutation-clustering"):
             # PolyPhen
             pp_cache = cache_dir / "polyphen.tsv"
-            cached_pp = 0
+            pp_cached: set[tuple[str, str]] = set()
             if pp_cache.exists():
                 try:
-                    cached_pp = len(pd.read_csv(pp_cache, sep="\t", dtype=str))
+                    pp_df = pd.read_csv(pp_cache, sep="\t", dtype=str, usecols=["gene", "mutation"])
+                    pp_cached = set(zip(pp_df["gene"], pp_df["mutation"]))
                 except Exception:
                     pass
+            cached_pp = len(pp_cached)
 
-            # AIUPred — one binding call per protein (yields general + binding scores)
-            cached_aiupred = 0
+            # Step 4 annotates only the proteins that have results in the proximity
+            # table, not every hotspot protein: the rest (no PTM near a mutation) are
+            # never cached, so counting them would charge for the same work every run.
+            # The previous run's table is the best available guide; a first run has
+            # none, so it falls back to every protein (an overestimate).
+            targets = ids
+            try:
+                paths = (ptm_output_paths(self._output_dir, ptm_source, mutation_source)
+                         if mode == "ptm-proximity"
+                         else cluster_output_paths(self._output_dir, mutation_source))
+                if ids is not None and paths["db"].exists():
+                    prev = pd.read_csv(paths["db"], sep="	", encoding="utf-16", dtype=str,
+                                       keep_default_na=False, usecols=["UniProt"])["UniProt"]
+                    previous = ids & set(prev)
+                    if previous:
+                        targets = previous
+            except Exception:
+                pass
+            have_prior = targets is not None and targets is not ids
+            source_key = "clinvar" if mutation_source == "clinvar" else "cosmic"
+            n_targets = len(targets) if have_prior else round(n_proteins * self._ANNOTATED_FRACTION[source_key])
+
+            def uncached_targets(cached: set[str]) -> int:
+                """Annotated proteins missing from *cached*. Without a prior table, only
+                this run's cached proteins count (the cache holds other runs' too) and all
+                of them are assumed to be among the annotated ones."""
+                if have_prior:
+                    return len(targets - cached)
+                if ids is not None:
+                    return max(0, n_targets - len(ids & cached))
+                return max(0, n_targets - len(cached))
+
+            # AIUPred — a protein counts as cached once its "binding" row exists
+            # (that call yields both the general and binding scores)
+            aiupred_cached: set[str] = set()
             aiupred_cache = cache_dir / "aiupred_disorder.tsv"
             if aiupred_cache.exists():
                 try:
-                    df_ac = pd.read_csv(aiupred_cache, sep="\t", dtype=str,
-                                        keep_default_na=False)
-                    cached_aiupred = int((df_ac["analysis_type"] == "binding").sum())
+                    df_ac = pd.read_csv(aiupred_cache, sep="\t", dtype=str, keep_default_na=False,
+                                        usecols=["uniprot_id", "analysis_type"])
+                    aiupred_cached = set(df_ac.loc[df_ac["analysis_type"] == "binding", "uniprot_id"])
                 except Exception:
                     pass
-            uncached_aiupred = max(0, n_proteins - cached_aiupred)
+            uncached_aiupred = uncached_targets(aiupred_cached)
+            cached_aiupred = n_targets - uncached_aiupred
 
             # InterPro — one row per protein
-            cached_interpro = 0
-            interpro_cache = cache_dir / "interpro_domains.tsv"
-            if interpro_cache.exists():
-                try:
-                    cached_interpro = len(pd.read_csv(interpro_cache, sep="\t", dtype=str))
-                except Exception:
-                    pass
-            uncached_interpro = max(0, n_proteins - cached_interpro)
+            interpro_cached = cached_set(cache_dir / "interpro_domains.tsv", "uniprot_id")
+            uncached_interpro = uncached_targets(interpro_cached)
+            cached_interpro = n_targets - uncached_interpro
 
-            # mutation-clustering scores nearly every hotspot mutation, not just ~2/protein
-            pp_target = n_mutations if mode == "mutation-clustering" and n_mutations else n_proteins * 2
+            # mutation-clustering scores nearly every hotspot mutation; PTM proximity only
+            # those near a PTM, which averages ~12 pairs per hotspot protein (~14 per
+            # protein that reaches step 4, when a previous run shows which those are)
+            if mode == "mutation-clustering" and n_mutations:
+                pp_target = n_mutations
+            else:
+                pp_target = n_targets * self._PP_PAIRS_PER_ANNOTATED_PROTEIN[source_key]
+
+            # How many of those pairs still need fetching. The previous run's table lists
+            # this combination's exact (gene, mutation) pairs; without one, count only the
+            # cached pairs of this run's genes (the cache also holds other runs' genes).
+            uncached_pp = None
+            if mode == "ptm-proximity":
+                uncached_pp = self._uncached_pp_pairs(paths["db"], pp_cached) if paths else None
+            if uncached_pp is None:
+                run_genes = {gene_map[a] for a in (targets or ()) if gene_map.get(a)}
+                relevant = sum(1 for gene, _mut in pp_cached if gene in run_genes) if run_genes else cached_pp
+                uncached_pp = max(0, pp_target - relevant)
 
             # Step 4's phases run concurrently, so it takes about as long as the slowest
-            phase_ests = [max(0, pp_target - cached_pp) * self._TIME_PER_PP_FETCH,
+            phase_ests = [uncached_pp * self._TIME_PER_PP_FETCH,
                           uncached_aiupred * self._TIME_PER_AIUPRED_FETCH,
                           uncached_interpro * self._TIME_PER_INTERPRO_FETCH]
             log_msg = (f"Step 4: {cached_pp} PolyPhen pairs cached, "
-                       f"{cached_aiupred}/{n_proteins} AIUPred cached, "
-                       f"{cached_interpro}/{n_proteins} InterPro cached")
+                       f"{cached_aiupred}/{n_targets} AIUPred cached, "
+                       f"{cached_interpro}/{n_targets} InterPro cached")
 
             if mode == "ptm-proximity":
                 # 14-3-3
                 cache_1433 = cache_dir / "1433pred"
-                cached_1433 = len(list(cache_1433.glob("*.json"))) if cache_1433.exists() else 0
-                uncached_1433 = max(0, n_proteins - cached_1433)
+                cached_1433_ids = {p.stem for p in cache_1433.glob("*.json")} if cache_1433.exists() else set()
+                uncached_1433 = self._uncached(ids, cached_1433_ids, n_proteins)
+                cached_1433 = n_proteins - uncached_1433
 
                 # Kinase
                 kin_cache = cache_dir / "kinase_predictions.tsv"
@@ -693,22 +864,25 @@ class PipelineRunnerMixin:
                         pass
 
                 # 14-3-3 is prefetched in the background during steps 2-3
+                kin_uncached = max(0.0, n_targets * self._KINASE_WINDOWS_PER_PROTEIN - cached_kin)
                 phase_ests += [max(0.0, uncached_1433 * self._TIME_PER_1433_FETCH - step2_est - step3_est),
-                               max(0, n_proteins - cached_kin) * self._TIME_PER_KINASE_PREDICT]
+                               kin_uncached * self._TIME_PER_KINASE_PREDICT]
                 log_msg = (f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
                            f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
-                           f"{cached_aiupred}/{n_proteins} AIUPred cached, "
-                           f"{cached_interpro}/{n_proteins} InterPro cached")
+                           f"{cached_aiupred}/{n_targets} AIUPred cached, "
+                           f"{cached_interpro}/{n_targets} InterPro cached")
 
             step4_est = max(phase_ests) + self._TIME_STEP4_BASE
             self._q("log", log_msg)
 
-        total_est = step1_est + step2_est + step3_est + step4_est
+        step_ests = [step1_est, step2_est, step3_est]
+        if mode in ("ptm-proximity", "mutation-clustering"):
+            step_ests.append(step4_est)
         self._q("log", "")
-        self._q("log", f"Estimated runtime: ~{_fmt_time(total_est)}")
+        self._q("log", f"Estimated runtime: ~{_fmt_time(sum(step_ests))}")
         self._q("log", "")
 
-        return total_est
+        return step_ests, n_proteins
 
     def _run_pipeline(self, mode: str):
         if mode == "single-protein":
@@ -772,8 +946,8 @@ class PipelineRunnerMixin:
             runtime_key += f"-{mutation_source}"
         self._q("pipeline_start", len(steps), runtime_key, run_type)
 
-        estimated_total = self._run_precheck(mode, ptm_source, mutation_source)
-        self._q("set_estimate", estimated_total)
+        step_ests, _n_proteins = self._run_precheck(mode, ptm_source, mutation_source)
+        self._q("set_estimate", sum(step_ests))
 
         backups = self._backup_outputs()
 
@@ -843,6 +1017,11 @@ class PipelineRunnerMixin:
             else:
                 restore_ok = True
                 self._q("save_runtimes", runtime_key, run_type, step_times)
+                # Estimate vs. actual per step, so drift in the heuristic is visible
+                self._q("log", "Runtime estimate check (estimated / actual):")
+                for (_label, log_label), est, actual in zip(steps, step_ests, step_times):
+                    self._q("log", f"  {log_label}: ~{_fmt_time(est)} / {_fmt_time(actual)}")
+                self._q("log", f"  Total: ~{_fmt_time(sum(step_ests))} / {_fmt_time(sum(step_times))}")
                 self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
         except Exception as exc:
             restore_ok = False
@@ -1354,7 +1533,6 @@ class PipelineRunnerMixin:
                     self._total_steps = total
                     self._steps_done = 0
                     self._step_times = []
-                    self._historical_times = _load_runtimes(mode, run_type)
                     self._precheck_estimate = None
                     self._activity_canvas.pack(side="right", padx=(0, 8))
                     self._start_activity_animation()

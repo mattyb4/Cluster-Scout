@@ -100,12 +100,12 @@ In PTM Proximity mode, adds five types of annotations to each PTM site:
 - **14-3-3 binding predictions** — Queries the 14-3-3-Pred API and cross-references experimentally confirmed interactors (Ser/Thr sites only)
 - **PolyPhen-2 scores** — Queries myvariant.info for pathogenicity predictions on each mutation
 - **Kinase predictions** — Uses the Kinase Library to predict the top 5 upstream kinases for each phosphorylation site (Ser/Thr/Tyr sites only). It runs in its own environment, which the first run sets up automatically (about a minute). If that fails, the log says why, and those sites are retried on the next run.
-- **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue Scores are computed on your computer using the AIUPred package, which runs in its own environment. The first run downloads it (PyTorch, a few minutes); the log says when this is happening. If the local setup fails, the AIUPred web server is used instead.
+- **AIUPred disorder predictions** — Predicts intrinsic disorder and disordered-binding-region propensity, both for the PTM residue and for each nearby mutation's residue. Scores are computed on your computer using the AIUPred package, which runs in its own environment. The first run downloads it (PyTorch, a few minutes); the log says "downloading dependencies" while this happens. Proteins with no usable AlphaFold sequence, or every protein if the local setup fails, use the AIUPred web server instead. A protein neither can score gets blank score columns and blank Disordered?/Binding? flags (never "no", which would mean "scored, and not disordered"), isn't cached so the next run retries it, and the reason is printed at the end of step 4 and written to `Output/logs/aiupred_failures.tsv`.
 - **InterPro functional domains** — Queries the InterPro REST API for curated domain/family/site entries on each protein, then reports which entry (if any) contains the PTM site's or mutation's specific residue position
 
 Mutation Clustering mode also runs this step, applying the PolyPhen-2, AIUPred, and InterPro annotations above to the anchor mutation and its nearby mutations — 14-3-3 and kinase predictions are skipped, since both require a curated PTM site that this mode has no concept of.
 
-These annotations run at the same time rather than one after another, so step 4 takes about as long as its slowest annotation. Its progress bar shows their average. The 14-3-3 predictions are the slowest to fetch (about 7.5 seconds per protein, and only proteins with a Ser/Thr site are requested). In PTM Proximity mode they're fetched in the background during steps 2–3, and step 4 fetches whatever wasn't reached. Pausing or cancelling the pipeline pauses or stops that background fetch too.
+These annotations run at the same time rather than one after another, so step 4 takes about as long as its slowest annotation. Its progress bar shows their average. The 14-3-3 predictions are the slowest to fetch (about 7.5 seconds per protein, and only proteins with a Ser/Thr site are requested). In PTM Proximity mode they're fetched in the background during steps 2–3, and step 4 fetches whatever wasn't reached. Pausing or cancelling the pipeline pauses or stops that background fetch too. On a first run over many new proteins, local AIUPred scoring can take as long (roughly 1,000 residues per second on a CPU, so a couple of thousand proteins take around half an hour); its scores are cached, so later runs skip it.
 
 ---
 
@@ -127,7 +127,7 @@ The **Export** button on the Mutation Details table writes every row matching th
 
 Mutations shown in the PTM Sites table's raw mutation-list columns include inline tags:
 
-- **(isoform?)** — The mutation couldn't be placed on the canonical sequence AlphaFold models (it sits in sequence only another isoform has, or no isoform explains its reference residue), or its reference amino acid doesn't match the structure at this position. Mutations COSMIC numbers by a different isoform are otherwise moved to their canonical position automatically; the **COSMIC label** column shows COSMIC's own label for any mutation that was moved. The method is described in full in `docs/methods.md`.
+- **(isoform?)** — The mutation couldn't be placed on the canonical sequence AlphaFold models (it sits in sequence only another isoform has, or no isoform explains its reference residue), or its reference amino acid doesn't match the structure at this position. Mutations COSMIC numbers by a different isoform are otherwise moved to their canonical position automatically; the **COSMIC label** column shows COSMIC's own label for any mutation that was moved. The same check runs for ClinVar mutations, and for ClinVar results that column reads **ClinVar label**. The method is described in full in `docs/methods.md`.
 - **(PP:D,0.999)** — PolyPhen-2 prediction: **D** = Probably Damaging, **P** = Possibly Damaging, **B** = Benign. The number is the confidence score (0-1)
 - **(PAE:2.1)** — AlphaFold's Predicted Aligned Error for the residue pair. Lower = higher structural confidence
 
@@ -142,7 +142,7 @@ Only phosphorylation sites (Ser/Thr/Tyr) receive kinase predictions. Other PTM t
 
 ### AIUPred Disorder Scores
 
-A 0-1 score; above 0.5 is treated as "yes" for the corresponding Disordered?/Binding? column. **General** disorder is intrinsic disorder propensity; **binding** disorder specifically flags regions predicted to be disordered in isolation but become ordered upon binding a partner protein.
+A 0-1 score; above 0.5 is treated as "yes" for the corresponding Disordered?/Binding? column. A residue with no score leaves both its score and its yes/no column blank. **General** disorder is intrinsic disorder propensity; **binding** disorder specifically flags regions predicted to be disordered in isolation but become ordered upon binding a partner protein.
 
 ### Visualization Tab
 
