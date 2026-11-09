@@ -603,6 +603,7 @@ class PipelineRunnerMixin:
 
         self._q("log", "Initializing pipeline...")
         self._q("log", "")
+        self._phase_ests: dict[str, float] = {}  # step 4's per-phase estimates, for the check
 
         input_tsv = hotspots_tsv_path(PROJECT_ROOT, mode, ptm_source, mutation_source)
         cache_dir = PROJECT_ROOT / "data" / "cache"
@@ -843,6 +844,7 @@ class PipelineRunnerMixin:
             phase_ests = [uncached_pp * self._TIME_PER_PP_FETCH,
                           uncached_aiupred * self._TIME_PER_AIUPRED_FETCH,
                           uncached_interpro * self._TIME_PER_INTERPRO_FETCH]
+            phase_names = ["Phase 2 (PolyPhen-2)", "Phase 4 (AIUPred)", "Phase 5 (InterPro)"]
             log_msg = (f"Step 4: {cached_pp} PolyPhen pairs cached, "
                        f"{cached_aiupred}/{n_targets} AIUPred cached, "
                        f"{cached_interpro}/{n_targets} InterPro cached")
@@ -867,12 +869,14 @@ class PipelineRunnerMixin:
                 kin_uncached = max(0.0, n_targets * self._KINASE_WINDOWS_PER_PROTEIN - cached_kin)
                 phase_ests += [max(0.0, uncached_1433 * self._TIME_PER_1433_FETCH - step2_est - step3_est),
                                kin_uncached * self._TIME_PER_KINASE_PREDICT]
+                phase_names += ["Phase 1 (14-3-3)", "Phase 3 (Kinase)"]
                 log_msg = (f"Step 4: {cached_1433}/{n_proteins} 14-3-3 predictions cached, "
                            f"{cached_pp} PolyPhen pairs cached, {cached_kin} kinase windows cached, "
                            f"{cached_aiupred}/{n_targets} AIUPred cached, "
                            f"{cached_interpro}/{n_targets} InterPro cached")
 
             step4_est = max(phase_ests) + self._TIME_STEP4_BASE
+            self._phase_ests = dict(zip(phase_names, phase_ests))
             self._q("log", log_msg)
 
         step_ests = [step1_est, step2_est, step3_est]
@@ -946,6 +950,7 @@ class PipelineRunnerMixin:
             runtime_key += f"-{mutation_source}"
         self._q("pipeline_start", len(steps), runtime_key, run_type)
 
+        self._phase_actuals: dict[str, int] = {}
         step_ests, _n_proteins = self._run_precheck(mode, ptm_source, mutation_source)
         self._q("set_estimate", sum(step_ests))
 
@@ -1019,8 +1024,14 @@ class PipelineRunnerMixin:
                 self._q("save_runtimes", runtime_key, run_type, step_times)
                 # Estimate vs. actual per step, so drift in the heuristic is visible
                 self._q("log", "Runtime estimate check (estimated / actual):")
-                for (_label, log_label), est, actual in zip(steps, step_ests, step_times):
+                for i, ((_label, log_label), est, actual) in enumerate(zip(steps, step_ests, step_times)):
                     self._q("log", f"  {log_label}: ~{_fmt_time(est)} / {_fmt_time(actual)}")
+                    if i == 3:  # step 4, the only step with concurrent phases
+                        # Step 4's phases run side by side, so list each one's own time
+                        for name, phase_est in self._phase_ests.items():
+                            if name in self._phase_actuals:
+                                self._q("log", f"    {name}: ~{_fmt_time(phase_est)} / "
+                                        f"{_fmt_time(self._phase_actuals[name])}")
                 self._q("log", f"  Total: ~{_fmt_time(sum(step_ests))} / {_fmt_time(sum(step_times))}")
                 self._q("log", "Pipeline complete! Output saved to the Output/ folder.")
         except Exception as exc:
@@ -1433,6 +1444,14 @@ class PipelineRunnerMixin:
         self._q("progress_log", f"{desc}: {current}/{total}")
         return True
 
+    _PHASE_DONE_RE = re.compile(r"^(Phase \d \([^)]+\)) finished after (?:(\d+)m )?(\d+)s$")
+
+    def _record_phase_time(self, line: str) -> None:
+        """Keep how long each of step 4's phases took (from its "finished after" lines)."""
+        m = self._PHASE_DONE_RE.match(line)
+        if m and hasattr(self, "_phase_actuals"):  # only set for pipeline runs
+            self._phase_actuals[m.group(1)] = int(m.group(2) or 0) * 60 + int(m.group(3))
+
     def _stream_cmd(self, cmd: list[str], step_idx: int) -> bool:
         """Run a subprocess, parsing tqdm output for progress bar updates."""
         env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
@@ -1452,6 +1471,7 @@ class PipelineRunnerMixin:
                     buf = b""
             elif byte == b"\n":
                 text = buf.decode("utf-8", errors="replace").strip()
+                self._record_phase_time(text)
                 if text and not self._parse_tqdm(text, step_idx):
                     self._q("log", text)
                 buf = b""

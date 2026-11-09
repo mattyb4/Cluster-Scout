@@ -1193,11 +1193,22 @@ class ResultsTabMixin:
         except ValueError:
             near_unique = far_unique = ""
             total_muts = ""
-        linear_dists = [d for d in row.get("morethan5_linear_distance", "").split(",") if d.strip()]
-        try:
-            max_linear_dist: int | str = max(int(d) for d in linear_dists)
-        except ValueError:
-            max_linear_dist = ""
+        # Furthest sequence distance over both the within-5 and more-than-5
+        # mutations, measured from the PTM site (or the anchor mutation)
+        ref_raw = row.get("anchor_position", "") or row.get("ptm_site", "") or row.get("anchor_mutation", "")
+        ref_m = re.search(r"\d+", str(ref_raw))
+        linear_dists: list[int] = []  # one per distinct mutated position
+        if ref_m:
+            ref_pos = int(ref_m.group())
+            seen_pos: set[int] = set()
+            for col in ("mutations_within_5_positions", "mutations_more_than_5_positions"):
+                for entry in (row.get(col, "") or "").split(", "):
+                    em = _MUT_ENTRY_RE.match(entry.strip())
+                    pos_m = re.search(r"\d+", em.group(1)) if em else None
+                    if pos_m and int(pos_m.group()) not in seen_pos:
+                        seen_pos.add(int(pos_m.group()))
+                        linear_dists.append(abs(int(pos_m.group()) - ref_pos))
+        max_linear_dist: int | str = max(linear_dists) if linear_dists else ""
         return {
             "near": row.get("mutation_count_within_5_positions", ""),
             "far": row.get("mutation_count_more_than_5_positions", ""),
@@ -1208,7 +1219,7 @@ class ResultsTabMixin:
             "total": total_muts,
             "pts": total_pts,
             "maxlin": max_linear_dist,
-            "lin_dist_raw": row.get("morethan5_linear_distance", ""),
+            "lin_dist_raw": ",".join(str(d) for d in linear_dists),
         }
 
     def _populate_ptm_tv(self, df, rows: list | None = None) -> None:

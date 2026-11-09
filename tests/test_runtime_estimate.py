@@ -136,3 +136,23 @@ class TestPolyphenEstimate:
         assert steps[3] >= pp_seconds + pr.PipelineRunnerMixin._TIME_STEP4_BASE - 1e-6, (
             f"step 4 should include the 2 uncached pairs ({pp_seconds}s) on top of the base, got {steps[3]}"
         )
+
+
+class TestPhaseTimings:
+    def test_finished_lines_are_recorded_in_seconds(self, tmp_path):
+        runner = Runner(tmp_path)
+        runner._phase_actuals = {}
+        for line in ("Phase 2 (PolyPhen-2) finished after 3m 17s",
+                     "Phase 5 (InterPro) finished after 42s",
+                     "Tagged 5 mutation entries with PolyPhen-2 predictions"):
+            runner._record_phase_time(line)
+        assert runner._phase_actuals == {"Phase 2 (PolyPhen-2)": 197, "Phase 5 (InterPro)": 42}, (
+            f"only the two 'finished after' lines should be kept, as seconds, got {runner._phase_actuals}"
+        )
+
+    def test_precheck_records_an_estimate_per_phase(self, project):
+        runner, _steps, _n = precheck(project)
+        assert set(runner._phase_ests) == {
+            "Phase 1 (14-3-3)", "Phase 2 (PolyPhen-2)", "Phase 3 (Kinase)",
+            "Phase 4 (AIUPred)", "Phase 5 (InterPro)",
+        }, f"step 4's five phases should each get an estimate, got {list(runner._phase_ests)}"

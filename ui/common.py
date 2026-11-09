@@ -601,11 +601,11 @@ _PTM_COL_HELP: dict[str, str] = {
               "disordered (AIUPred general score > 0.5)?",
     "bind": "Yes/no: is this PTM residue predicted to be a disordered "
             "binding region (AIUPred binding score > 0.5)?",
-    "maxlin": "The largest linear (sequence) distance among the > 5 pos "
-              "nearby mutations - how far the most sequence-distant-but-"
-              "3D-close mutation actually is.",
+    "maxlin": "The largest linear (sequence) distance among all nearby "
+              "mutations (≤ 5 pos and > 5 pos) - how far the most "
+              "sequence-distant-but-3D-close mutation actually is.",
     "lin_dist_raw": "Linear (sequence) distance from this PTM site to each "
-                    "individual > 5 pos mutation.",
+                    "distinct nearby mutation position (≤ 5 pos and > 5 pos).",
     "ptm_domain": "InterPro functional domain(s) (name, type, and residue "
                   "range) containing this PTM site's position, if any. A "
                   "residue can fall inside more than one entry, e.g. a "
@@ -771,11 +771,11 @@ _ANCHOR_COL_HELP: dict[str, str] = {
              "(≤ 5 pos + > 5 pos, unique positions only).",
     "pts": "Total COSMIC patient count across every nearby mutation for this "
            "anchor (≤ 5 pos + > 5 pos combined).",
-    "maxlin": "The largest linear (sequence) distance among the > 5 pos "
-              "nearby mutations - how far the most sequence-distant-but-"
-              "3D-close mutation actually is.",
+    "maxlin": "The largest linear (sequence) distance among all nearby "
+              "mutations (≤ 5 pos and > 5 pos) - how far the most "
+              "sequence-distant-but-3D-close mutation actually is.",
     "lin_dist_raw": "Linear (sequence) distance from the anchor to each "
-                    "individual > 5 pos mutation.",
+                    "distinct nearby mutation position (≤ 5 pos and > 5 pos).",
     "isbnd": "Yes/no: is the anchor mutation's residue predicted to be a "
              "disordered binding region (AIUPred binding score > 0.5)?",
     "isdis": "Yes/no: is the anchor mutation's residue predicted to be "
