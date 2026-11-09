@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import queue
 import shutil
+import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog
@@ -255,7 +256,10 @@ class PipelineTabMixin:
             settings_frame, text="Thresholds", width=_LABEL_W, anchor="w",
         ).pack(side="left", padx=(0, 8), pady=6)
 
-        ctk.CTkLabel(settings_frame, text="Cutoff (Å):").pack(side="left", padx=(0, 4), pady=6)
+        # CustomTkinter's bundled Roboto reports an ascent too small for the
+        # ring of the Å, so Windows clips it; Segoe UI's metrics include it
+        cutoff_font = ctk.CTkFont(family="Segoe UI", size=13) if sys.platform == "win32" else None
+        ctk.CTkLabel(settings_frame, text="Cutoff (Å):", font=cutoff_font).pack(side="left", padx=(0, 4), pady=6)
         help_icon(
             settings_frame,
             "Maximum 3D distance, in Ångströms, between a PTM site and a "
