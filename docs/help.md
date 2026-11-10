@@ -13,7 +13,7 @@ The pipeline requires two input data files. Use the **Browse** buttons on the Pi
 
 Each input folder should contain exactly **one** file. Browsing a new file replaces the previous one.
 
-**ClinVar (optional):** needed only with ClinVar as the mutation source (see **Mutation source** below). Download `variant_summary.txt.gz` from ClinVar's FTP site (https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) and pick it with **Browse** next to ClinVar. It works zipped or unzipped (about 4 GB unzipped, so copying it in takes a moment). Replace it with a newer download the same way.
+**ClinVar (optional):** needed only with ClinVar as the mutation source (see **Mutation source** below). Download `variant_summary.txt.gz` from [ClinVar's FTP site](https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/) and pick it with **Browse** next to ClinVar. It works zipped or unzipped (about 4 GB unzipped, so copying it in takes a moment). Replace it with a newer download the same way.
 
 **PhosphoSitePlus (optional):** PTM Proximity can use a PhosphoSitePlus download as its PTM sites instead of PTMD (see **PTM source** below). Click **Browse** next to PhosphoSitePlus and pick the download *folder*. The app finds the files it needs by their columns (not their names), checks them, and copies them in. The `*_site_dataset` files are required, and `Disease-associated_sites` is optional. A newer download can replace an older one the same way.
 
