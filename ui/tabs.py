@@ -91,6 +91,12 @@ class HciTabview(ctk.CTkFrame):
             self._frames[self._current].tkraise()
         return frame
 
+    def required_width(self) -> int:
+        """The width (in screen pixels) the tab bar needs to show every tab and
+        the header controls without clipping any of them."""
+        self._header.update_idletasks()
+        return self._header.winfo_reqwidth()
+
     def get(self) -> str:
         return self._current or ""
 

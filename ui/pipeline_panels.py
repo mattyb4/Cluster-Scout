@@ -6,10 +6,8 @@ handles simple input events (browsing for a file, toggling the log).
 """
 from __future__ import annotations
 
-import queue
 import shutil
 import sys
-import threading
 from pathlib import Path
 from tkinter import filedialog
 
@@ -19,8 +17,6 @@ from ui import theme
 from ui.common import (
     _BTN2,
     _BTN2_HOVER,
-    _CHIP,
-    _CHIP_HOVER,
     _CLINVAR_CLASS_OPTIONS,
     _DANGER,
     _GRAY,
@@ -36,7 +32,6 @@ from ui.common import (
     _YELLOW,
     OUTPUT_DIR,
     add_resize_grip,
-    color_swatch_button,
     discover_psp_files,
     extract_uniprot_from_cif,
     help_icon,
@@ -141,7 +136,6 @@ class PipelineTabMixin:
             ("PTM Proximity", "ptm-proximity"),
             ("Mutation Clustering", "mutation-clustering"),
             ("Single Protein", "single-protein"),
-            ("Structure Heatmaps", "ca-coordinates"),
         ]:
             ctk.CTkRadioButton(
                 mode_frame,
@@ -217,19 +211,12 @@ class PipelineTabMixin:
         out_frame.grid(row=2, column=0, padx=14, pady=2, sticky="ew")
         out_frame.grid_columnconfigure(1, weight=1)
 
-        self._output_dir_label = ctk.CTkLabel(
+        ctk.CTkLabel(
             out_frame, text="Output folder", width=_LABEL_W, anchor="w",
-        )
-        self._output_dir_label.grid(row=0, column=0, padx=(0, 8), pady=6, sticky="w")
+        ).grid(row=0, column=0, padx=(0, 8), pady=6, sticky="w")
 
-        # Shared root for ptm-proximity/mutation-clustering/single-protein (they
-        # intentionally write into the same output DB files); Structure Heatmaps
-        # gets its own independent root instead, since it's a batch export into
-        # its own subfolder rather than a shared-DB append -- see
-        # _active_output_dir_var, which this entry is re-bound to on every mode
-        # switch (_rebuild_step_rows) so the display always matches the active mode.
+        # Shared by every mode (they intentionally write into the same output DB files)
         self._output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR))
-        self._ca_output_dir_var = ctk.StringVar(value=str(OUTPUT_DIR / "coordinates"))
         self._output_dir_entry = ctk.CTkEntry(
             out_frame, textvariable=self._output_dir_var, state="readonly",
         )
@@ -244,7 +231,7 @@ class PipelineTabMixin:
         ctk.CTkButton(
             out_frame, text="Reset", width=60, height=26,
             font=ctk.CTkFont(size=12), fg_color=_BTN2, hover_color=_BTN2_HOVER,
-            command=lambda: self._active_output_dir_var().set(str(self._active_output_dir_default())),
+            command=lambda: self._output_dir_var.set(str(OUTPUT_DIR)),
         ).grid(row=0, column=3, padx=(0, 0), pady=6, sticky="e")
 
         # Pipeline settings (ptm-proximity, mutation-clustering, AND single-protein
@@ -515,26 +502,6 @@ class PipelineTabMixin:
         tab.bind("<Configure>", _update_scrollbar, add="+")
         self.after(200, _update_scrollbar)
 
-    def _active_output_dir_var(self) -> ctk.StringVar:
-        """The output-folder StringVar for whichever Pipeline-tab mode is
-        currently selected -- Structure Heatmaps gets its own independent
-        root (self._ca_output_dir_var); the other three modes share
-        self._output_dir_var, since PTM Proximity/Mutation Clustering/Single
-        Protein all read and write the same output DB files.
-        """
-        if self._mode.get() == "ca-coordinates":
-            return self._ca_output_dir_var
-        return self._output_dir_var
-
-    def _active_output_dir_default(self) -> Path:
-        """The default output folder for whichever Pipeline-tab mode is
-        currently selected -- used by the Reset button next to the Output
-        folder field.
-        """
-        if self._mode.get() == "ca-coordinates":
-            return OUTPUT_DIR / "coordinates"
-        return OUTPUT_DIR
-
     def _ptm_source(self) -> str:
         """The selected PTM source as a --ptm-source value ("ptmd" or "psp")."""
         return _PTM_SOURCE_BY_LABEL[self._ptm_source_var.get()]
@@ -574,19 +541,6 @@ class PipelineTabMixin:
             args.append("--psp-disease-only")
         return args, problems
 
-    def _sync_output_dir_section_for_mode(self) -> None:
-        """Re-bind the Output folder entry/label to the active mode's own
-        output-folder var and update its label text, so the section always
-        shows (and the Change/Reset/Open Output Folder buttons always act
-        on) the folder the current mode actually writes to.
-        """
-        mode = self._mode.get()
-        self._output_dir_entry.configure(textvariable=self._active_output_dir_var())
-        if mode == "ca-coordinates":
-            self._output_dir_label.configure(text="Heatmap folder")
-        else:
-            self._output_dir_label.configure(text="Output folder")
-
     def _rebuild_step_rows(self):
         for w in self._steps_outer.winfo_children():
             w.destroy()
@@ -595,7 +549,6 @@ class PipelineTabMixin:
         self._steps_outer.grid_columnconfigure(1, weight=1)
 
         mode = self._mode.get()
-        self._sync_output_dir_section_for_mode()
         # Re-pack in a fixed order, since pack() appends after whatever is showing
         for frame in (self._ptm_source_frame, self._mutation_source_frame, self._clinvar_classes_frame):
             frame.pack_forget()
@@ -612,7 +565,7 @@ class PipelineTabMixin:
 
         # Settings frame also applies to single-protein (accepted by
         # analyze_single_cif_nearby_mutations.py); PolyPhen filter feeds step 4 of
-        # both ptm-proximity and mutation-clustering. Neither applies to ca-coordinates.
+        # both ptm-proximity and mutation-clustering.
         if mode in ("ptm-proximity", "mutation-clustering", "single-protein"):
             self._settings_frame.grid()
         else:
@@ -624,9 +577,6 @@ class PipelineTabMixin:
 
         if mode == "single-protein":
             self._build_single_protein_panel()
-            return
-        if mode == "ca-coordinates":
-            self._build_ca_coordinates_panel()
             return
 
         steps = pipeline_steps(mode, self._ptm_source(), self._mutation_source())
@@ -715,506 +665,6 @@ class PipelineTabMixin:
         else:
             parent_name = Path(path).parent.name
             self._single_uniprot_var.set(parent_name)
-
-    def _build_ca_coordinates_panel(self):
-        """Build the input fields for Structure Heatmaps mode (CA-coordinate export)."""
-        section_header(self._steps_outer, "Structure heatmaps", row=0, columnspan=3)
-
-        # Source toggle: batch of database-backed proteins, or one caller-provided CIF
-        source_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        source_frame.grid(row=1, column=0, columnspan=3, padx=12, pady=(0, 4), sticky="w")
-        ctk.CTkLabel(source_frame, text="Source:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 8))
-        if not hasattr(self, "_ca_source_var"):
-            self._ca_source_var = ctk.StringVar(value="Database")
-        ctk.CTkSegmentedButton(
-            source_frame, values=["Database", "Upload CIF file"],
-            variable=self._ca_source_var, command=self._on_ca_source_change,
-        ).pack(side="left")
-        help_icon(
-            source_frame,
-            "Database exports one or more proteins by gene/UniProt, using "
-            "AlphaFold DB's model (downloaded automatically if needed). "
-            "Upload CIF file instead uses a specific .cif you already have "
-            "-- e.g. a seeded AlphaFold Server prediction from the CIF "
-            "Variance tool's \"Generate AlphaFold Seeds JSON\" option -- for "
-            "a single protein, with nothing downloaded or added to the "
-            "shared structure cache.",
-        ).pack(side="left", padx=(6, 0))
-
-        # ── Database source: proteins list (gene symbols and/or UniProt accessions) ──
-        self._ca_database_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        self._ca_database_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
-        self._ca_database_frame.grid_columnconfigure(1, weight=1)
-
-        proteins_label_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
-        proteins_label_frame.grid(row=0, column=0, padx=(12, 6), pady=6, sticky="nw")
-        ctk.CTkLabel(proteins_label_frame, text="Proteins:", anchor="w").pack(side="left")
-        help_icon(
-            proteins_label_frame,
-            "Add one or more gene symbols and/or UniProt accessions - each "
-            "is exported in turn (its own Output/coordinates/{gene}_{UniProt}/ "
-            "folder), with the same options below applied to every one. Each "
-            "entry is validated against the UniProt API and AlphaFold DB "
-            "when you click Add (or press Enter), the same as Radius "
-            "Sweep's gene list, so a typo or an unmodeled protein is "
-            "reported immediately instead of only failing partway through "
-            "a run.",
-        ).pack(side="left", padx=(4, 0))
-        if not hasattr(self, "_ca_proteins"):
-            self._ca_proteins: list[str] = []
-
-        protein_input_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
-        protein_input_frame.grid(row=0, column=1, columnspan=2, padx=6, pady=6, sticky="w")
-
-        self._ca_protein_input_var = ctk.StringVar(value="")
-        self._ca_protein_entry = ctk.CTkEntry(
-            protein_input_frame, textvariable=self._ca_protein_input_var, width=180,
-            placeholder_text="e.g. P04637 or TP53",
-        )
-        self._ca_protein_entry.pack(side="left", padx=(0, 6))
-        self._ca_protein_entry.bind("<Return>", lambda _e: self._add_ca_protein())
-
-        self._ca_protein_add_btn = ctk.CTkButton(
-            protein_input_frame, text="+ Add", width=70, height=28,
-            command=self._add_ca_protein,
-        )
-        self._ca_protein_add_btn.pack(side="left")
-
-        # Feedback for _add_ca_protein — hidden until there's something to say
-        self._ca_protein_error_label = ctk.CTkLabel(
-            self._ca_database_frame, text="", text_color=_RED,
-            font=ctk.CTkFont(size=11), anchor="w",
-        )
-        self._ca_protein_error_label.grid(row=1, column=1, columnspan=2, padx=6, pady=(0, 4), sticky="w")
-        self._ca_protein_error_label.grid_remove()
-
-        self._ca_proteins_list_frame = ctk.CTkFrame(self._ca_database_frame, fg_color="transparent")
-        self._ca_proteins_list_frame.grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 6), sticky="ew")
-        self._refresh_ca_protein_chips()
-
-        # ── Upload-CIF source: one specific file + its UniProt ID ──
-        self._ca_custom_cif_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        self._ca_custom_cif_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
-        self._ca_custom_cif_frame.grid_columnconfigure(1, weight=1)
-        self._ca_custom_cif_frame.grid_remove()  # Database is the default source
-
-        ctk.CTkLabel(self._ca_custom_cif_frame, text="CIF file:", anchor="w").grid(
-            row=0, column=0, padx=(12, 6), pady=6, sticky="w"
-        )
-        if not hasattr(self, "_ca_custom_cif_var"):
-            self._ca_custom_cif_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            self._ca_custom_cif_frame, textvariable=self._ca_custom_cif_var,
-        ).grid(row=0, column=1, padx=6, pady=6, sticky="ew")
-        ctk.CTkButton(
-            self._ca_custom_cif_frame, text="Browse", width=70, height=26,
-            font=ctk.CTkFont(size=12),
-            command=self._browse_ca_custom_cif,
-        ).grid(row=0, column=2, padx=12, pady=6, sticky="e")
-
-        ctk.CTkLabel(self._ca_custom_cif_frame, text="UniProt ID:", anchor="w").grid(
-            row=1, column=0, padx=(12, 6), pady=(0, 6), sticky="w"
-        )
-        if not hasattr(self, "_ca_custom_cif_uniprot_var"):
-            self._ca_custom_cif_uniprot_var = ctk.StringVar(value="")
-        ctk.CTkEntry(
-            self._ca_custom_cif_frame, textvariable=self._ca_custom_cif_uniprot_var, width=200,
-            placeholder_text="auto-detected, or enter if not found",
-        ).grid(row=1, column=1, padx=6, pady=(0, 6), sticky="w")
-
-        # Both frames above default to gridded/removed for a fresh "Database"
-        # source -- resync to whichever source was actually last selected,
-        # since this whole panel (and both frames) is torn down and rebuilt
-        # on every mode switch, but self._ca_source_var itself persists.
-        self._on_ca_source_change()
-
-        from export_ca_coordinates import (
-            MUTATION_DEFAULT_HIGH_COLOR,
-            MUTATION_DEFAULT_LOW_COLOR,
-            MUTATION_DEFAULT_MID_COLOR,
-            MUTATION_MARKER_DEFAULT_COLOR,
-            PLDDT_DEFAULT_HIGH_COLOR,
-            PLDDT_DEFAULT_LOW_COLOR,
-            PLDDT_DEFAULT_MID_COLOR,
-            PTM_MARKER_DEFAULT_COLOR,
-        )
-        if not hasattr(self, "_ca_mutation_low_var"):
-            self._ca_mutation_low_var = ctk.StringVar(value=MUTATION_DEFAULT_LOW_COLOR)
-            self._ca_mutation_mid_var = ctk.StringVar(value=MUTATION_DEFAULT_MID_COLOR)
-            self._ca_mutation_high_var = ctk.StringVar(value=MUTATION_DEFAULT_HIGH_COLOR)
-            self._ca_plddt_low_var = ctk.StringVar(value=PLDDT_DEFAULT_LOW_COLOR)
-            self._ca_plddt_mid_var = ctk.StringVar(value=PLDDT_DEFAULT_MID_COLOR)
-            self._ca_plddt_high_var = ctk.StringVar(value=PLDDT_DEFAULT_HIGH_COLOR)
-            self._ca_ptm_marker_color_var = ctk.StringVar(value=PTM_MARKER_DEFAULT_COLOR)
-            self._ca_mutation_marker_color_var = ctk.StringVar(value=MUTATION_MARKER_DEFAULT_COLOR)
-
-        def _reset_colors(*pairs: tuple[ctk.StringVar, str]) -> None:
-            for var, default in pairs:
-                var.set(default)
-            self._rebuild_step_rows()
-
-        # Heatmaps section
-        section_header(self._steps_outer, "Heatmaps", row=3, columnspan=3, pady=(14, 4))
-
-        # Mutation heatmap
-        if not hasattr(self, "_ca_mutation_heatmap_var"):
-            self._ca_mutation_heatmap_var = ctk.BooleanVar(value=False)
-        mut_heatmap_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_heatmap_frame.grid(row=4, column=0, columnspan=3, padx=24, pady=2, sticky="w")
-        ctk.CTkCheckBox(
-            mut_heatmap_frame, text="Mutation heatmap (patients within 10 Å)",
-            variable=self._ca_mutation_heatmap_var,
-            checkbox_width=18, checkbox_height=18,
-            command=self._on_ca_mutation_heatmap_toggle,
-        ).pack(side="left")
-        help_icon(
-            mut_heatmap_frame,
-            "Colors the ChimeraX cartoon by COSMIC patient count summed "
-            "within 10 Å of each residue - a mutation-hotspot heatmap, "
-            "using a sequential red palette. Single-fragment proteins only.",
-        ).pack(side="left", padx=(4, 0))
-
-        # Mutation heatmap colors (low/middle/high swatches)
-        mut_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_colors_frame.grid(row=5, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
-        ctk.CTkLabel(mut_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
-        color_swatch_button(mut_colors_frame, self._ca_mutation_low_var).pack(side="left")
-        ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
-        color_swatch_button(mut_colors_frame, self._ca_mutation_mid_var).pack(side="left")
-        ctk.CTkLabel(mut_colors_frame, text="→").pack(side="left", padx=4)
-        color_swatch_button(mut_colors_frame, self._ca_mutation_high_var).pack(side="left")
-        ctk.CTkButton(
-            mut_colors_frame, text="↺", width=24, height=22,
-            fg_color=_BTN2, hover_color=_BTN2_HOVER,
-            command=lambda: _reset_colors(
-                (self._ca_mutation_low_var, MUTATION_DEFAULT_LOW_COLOR),
-                (self._ca_mutation_mid_var, MUTATION_DEFAULT_MID_COLOR),
-                (self._ca_mutation_high_var, MUTATION_DEFAULT_HIGH_COLOR),
-            ),
-        ).pack(side="left", padx=(6, 0))
-        help_icon(
-            mut_colors_frame,
-            "Low, middle and high colors of the mutation heatmap's scale (no "
-            "nearby patients, half the protein's highest count, and the "
-            "highest count). Click a swatch to choose a color; ↺ resets all "
-            "three back to the default red scale.",
-        ).pack(side="left", padx=(4, 0))
-
-        # Log-scale (mutation heatmap only)
-        if not hasattr(self, "_ca_log_scale_var"):
-            self._ca_log_scale_var = ctk.BooleanVar(value=False)
-        log_scale_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        log_scale_frame.grid(row=6, column=0, columnspan=3, padx=(48, 12), pady=2, sticky="w")
-        self._ca_log_scale_checkbox = ctk.CTkCheckBox(
-            log_scale_frame, text="Log-scale",
-            variable=self._ca_log_scale_var,
-            checkbox_width=18, checkbox_height=18,
-        )
-        self._ca_log_scale_checkbox.pack(side="left")
-        help_icon(
-            log_scale_frame,
-            "Only applies to the mutation heatmap above. COSMIC patient "
-            "counts are often heavily right-skewed - a few hotspot residues "
-            "can have counts far higher than the rest, so a linear color "
-            "scale crushes nearly the whole protein into one flat color. "
-            "Log-scaling compresses that range so variation among "
-            "lower-count residues becomes visible too.",
-        ).pack(side="left", padx=(4, 0))
-
-        # Dim low-confidence residues (mutation heatmap only)
-        if not hasattr(self, "_ca_dim_confidence_var"):
-            self._ca_dim_confidence_var = ctk.BooleanVar(value=False)
-        dim_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        dim_frame.grid(row=7, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
-        self._ca_dim_confidence_checkbox = ctk.CTkCheckBox(
-            dim_frame, text="Dim low-confidence residues",
-            variable=self._ca_dim_confidence_var,
-            checkbox_width=18, checkbox_height=18,
-        )
-        self._ca_dim_confidence_checkbox.pack(side="left")
-        help_icon(
-            dim_frame,
-            "Only applies to the mutation heatmap above. Fades each "
-            "residue's heatmap color in proportion to how low its AlphaFold "
-            "confidence (pLDDT) is, so a mutation hotspot in a poorly-"
-            "modeled region reads as less trustworthy than an equally hot "
-            "one in a well-modeled region, instead of both looking equally "
-            "certain. Switches the script's lighting from \"soft\" to "
-            "\"simple\", since ChimeraX's soft ambient shadows don't render "
-            "correctly once part of the model is transparent.",
-        ).pack(side="left", padx=(4, 0))
-        self._on_ca_mutation_heatmap_toggle()  # sync initial enabled/disabled state
-
-        # pLDDT heatmap
-        if not hasattr(self, "_ca_plddt_heatmap_var"):
-            self._ca_plddt_heatmap_var = ctk.BooleanVar(value=False)
-        plddt_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_frame.grid(row=8, column=0, columnspan=3, padx=24, pady=2, sticky="w")
-        ctk.CTkCheckBox(
-            plddt_frame, text="pLDDT heatmap",
-            variable=self._ca_plddt_heatmap_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left")
-        help_icon(
-            plddt_frame,
-            "Colors the ChimeraX cartoon by AlphaFold's per-residue "
-            "confidence score (pLDDT), using ChimeraX's built-in AlphaFold "
-            "color scheme (blue = very high confidence, down to orange = "
-            "very low). Useful for judging how reliable the modeled "
-            "structure is in a region, independent of mutation data. "
-            "Single-fragment proteins only.",
-        ).pack(side="left", padx=(4, 0))
-
-        # pLDDT heatmap colors (low/middle/high swatches)
-        plddt_colors_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        plddt_colors_frame.grid(row=9, column=0, columnspan=3, padx=(48, 12), pady=(2, 8), sticky="w")
-        ctk.CTkLabel(plddt_colors_frame, text="Colors:").pack(side="left", padx=(0, 6))
-        color_swatch_button(plddt_colors_frame, self._ca_plddt_low_var).pack(side="left")
-        ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
-        color_swatch_button(plddt_colors_frame, self._ca_plddt_mid_var).pack(side="left")
-        ctk.CTkLabel(plddt_colors_frame, text="→").pack(side="left", padx=4)
-        color_swatch_button(plddt_colors_frame, self._ca_plddt_high_var).pack(side="left")
-        ctk.CTkButton(
-            plddt_colors_frame, text="↺", width=24, height=22,
-            fg_color=_BTN2, hover_color=_BTN2_HOVER,
-            command=lambda: _reset_colors(
-                (self._ca_plddt_low_var, PLDDT_DEFAULT_LOW_COLOR),
-                (self._ca_plddt_mid_var, PLDDT_DEFAULT_MID_COLOR),
-                (self._ca_plddt_high_var, PLDDT_DEFAULT_HIGH_COLOR),
-            ),
-        ).pack(side="left", padx=(6, 0))
-        help_icon(
-            plddt_colors_frame,
-            "Low, middle and high colors of the pLDDT heatmap's scale "
-            "(pLDDT 0, 50 and 100). Click a swatch to choose a color; ↺ "
-            "resets all three back to AlphaFold's own color scheme.",
-        ).pack(side="left", padx=(4, 0))
-
-        # Mark PTM sites (independent marker, not a heatmap)
-        if not hasattr(self, "_ca_mark_ptm_var"):
-            self._ca_mark_ptm_var = ctk.BooleanVar(value=False)
-        ptm_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        ptm_frame.grid(row=10, column=0, columnspan=3, padx=24, pady=2, sticky="w")
-        ctk.CTkCheckBox(
-            ptm_frame, text="Mark PTM sites",
-            variable=self._ca_mark_ptm_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left")
-        help_icon(
-            ptm_frame,
-            "Marks each known PTM site (from the pipeline's PTM/mutation "
-            "data) with a small sphere at its CA coordinate, layered on "
-            "top of whichever heatmap(s) above are selected (or a plain "
-            "cartoon if neither is). This is a separate marker, not a "
-            "recoloring, so it never overwrites a heatmap's own color at "
-            "that residue. Single-fragment proteins only.",
-        ).pack(side="left", padx=(4, 0))
-        color_swatch_button(ptm_frame, self._ca_ptm_marker_color_var).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            ptm_frame, text="↺", width=24, height=22,
-            fg_color=_BTN2, hover_color=_BTN2_HOVER,
-            command=lambda: _reset_colors((self._ca_ptm_marker_color_var, PTM_MARKER_DEFAULT_COLOR)),
-        ).pack(side="left", padx=(4, 0))
-
-        # Mark mutations (independent marker, not a heatmap)
-        if not hasattr(self, "_ca_mark_mutations_var"):
-            self._ca_mark_mutations_var = ctk.BooleanVar(value=False)
-        mut_marker_frame = ctk.CTkFrame(self._steps_outer, fg_color="transparent")
-        mut_marker_frame.grid(row=11, column=0, columnspan=3, padx=24, pady=(2, 8), sticky="w")
-        ctk.CTkCheckBox(
-            mut_marker_frame, text="Show mutation markers",
-            variable=self._ca_mark_mutations_var,
-            checkbox_width=18, checkbox_height=18,
-        ).pack(side="left")
-        help_icon(
-            mut_marker_frame,
-            "Shows each COSMIC mutation position's side chain as a colored "
-            "stick, layered on top of whichever heatmap(s) above are "
-            "selected (or a plain cartoon if neither is). Like Mark PTM "
-            "sites, this reveals real side-chain atoms rather than "
-            "recoloring the cartoon, so it never overwrites a heatmap's own "
-            "color at that residue. Single-fragment proteins only.",
-        ).pack(side="left", padx=(4, 0))
-        color_swatch_button(mut_marker_frame, self._ca_mutation_marker_color_var).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            mut_marker_frame, text="↺", width=24, height=22,
-            fg_color=_BTN2, hover_color=_BTN2_HOVER,
-            command=lambda: _reset_colors(
-                (self._ca_mutation_marker_color_var, MUTATION_MARKER_DEFAULT_COLOR),
-            ),
-        ).pack(side="left", padx=(4, 0))
-
-        # Status label + progress bar (reuse the step status pattern)
-        status = ctk.CTkLabel(
-            self._steps_outer, text="●  Ready", width=100,
-            anchor="e", text_color=_GRAY,
-        )
-        status.grid(row=12, column=1, columnspan=2, padx=12, pady=6, sticky="e")
-        self._step_status_labels.append(status)
-
-        bar = ctk.CTkProgressBar(self._steps_outer, width=120, height=14)
-        bar.set(0)
-        bar.grid(row=12, column=0, padx=12, pady=6, sticky="w")
-        bar.grid_remove()
-        self._step_progress_bars.append(bar)
-
-    def _on_ca_source_change(self, _value: str = "") -> None:
-        if self._ca_source_var.get() == "Upload CIF file":
-            self._ca_database_frame.grid_remove()
-            self._ca_custom_cif_frame.grid()
-        else:
-            self._ca_custom_cif_frame.grid_remove()
-            self._ca_database_frame.grid()
-
-    def _browse_ca_custom_cif(self) -> None:
-        """Open a file dialog for a user-supplied CIF and try to auto-fill its
-        UniProt ID from embedded metadata.
-
-        Unlike Single Protein mode's _browse_cif, this does NOT fall back to
-        the file's parent folder name when detection fails -- that heuristic
-        only makes sense for cif_models/{UniProt}/... paths, but a custom
-        upload (e.g. fresh out of an AlphaFold Server download or a
-        data/cif_comparison/ folder) can live anywhere, so a folder-name
-        guess here would usually just be wrong rather than merely unhelpful.
-        """
-        path = filedialog.askopenfilename(
-            title="Select CIF structure file",
-            filetypes=[("CIF files", "*.cif"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        self._ca_custom_cif_var.set(path)
-        uid = extract_uniprot_from_cif(Path(path))
-        if uid:
-            self._ca_custom_cif_uniprot_var.set(uid)
-
-    def _on_ca_mutation_heatmap_toggle(self) -> None:
-        """Keep the log-scale and dim-confidence checkboxes in sync with the
-        mutation-heatmap toggle they modify -- disabled (and visually
-        grayed) when there's no mutation heatmap left for them to affect.
-        """
-        state = "normal" if self._ca_mutation_heatmap_var.get() else "disabled"
-        self._ca_log_scale_checkbox.configure(state=state)
-        self._ca_dim_confidence_checkbox.configure(state=state)
-
-    def _add_ca_protein(self) -> None:
-        """Add a protein token (gene symbol or UniProt accession) to the
-        batch list, after validating it live against the UniProt API and
-        AlphaFold DB -- the same "catch bad input at Add time, not mid-run"
-        philosophy as Radius Sweep's own gene picker (_add_radius_gene),
-        adapted to Structure Heatmaps' own data dependency: Radius Sweep
-        validates against the pipeline's local PTM_TSV (cheap, synchronous),
-        but Structure Heatmaps works from any UniProt-resolvable protein via
-        live lookups, so the check runs off the main thread (same
-        queue.Queue + self.after() polling pattern as
-        AnalysisToolsTabMixin._generate_alphafold_seed_json) to avoid
-        freezing the UI on every click, with the input/button disabled and
-        a "Checking…" status shown meanwhile.
-        """
-        token = self._ca_protein_input_var.get().strip()
-        if not token:
-            return
-
-        if token.upper() in self._ca_proteins:
-            self._ca_protein_error_label.configure(
-                text=f"⚠  {token.upper()} is already in the list.", text_color=_YELLOW,
-            )
-            self._ca_protein_error_label.grid()
-            self._ca_protein_input_var.set("")
-            return
-
-        self._ca_protein_error_label.configure(text=f"⏳  Checking {token}…", text_color=_GRAY)
-        self._ca_protein_error_label.grid()
-        self._ca_protein_add_btn.configure(state="disabled")
-        self._ca_protein_entry.configure(state="disabled")
-
-        result_q: queue.Queue = queue.Queue()
-
-        def _worker() -> None:
-            from export_ca_coordinates import resolve_and_check_protein
-            result_q.put(resolve_and_check_protein(token, log_cb=lambda *_: None))
-
-        threading.Thread(target=_worker, daemon=True).start()
-        self.after(100, lambda: self._poll_ca_protein_check(result_q))
-
-    def _poll_ca_protein_check(self, result_q: "queue.Queue") -> None:
-        try:
-            result = result_q.get_nowait()
-        except queue.Empty:
-            self.after(100, lambda: self._poll_ca_protein_check(result_q))
-            return
-
-        # The panel is torn down and rebuilt on every mode switch -- bail out
-        # quietly if the user switched away before this check finished.
-        if not self._ca_protein_entry.winfo_exists():
-            return
-
-        self._ca_protein_add_btn.configure(state="normal")
-        self._ca_protein_entry.configure(state="normal")
-
-        if not result["ok"]:
-            self._ca_protein_error_label.configure(text=f"⚠  {result['error']}", text_color=_RED)
-            self._ca_protein_error_label.grid()
-            return
-
-        gene = result["gene"]
-        if gene in self._ca_proteins:
-            self._ca_protein_error_label.configure(
-                text=f"⚠  {gene} is already in the list.", text_color=_YELLOW,
-            )
-            self._ca_protein_error_label.grid()
-            self._ca_protein_input_var.set("")
-            return
-
-        self._ca_proteins.append(gene)
-        self._refresh_ca_protein_chips()
-        self._ca_protein_input_var.set("")
-
-        # Non-blocking warning: coordinate export still covers every fragment,
-        # only the ChimeraX heatmap/marker scripts are skipped for it.
-        if result["fragment_count"] > 1:
-            self._ca_protein_error_label.configure(
-                text=f"⚠  {gene} ({result['uniprot']}) spans multiple AlphaFold "
-                     f"fragments — ChimeraX heatmaps/markers will be skipped for it "
-                     f"(coordinate export still covers all fragments).",
-                text_color=_YELLOW,
-            )
-            self._ca_protein_error_label.grid()
-        else:
-            self._ca_protein_error_label.grid_remove()
-
-    def _remove_ca_protein(self, token: str) -> None:
-        if token in self._ca_proteins:
-            self._ca_proteins.remove(token)
-            self._refresh_ca_protein_chips()
-
-    def _refresh_ca_protein_chips(self) -> None:
-        """Redraw the added-proteins chip list, each removable via its own ✕ button."""
-        for w in self._ca_proteins_list_frame.winfo_children():
-            w.destroy()
-
-        if not self._ca_proteins:
-            ctk.CTkLabel(
-                self._ca_proteins_list_frame, text="None added yet.",
-                text_color=_GRAY, font=ctk.CTkFont(size=11),
-            ).pack(anchor="w")
-            return
-
-        row = None
-        for i, token in enumerate(self._ca_proteins):
-            if i % 6 == 0:
-                row = ctk.CTkFrame(self._ca_proteins_list_frame, fg_color="transparent")
-                row.pack(anchor="w", pady=(0, 4))
-            chip = ctk.CTkFrame(row, fg_color=_CHIP, corner_radius=6)
-            chip.pack(side="left", padx=(0, 6))
-            ctk.CTkLabel(chip, text=token, font=ctk.CTkFont(size=12)).pack(
-                side="left", padx=(8, 4), pady=4,
-            )
-            ctk.CTkButton(
-                chip, text="✕", width=20, height=20, fg_color="transparent",
-                hover_color=_CHIP_HOVER, font=ctk.CTkFont(size=11),
-                command=lambda t=token: self._remove_ca_protein(t),
-            ).pack(side="left", padx=(0, 6), pady=4)
 
     # ── File-status bar ──────────────────────────────────────────────────────
 
@@ -1345,12 +795,10 @@ class PipelineTabMixin:
             self._log_visible = True
 
     def _browse_output_dir(self):
-        """Let the user pick a custom output folder for whichever Pipeline-tab
-        mode is currently active (see _active_output_dir_var)."""
-        var = self._active_output_dir_var()
+        """Let the user pick a custom output folder."""
         path = filedialog.askdirectory(
             title="Select output folder",
-            initialdir=var.get(),
+            initialdir=self._output_dir_var.get(),
         )
         if path:
-            var.set(path)
+            self._output_dir_var.set(path)

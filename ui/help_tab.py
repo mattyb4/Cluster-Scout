@@ -1,4 +1,4 @@
-"""Help / Documentation tab: renders docs/help.md in-app."""
+"""Help tab: renders docs/help.md in-app."""
 from __future__ import annotations
 
 import customtkinter as ctk

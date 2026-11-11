@@ -1696,3 +1696,97 @@ class TestRunBatchExport:
     def test_empty_token_list_returns_empty_list(self, tmp_path, monkeypatch):
         cosmic = self._setup_two_proteins(tmp_path, monkeypatch)
         assert mod.run_batch_export([], cosmic_file=cosmic, output_dir=tmp_path / "out", log_cb=lambda *_: None) == []
+
+
+class TestResidueHeatmap:
+    """residue_heatmap colors each residue by the patients at its own position only."""
+
+    def _export(self, tmp_path, monkeypatch, **options):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 2, 3], res_names=["ALA", "SER", "GLY"], atom_names=["CA", "CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        # Position 2 has two different substitutions (3 + 1 patients); nothing else is mutated
+        pd.DataFrame([
+            ("TP53", "p.S2A", "S1", "Confirmed somatic variant"),
+            ("TP53", "p.S2A", "S2", "Confirmed somatic variant"),
+            ("TP53", "p.S2A", "S3", "Confirmed somatic variant"),
+            ("TP53", "p.S2T", "S4", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        return mod.run_export(
+            uniprot="P04637", gene="TP53", cosmic_file=cosmic,
+            output_dir=tmp_path / "out", log_cb=lambda *_: None, **options,
+        )
+
+    @staticmethod
+    def _values(path) -> dict[int, float]:
+        values = {}
+        for line in path.read_text().splitlines():
+            if line.startswith("\t/"):
+                _, spec, value = line.split("\t")
+                values[int(spec.split(":")[1])] = float(value)
+        return values
+
+    def test_off_by_default(self, tmp_path, monkeypatch):
+        result = self._export(tmp_path, monkeypatch)
+        assert result.residue_defattr_out is None and result.residue_chimerax_script_out is None, (
+            "the residue heatmap is opt-in, so a default export must not write its files"
+        )
+
+    def test_values_are_the_patients_at_each_residue_only(self, tmp_path, monkeypatch):
+        result = self._export(tmp_path, monkeypatch, residue_heatmap=True)
+        lines = result.residue_defattr_out.read_text().splitlines()
+        assert lines[0] == "attribute: patients_at_residue", (
+            f"the residue heatmap should use its own attribute name, got {lines[0]!r}"
+        )
+        assert self._values(result.residue_defattr_out) == {1: 0.0, 2: 4.0, 3: 0.0}, (
+            "only position 2 is mutated (3 + 1 patients across its two substitutions); "
+            "its neighbors, though within 10 A, must stay at 0 for the at-residue count"
+        )
+        assert self._values(result.mutation_defattr_out) == {1: 4.0, 2: 4.0, 3: 4.0}, (
+            "the 10 A heatmap (on by default) still counts the neighbors, so every residue is 4"
+        )
+
+    def test_is_a_separate_script_from_the_10a_heatmap(self, tmp_path, monkeypatch):
+        result = self._export(tmp_path, monkeypatch, residue_heatmap=True)
+        assert result.residue_chimerax_script_out.name == "mutations_at_residue_view.cxc"
+        assert result.residue_chimerax_script_out != result.mutation_chimerax_script_out
+        text = result.residue_chimerax_script_out.read_text()
+        assert "color byattribute r:patients_at_residue " in text, (
+            f"the residue script should color by its own attribute, got:\n{text}"
+        )
+        assert "Patients at residue" in text and "within 10" not in text, (
+            f"the on-screen key should say what the counts are, got:\n{text}"
+        )
+
+    def test_residue_heatmap_alone_skips_the_10a_files(self, tmp_path, monkeypatch):
+        result = self._export(tmp_path, monkeypatch, mutation_heatmap=False, residue_heatmap=True)
+        assert result.mutation_defattr_out is None and result.mutation_chimerax_script_out is None
+        assert result.residue_chimerax_script_out.exists()
+
+    def test_log_scale_applies_to_the_residue_heatmap(self, tmp_path, monkeypatch):
+        result = self._export(tmp_path, monkeypatch, residue_heatmap=True, log_scale=True)
+        lines = result.residue_defattr_out.read_text().splitlines()
+        assert lines[0] == "attribute: patients_at_residue_log", (
+            f"log-scaling should write under a separate attribute name, got {lines[0]!r}"
+        )
+        assert self._values(result.residue_defattr_out)[2] == pytest.approx(np.log1p(4))
+        assert "patients_at_residue" not in result.all_ca_df.columns, (
+            "the heatmap-only column must not leak into the exported coordinate table"
+        )
+
+    def test_markers_alone_do_not_write_a_plain_script_when_the_residue_heatmap_is_on(self, tmp_path, monkeypatch):
+        result = self._export(
+            tmp_path, monkeypatch, mutation_heatmap=False, residue_heatmap=True, mark_mutations=True,
+        )
+        assert result.plain_chimerax_script_out is None, (
+            "the markers are layered into the residue heatmap's script, so no separate plain one is needed"
+        )
+        assert "show /A:2 & sidechain atoms" in result.residue_chimerax_script_out.read_text()

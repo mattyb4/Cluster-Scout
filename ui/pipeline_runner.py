@@ -189,13 +189,13 @@ class PipelineRunnerMixin:
 
         Returns a list of human-readable problems; empty means everything
         relevant to *mode* checked out. Modes that don't read raw input files
-        (single-protein, ca-coordinates aside from COSMIC) are left alone.
+        (single-protein) are left alone. Structure Heatmaps only needs COSMIC.
         """
         problems: list[str] = []
 
         uses_pipeline_source = mode in ("ptm-proximity", "mutation-clustering")
         needs_clinvar = uses_pipeline_source and self._mutation_source() == "clinvar"
-        needs_cosmic = mode == "ca-coordinates" or (uses_pipeline_source and not needs_clinvar)
+        needs_cosmic = mode == "structure-heatmaps" or (uses_pipeline_source and not needs_clinvar)
         needs_ptmd = mode == "ptm-proximity" and self._ptm_source() == "ptmd"
         needs_psp = mode == "ptm-proximity" and self._ptm_source() == "psp"
 
@@ -279,24 +279,6 @@ class PipelineRunnerMixin:
                 from tkinter import messagebox
                 messagebox.showwarning("Missing input", "Please select a CIF file first.")
                 return
-        elif mode == "ca-coordinates":
-            if self._ca_source_var.get() == "Upload CIF file":
-                from tkinter import messagebox
-                if not self._ca_custom_cif_var.get().strip():
-                    messagebox.showwarning("Missing input", "Select a CIF file to upload.")
-                    return
-                if not self._ca_custom_cif_uniprot_var.get().strip():
-                    messagebox.showwarning(
-                        "Missing input",
-                        "Enter the UniProt ID for this CIF file (could not auto-detect it).",
-                    )
-                    return
-            elif not self._ca_proteins:
-                from tkinter import messagebox
-                messagebox.showwarning(
-                    "Missing input", "Add at least one gene symbol or UniProt accession.",
-                )
-                return
 
         self._running = True
         self._stop_requested = False
@@ -319,10 +301,12 @@ class PipelineRunnerMixin:
         threading.Thread(target=self._run_pipeline, args=(mode,), daemon=True).start()
 
     def _set_run_controls(self, running: bool) -> None:
-        """Sync Pipeline tab's and Analysis Tools tab's Run buttons -- only one run of any kind is active app-wide."""
+        """Sync the Pipeline, Analysis Tools and Structure Heatmaps tabs' Run buttons --
+        only one run of any kind is active app-wide."""
         state = "disabled" if running else "normal"
         self._run_btn.configure(state=state)
         self._at_run_btn.configure(state=state)
+        self._hm_run_btn.configure(state=state)
 
     def _start_analysis_tool_run(self, kind: str) -> None:
         """Validate and launch a Radius Sweep / CIF Variance run from the Analysis Tools tab.
@@ -892,10 +876,6 @@ class PipelineRunnerMixin:
         if mode == "single-protein":
             self._run_single_protein()
             return
-        if mode == "ca-coordinates":
-            self._run_ca_coordinates()
-            return
-
         python = [sys.executable, "-u"]
         ptm_source = self._ptm_source() if mode == "ptm-proximity" else "ptmd"
         mutation_source = self._mutation_source()
@@ -1275,151 +1255,6 @@ class PipelineRunnerMixin:
         self._q("enable_open")
         self._q("finished")
 
-    def _run_ca_coordinates(self):
-        """Dispatch to the batch (database-backed) or single custom-CIF
-        Structure Heatmaps export, based on the panel's Source toggle.
-        """
-        if self._ca_source_var.get() == "Upload CIF file":
-            self._run_ca_coordinates_custom_cif()
-        else:
-            self._run_ca_coordinates_batch()
-
-    def _ca_heatmap_kwargs(self) -> dict:
-        """Heatmap/marker options shared by both the batch and custom-CIF
-        Structure Heatmaps export paths, read fresh from the panel's widgets.
-        """
-        return dict(
-            mutation_heatmap=self._ca_mutation_heatmap_var.get(),
-            plddt_heatmap=self._ca_plddt_heatmap_var.get(),
-            mark_ptm_sites=self._ca_mark_ptm_var.get(),
-            mark_mutations=self._ca_mark_mutations_var.get(),
-            log_scale=self._ca_log_scale_var.get(),
-            dim_low_confidence=self._ca_dim_confidence_var.get(),
-            mutation_low_color=self._ca_mutation_low_var.get(),
-            mutation_mid_color=self._ca_mutation_mid_var.get(),
-            mutation_high_color=self._ca_mutation_high_var.get(),
-            plddt_low_color=self._ca_plddt_low_var.get(),
-            plddt_mid_color=self._ca_plddt_mid_var.get(),
-            plddt_high_color=self._ca_plddt_high_var.get(),
-            ptm_marker_color=self._ca_ptm_marker_color_var.get(),
-            mutation_marker_color=self._ca_mutation_marker_color_var.get(),
-        )
-
-    def _run_ca_coordinates_batch(self):
-        """Run the CA-coordinate export in-process, in the background thread.
-
-        Batches over every protein added to the list, sharing one progress
-        bar/status label across the whole batch (this tool has no fixed
-        multi-step layout to give each protein its own row, unlike the main
-        pipeline) -- see export_ca_coordinates.run_batch_export for how a
-        single protein's failure is contained rather than aborting the rest.
-        """
-        tokens = list(self._ca_proteins)
-
-        self._q("pipeline_start", 1, "ca-coordinates", "warm")
-        self._q("show_log")
-        self._q("status", 0, "▶  Exporting…", _BLUE)
-        self._q("show_progress", 0)
-        self._q("log", f"Exporting CA coordinates for {len(tokens)} protein(s): {', '.join(tokens)}")
-        self._q("log", "")
-
-        def _progress(i: int, total: int, token: str) -> None:
-            self._q("progress", 0, i / total, f"▶  Exporting {i}/{total}: {token}…")
-
-        t0 = time.time()
-        try:
-            from export_ca_coordinates import run_batch_export
-            items = run_batch_export(
-                tokens,
-                output_dir=Path(self._ca_output_dir_var.get()),
-                progress_cb=_progress,
-                log_cb=lambda line: self._q("log", line),
-                **self._ca_heatmap_kwargs(),
-            )
-        except ImportError as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-        except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Error: {exc}")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-        except Exception as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Unexpected error: {exc}")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-
-        elapsed = time.time() - t0
-        n_ok = sum(1 for item in items if item.result is not None)
-        n_total = len(items)
-        self._q("hide_progress", 0)
-        if n_ok == n_total:
-            self._q("status", 0, f"✓  {n_ok}/{n_total} in {_fmt_time(elapsed)}", _GREEN)
-        elif n_ok > 0:
-            self._q("status", 0, f"⚠  {n_ok}/{n_total} succeeded", _YELLOW)
-        else:
-            self._q("status", 0, "✗  Failed (0 succeeded)", _RED)
-        self._q("enable_open")
-        self._q("finished")
-
-    def _run_ca_coordinates_custom_cif(self):
-        """Run a single Structure Heatmaps export against a caller-provided
-        CIF file (e.g. a seeded AlphaFold Server prediction), in-process, in
-        the background thread -- see export_ca_coordinates.run_export's
-        custom_cif_path docstring for why this bypasses the AlphaFold DB
-        download/cache entirely.
-        """
-        cif_path = Path(self._ca_custom_cif_var.get().strip())
-        uniprot = self._ca_custom_cif_uniprot_var.get().strip()
-
-        self._q("pipeline_start", 1, "ca-coordinates", "warm")
-        self._q("show_log")
-        self._q("status", 0, "▶  Exporting…", _BLUE)
-        self._q("show_progress", 0)
-        self._q("log", f"Exporting Structure Heatmaps for custom CIF: {cif_path}")
-        self._q("log", "")
-
-        t0 = time.time()
-        try:
-            from export_ca_coordinates import run_export
-            result = run_export(
-                uniprot=uniprot,
-                custom_cif_path=cif_path,
-                output_dir=Path(self._ca_output_dir_var.get()),
-                log_cb=lambda line: self._q("log", line),
-                **self._ca_heatmap_kwargs(),
-            )
-        except ImportError as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Missing dependency: {exc}. Run: uv sync")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-        except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Error: {exc}")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-        except Exception as exc:
-            self._q("status", 0, "✗  Failed", _RED)
-            self._q("log", f"Unexpected error: {exc}")
-            self._q("hide_progress", 0)
-            self._q("finished")
-            return
-
-        elapsed = time.time() - t0
-        self._q("hide_progress", 0)
-        self._q("status", 0, f"✓  {result.gene} ({result.uid}) in {_fmt_time(elapsed)}", _GREEN)
-        self._q("enable_open")
-        self._q("finished")
-
     _TQDM_RE = re.compile(r"^(.*?):\s+(\d+)%\|[^|]*\|\s+(\d+)/(\d+)")
     _OVERALL_RE = re.compile(r"^##PROGRESS##\s+(\d+)\s+(.+)$")
     _using_overall_progress = False
@@ -1499,11 +1334,15 @@ class PipelineRunnerMixin:
         """
         if self._at_run_active:
             return self._at_status_label
+        if self._hm_run_active:
+            return self._hm_status_label
         return self._step_status_labels[idx] if 0 <= idx < len(self._step_status_labels) else None
 
     def _progress_target(self, idx: int):
         if self._at_run_active:
             return self._at_progress_bar
+        if self._hm_run_active:
+            return self._hm_progress_bar
         return self._step_progress_bars[idx] if 0 <= idx < len(self._step_progress_bars) else None
 
     def _poll_queue(self):
@@ -1517,6 +1356,9 @@ class PipelineRunnerMixin:
                     if self._at_run_active:
                         if not self._at_log_visible:
                             self._at_toggle_log()
+                    elif self._hm_run_active:
+                        if not self._hm_log_visible:
+                            self._hm_toggle_log()
                     elif not self._log_visible:
                         self._toggle_log()
                 elif kind == "status":
@@ -1583,12 +1425,16 @@ class PipelineRunnerMixin:
                         self._cif_variance_result = result
                         self._analysis_subtool_var.set("CIF Variance")
                         self._draw_cif_variance_plot()
+                elif kind == "heatmap_results":
+                    self._heatmap_items = msg[1]
+                    self._refresh_heatmap_results()
                 elif kind == "enable_open":
                     self._open_btn.configure(state="normal", fg_color=_PRIMARY, hover_color=_PRIMARY_HOVER)
                 elif kind == "finished":
                     was_cancelled = self._stop_requested
                     self._running = False
                     self._at_run_active = False
+                    self._hm_run_active = False
                     self._stop_requested = False
                     self._suspended = False
                     self._current_proc = None
@@ -1602,6 +1448,7 @@ class PipelineRunnerMixin:
                         command=self._start_pipeline,
                     )
                     self._at_run_btn.configure(state="normal")
+                    self._hm_run_btn.configure(state="normal")
                     self._stop_btn.configure(state="disabled", fg_color=_BTN2)
                     self._open_btn.configure(state="normal", fg_color=_PRIMARY, hover_color=_PRIMARY_HOVER)
                     if was_cancelled:
@@ -1620,7 +1467,12 @@ class PipelineRunnerMixin:
         self.after(100, self._poll_queue)
 
     def _append_log(self, line: str):
-        log = self._at_log if self._at_run_active else self._log
+        if self._at_run_active:
+            log = self._at_log
+        elif self._hm_run_active:
+            log = self._hm_log
+        else:
+            log = self._log
         log.configure(state="normal")
         log.insert("end", line + "\n")
         log.see("end")
@@ -1843,6 +1695,5 @@ class PipelineRunnerMixin:
             subprocess.run(["xdg-open", str(path)], check=False)
 
     def _open_output_folder(self):
-        """Open whichever output folder the Pipeline tab's active mode
-        currently writes to (see PipelineTabMixin._active_output_dir_var)."""
-        self._open_folder(Path(self._active_output_dir_var().get()))
+        """Open the Pipeline tab's output folder."""
+        self._open_folder(Path(self._output_dir_var.get()))

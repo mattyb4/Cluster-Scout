@@ -284,10 +284,6 @@ _MODE_HELP: dict[str, str] = {
     "single-protein": "Run proximity analysis on one CIF structure file you "
                       "provide directly, without running the full pipeline "
                       "- useful for a quick, one-off look at a single protein.",
-    "ca-coordinates": "Generate ChimeraX heatmap and marker scripts for a "
-                      "protein's 3D structure - colored by nearby COSMIC "
-                      "mutation density or AlphaFold confidence - along "
-                      "with the underlying alpha-carbon coordinate tables.",
 }
 
 # Analysis Tools tab hover help, keyed by field name.
@@ -360,6 +356,32 @@ _BTN2_HOVER = theme.pair("secondary_hover")
 _CHIP = ("#e1e2e2", "#3a3a3a")
 _CHIP_HOVER = ("#cfd0d0", "#4a4a4a")
 _PLOT_BG = theme.pair("plot_bg")
+
+# Window sizing (see fit_window_size): the size the app opens at, and the smallest it may shrink to
+DEFAULT_WINDOW_SIZE = (1100, 820)
+MIN_WINDOW_SIZE = (900, 560)
+_SCREEN_MARGIN = (40, 120)  # px left around the window for window borders, the title bar and the taskbar
+
+
+def fit_window_size(
+    screen_w: int, screen_h: int, scale: float, tabs_w: float,
+) -> tuple[int, int, int, int]:
+    """The window's (width, height, min width, min height), in the app's own
+    (pre-scaling) units, for a screen of *screen_w* x *screen_h* pixels whose
+    contents are drawn at *scale* (the OS display-scaling factor).
+
+    The window opens at DEFAULT_WINDOW_SIZE but never larger than the screen
+    can show, and its minimum width is whatever the tab bar needs (*tabs_w*, in
+    the same units) so the tabs can't be clipped by shrinking the window -- as
+    long as the screen itself is wide enough, which wins over everything else.
+    """
+    avail_w = (screen_w - _SCREEN_MARGIN[0]) / scale
+    avail_h = (screen_h - _SCREEN_MARGIN[1]) / scale
+    min_w = int(min(max(MIN_WINDOW_SIZE[0], tabs_w), avail_w))
+    width = int(max(min_w, min(DEFAULT_WINDOW_SIZE[0], avail_w)))
+    height = int(max(MIN_WINDOW_SIZE[1], min(DEFAULT_WINDOW_SIZE[1], avail_h)))
+    return width, height, min_w, min(MIN_WINDOW_SIZE[1], height)
+
 
 # Ctrl+scroll UI zoom (see App._on_ctrl_scroll_zoom)
 MIN_UI_SCALE = 0.6

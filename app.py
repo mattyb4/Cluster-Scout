@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 def _fix_tcl_tk_library_paths() -> None:
@@ -51,15 +51,18 @@ from ui.common import (  # noqa: E402
     _BLUE,
     MAX_UI_SCALE,
     MIN_UI_SCALE,
+    MIN_WINDOW_SIZE,
     PROJECT_ROOT,
     UI_PREFS_FILE,
     UI_SCALE_STEP,
+    fit_window_size,
     load_logo_image,
 )
 from ui.help_tab import HelpTabMixin  # noqa: E402
 from ui.pipeline_panels import PipelineTabMixin  # noqa: E402
 from ui.pipeline_runner import PipelineRunnerMixin  # noqa: E402
 from ui.results_tab import ResultsTabMixin  # noqa: E402
+from ui.structure_heatmaps import StructureHeatmapsMixin  # noqa: E402
 from ui.tabs import HciTabview  # noqa: E402
 from ui.visualization_tab import VisualizationTabMixin  # noqa: E402
 
@@ -145,14 +148,14 @@ class App(
     ResultsTabMixin,
     VisualizationTabMixin,
     AnalysisToolsTabMixin,
+    StructureHeatmapsMixin,
     HelpTabMixin,
     ctk.CTk,
 ):
     def __init__(self):
         super().__init__()
         self.title(f"Cluster-Scout v{APP_VERSION} (Beta)")
-        self.geometry("1100x820")
-        self.minsize(900, 560)
+        self.minsize(*MIN_WINDOW_SIZE)
         ico = PROJECT_ROOT / "cluster_scout.ico"
         if ico.exists():
             if sys.platform == "win32":
@@ -169,6 +172,7 @@ class App(
         self._cif_variance_result = None
         self._running = False
         self._at_run_active = False
+        self._hm_run_active = False
         self._stop_requested = False
         self._suspended = False
         self._current_proc: subprocess.Popen | None = None
@@ -182,10 +186,26 @@ class App(
         self._zoom_indicator_hide_job: str | None = None
 
         self._build_ui()
+        self._fit_window_to_screen()
         theme.on_change(self._retheme_all)
         self._refresh_file_status()
         self._poll_queue()
         self._bind_zoom_shortcuts()
+
+    def _fit_window_to_screen(self) -> None:
+        """Open centered at the default size, shrunk to fit the screen, and keep the
+        window from shrinking below the width the tab bar needs (see fit_window_size).
+        """
+        self.update_idletasks()
+        scale = self._get_window_scaling()
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height, min_w, min_h = fit_window_size(
+            screen_w, screen_h, scale, self._tabview.required_width() / scale,
+        )
+        self.minsize(min_w, min_h)
+        x = max(0, round((screen_w - width * scale) / 2))
+        y = max(0, round((screen_h - height * scale) / 3))  # a little above center, clear of the taskbar
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -199,12 +219,14 @@ class App(
         pipeline_tab = self._tabview.add("Pipeline")
         results_tab = self._tabview.add("Results")
         viz_tab = self._tabview.add("Visualization")
+        heatmaps_tab = self._tabview.add("Heatmaps")
         analysis_tools_tab = self._tabview.add("Analysis Tools")
-        help_tab = self._tabview.add("Help / Documentation")
+        help_tab = self._tabview.add("Help")
 
         self._build_pipeline_tab(pipeline_tab)
         self._build_results_tab(results_tab)
         self._build_viz_tab(viz_tab)
+        self._build_heatmaps_tab(heatmaps_tab)
         self._build_analysis_tools_tab(analysis_tools_tab)
         self._build_help_tab(help_tab)
 

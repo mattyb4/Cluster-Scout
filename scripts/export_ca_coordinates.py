@@ -16,6 +16,9 @@ scripts (skipped, with a warning, for multi-fragment proteins):
 
   mutations.defattr    — per-residue patients_within_10A value as a ChimeraX
                           attribute-assignment file (mutation heatmap only)
+  mutations_at_residue.defattr
+                       — per-residue patient count at that residue's own
+                          position only (residue heatmap only)
   mutations_view.cxc   — opens the CIF, loads the attribute file, and colors
                           the cartoon by it (the built-in "Reds" palette by
                           default, auto-scaled to the attribute's true
@@ -23,6 +26,10 @@ scripts (skipped, with a warning, for multi-fragment proteins):
                           mutation_low/mid/high_color below for
                           overriding the scale), with an on-screen color key
                           labeled with the real patient-count values
+  mutations_at_residue_view.cxc
+                       — the same view for the residue heatmap, colored by the
+                          patient count at each residue itself instead of
+                          within 10 Angstroms
   plddt_view.cxc     — opens the CIF and colors the cartoon by AlphaFold's
                        own per-residue confidence (pLDDT), using ChimeraX's
                        built-in "alphafold" palette by default (see
@@ -32,8 +39,9 @@ scripts (skipped, with a warning, for multi-fragment proteins):
                        produced when mark_ptm_sites/mark_mutations are on
                        and neither heatmap is
 
-Each heatmap is independently opt-in (mutation_heatmap/plddt_heatmap); open
-either .cxc file directly in ChimeraX to see that heatmap with no manual steps.
+Each heatmap is independently opt-in (mutation_heatmap/residue_heatmap/
+plddt_heatmap); open any .cxc file directly in ChimeraX to see that heatmap with
+no manual steps.
 
 mark_ptm_sites additionally marks each known PTM site with a small sphere
 (green by default; see ptm_marker_color) at its CA coordinate -- an
@@ -129,6 +137,8 @@ class ExportResult:
     mutation_chimerax_script_out: Path | None = None
     plddt_chimerax_script_out: Path | None = None
     plain_chimerax_script_out: Path | None = None
+    residue_defattr_out: Path | None = None
+    residue_chimerax_script_out: Path | None = None
 
 
 def _download_cif(uid: str, log_cb: Callable[[str], None] = print) -> list[Path]:
@@ -617,6 +627,7 @@ _MUTATION_KEY_PALETTE = "Reds"  # write_chimerax_script's own default -- the rea
 
 def build_mutation_key_lines(
     max_val: float, log_scale: bool, low_color: str, mid_color: str, high_color: str,
+    title_base: str = "Patients within 10 Å",
 ) -> list[str]:
     """Build ChimeraX `key`/`2dlabels` command lines for the mutation
     heatmap's on-screen color key: a 3-color gradient from *low_color*
@@ -644,9 +655,10 @@ def build_mutation_key_lines(
     count via expm1 so the key reads in the same units as the data instead
     of exposing the log transform to the viewer. The middle label is the
     count at the scale's midpoint -- half the max on a linear scale, and
-    expm1(half the log max) on a log scale.
+    expm1(half the log max) on a log scale. *title_base* names what the
+    counts are (the residue heatmap passes "Patients at residue").
     """
-    title = "Patients within 10 Å (log scale)" if log_scale else "Patients within 10 Å"
+    title = f"{title_base} (log scale)" if log_scale else title_base
     if log_scale:
         hi_label = f"{round(float(np.expm1(max_val))):g}"
         mid_label = f"{round(float(np.expm1(max_val / 2))):g}"
@@ -754,6 +766,7 @@ def run_export(
     plddt_high_color: str = PLDDT_DEFAULT_HIGH_COLOR,
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
+    residue_heatmap: bool = False,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
     """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
@@ -776,13 +789,17 @@ def run_export(
     under that same accession would corrupt what that cache means to every
     other tool that reads it.
 
-    *mutation_heatmap*/*plddt_heatmap* independently control which ChimeraX
-    heatmap script(s) get written (single-fragment proteins only -- see step
-    8 below). *log_scale* only affects the mutation heatmap: if True, it's
-    colored by log1p(patients_within_10A) instead of the raw count, under a
-    separate "patients_within_10A_log" attribute name -- see
-    write_chimerax_script's docstring for why this can help with heavily
-    right-skewed patient counts.
+    *mutation_heatmap*/*residue_heatmap*/*plddt_heatmap* independently control
+    which ChimeraX heatmap script(s) get written (single-fragment proteins
+    only -- see step 8 below). The mutation heatmap colors each residue by the
+    patients within 10 Angstroms of it (patients_within_10A); the residue
+    heatmap colors it by the patients whose mutation is at that residue's own
+    position only (patients_at_residue, zero where nothing is mutated), written
+    as its own mutations_at_residue.defattr / mutations_at_residue_view.cxc.
+    *log_scale* affects both of those: if True, each is colored by log1p of its
+    count instead of the raw count, under a separate "..._log" attribute name
+    -- see write_chimerax_script's docstring for why this can help with
+    heavily right-skewed patient counts.
 
     *mark_ptm_sites*, if True, marks each known PTM site (from the pipeline's
     intermediate PTM/mutation-hotspot TSV) with a small green sphere at its CA
@@ -797,12 +814,13 @@ def run_export(
 
     *dim_low_confidence*, if True, dims each residue's mutation-heatmap color
     in proportion to how low its pLDDT confidence is -- see
-    build_confidence_dim_lines's docstring. Only affects the mutation
-    heatmap; has no effect if *mutation_heatmap* is False.
+    build_confidence_dim_lines's docstring. Only affects the mutation and
+    residue heatmaps; has no effect if neither is on.
 
     *mutation_low/mid/high_color* and *plddt_low/mid/high_color* customize
-    each heatmap's three-color scale (the middle color sits at the scale's
-    midpoint). As long as all three still equal their MUTATION_DEFAULT_*/
+    the patient-count heatmaps' (mutation and residue) and the pLDDT heatmap's
+    three-color scales (the middle color sits at the scale's midpoint). As
+    long as all three still equal their MUTATION_DEFAULT_*/
     PLDDT_DEFAULT_* sentinels, that heatmap keeps using ChimeraX's real named
     "Reds"/"alphafold" palette exactly as before; the moment any of them
     differs, that heatmap switches to an explicit three-color gradient built
@@ -956,8 +974,9 @@ def run_export(
 
     # ── 8. ChimeraX heatmap/marker files (single-fragment proteins only) ──────
     mutation_defattr_out = mutation_chimerax_script_out = None
+    residue_defattr_out = residue_chimerax_script_out = None
     plddt_chimerax_script_out = plain_chimerax_script_out = None
-    if not (mutation_heatmap or plddt_heatmap or mark_ptm_sites or mark_mutations):
+    if not (mutation_heatmap or residue_heatmap or plddt_heatmap or mark_ptm_sites or mark_mutations):
         log_cb("  No heatmaps or markers selected, skipping ChimeraX files.")
     elif len(cif_files) > 1:
         log_cb(
@@ -997,27 +1016,47 @@ def run_export(
             else:
                 log_cb(f"  No COSMIC mutation positions found for {uid} — nothing to mark.")
 
+        # The patient-count heatmaps: (attribute, per-residue data, file stem, key title, log label)
+        patient_heatmaps = []
         if mutation_heatmap:
-            mutation_defattr_out = output_dir / "mutations.defattr"
-            mutation_chimerax_script_out = output_dir / "mutations_view.cxc"
+            patient_heatmaps.append(
+                ("patients_within_10A", all_ca_df, "mutations", "Patients within 10 Å", "mutation heatmap"),
+            )
+        if residue_heatmap:
+            residue_df = all_ca_df[["position"]].copy()
+            residue_df["patients_at_residue"] = (
+                residue_df["position"].map(pos_patients).fillna(0).astype(int)
+            )
+            patient_heatmaps.append(
+                ("patients_at_residue", residue_df, "mutations_at_residue", "Patients at residue",
+                 "residue heatmap"),
+            )
+
+        for attr, source_df, stem, key_title, label in patient_heatmaps:
+            defattr_out = output_dir / f"{stem}.defattr"
+            script_out = output_dir / f"{stem}_view.cxc"
+            if attr == "patients_within_10A":
+                mutation_defattr_out, mutation_chimerax_script_out = defattr_out, script_out
+            else:
+                residue_defattr_out, residue_chimerax_script_out = defattr_out, script_out
 
             # A separate copy (not all_ca_df itself) so the log-scaled column
             # never leaks into the returned ExportResult or the TSVs already
             # written above -- it exists only for this heatmap.
-            heatmap_attr = "patients_within_10A"
-            heatmap_df = all_ca_df
+            heatmap_attr = attr
+            heatmap_df = source_df
             if log_scale:
-                heatmap_attr = "patients_within_10A_log"
-                heatmap_df = all_ca_df.copy()
-                heatmap_df[heatmap_attr] = np.log1p(heatmap_df["patients_within_10A"])
-                log_cb("  Log-scaling mutation heatmap (log1p of patients_within_10A)")
+                heatmap_attr = f"{attr}_log"
+                heatmap_df = source_df.copy()
+                heatmap_df[heatmap_attr] = np.log1p(heatmap_df[attr])
+                log_cb(f"  Log-scaling {label} (log1p of {attr})")
 
             dim_lines: list[str] = []
             if dim_low_confidence:
                 chain = load_first_chain(cif_path)
                 if chain is not None:
                     dim_lines = build_confidence_dim_lines(get_plddt_map(chain))
-                    log_cb(f"  Dimming {len(dim_lines)} residue(s) by confidence on the mutation heatmap")
+                    log_cb(f"  Dimming {len(dim_lines)} residue(s) by confidence on the {label}")
 
             heatmap_max = float(heatmap_df[heatmap_attr].max())
             mutation_palette = ":".join(mutation_colors) if mutation_customized else _MUTATION_KEY_PALETTE
@@ -1028,14 +1067,15 @@ def run_export(
             key_lines = build_mutation_key_lines(
                 heatmap_max, log_scale,
                 low_color=mutation_low_color, mid_color=mutation_mid_color, high_color=mutation_high_color,
+                title_base=key_title,
             )
             if mutation_customized:
-                log_cb(f"  Mutation heatmap colors: {mutation_low_color} (low) -> "
+                log_cb(f"  {label.capitalize()} colors: {mutation_low_color} (low) -> "
                        f"{mutation_mid_color} (middle) -> {mutation_high_color} (high)")
 
-            write_defattr_file(heatmap_df, mutation_defattr_out, attr_name=heatmap_attr)
+            write_defattr_file(heatmap_df, defattr_out, attr_name=heatmap_attr)
             write_chimerax_script(
-                cif_path, mutation_defattr_out.resolve(), mutation_chimerax_script_out,
+                cif_path, defattr_out.resolve(), script_out,
                 attr_name=heatmap_attr, palette=mutation_palette, value_range=mutation_range,
                 extra_lines=dim_lines + marker_lines + key_lines,
                 # "soft" lighting's depth cues come entirely from ambient
@@ -1045,8 +1085,8 @@ def run_export(
                 # per-residue transparency.
                 lighting="simple" if dim_lines else "soft",
             )
-            log_cb(f"  Mutation heatmap attribute file : {mutation_defattr_out}")
-            log_cb(f"  Mutation heatmap script (open this in ChimeraX) : {mutation_chimerax_script_out}")
+            log_cb(f"  {label.capitalize()} attribute file : {defattr_out}")
+            log_cb(f"  {label.capitalize()} script (open this in ChimeraX) : {script_out}")
 
         if plddt_heatmap:
             plddt_chimerax_script_out = output_dir / "plddt_view.cxc"
@@ -1061,7 +1101,7 @@ def run_export(
             )
             log_cb(f"  pLDDT heatmap script (open this in ChimeraX) : {plddt_chimerax_script_out}")
 
-        if (mark_ptm_sites or mark_mutations) and not mutation_heatmap and not plddt_heatmap:
+        if (mark_ptm_sites or mark_mutations) and not (mutation_heatmap or residue_heatmap or plddt_heatmap):
             plain_chimerax_script_out = output_dir / "markers_view.cxc"
             write_plain_chimerax_script(cif_path, plain_chimerax_script_out, extra_lines=marker_lines)
             log_cb(f"  Marker script (open this in ChimeraX) : {plain_chimerax_script_out}")
@@ -1074,6 +1114,8 @@ def run_export(
         mutation_chimerax_script_out=mutation_chimerax_script_out,
         plddt_chimerax_script_out=plddt_chimerax_script_out,
         plain_chimerax_script_out=plain_chimerax_script_out,
+        residue_defattr_out=residue_defattr_out,
+        residue_chimerax_script_out=residue_chimerax_script_out,
     )
 
 
@@ -1103,6 +1145,7 @@ def run_batch_export(
     plddt_high_color: str = PLDDT_DEFAULT_HIGH_COLOR,
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
+    residue_heatmap: bool = False,
     progress_cb: Callable[[int, int, str], None] | None = None,
     log_cb: Callable[[str], None] = print,
 ) -> list[BatchExportItem]:
@@ -1140,7 +1183,8 @@ def run_batch_export(
 
         kwargs = dict(
             cosmic_file=cosmic_file, output_dir=output_dir,
-            mutation_heatmap=mutation_heatmap, plddt_heatmap=plddt_heatmap,
+            mutation_heatmap=mutation_heatmap, residue_heatmap=residue_heatmap,
+            plddt_heatmap=plddt_heatmap,
             mark_ptm_sites=mark_ptm_sites, mark_mutations=mark_mutations,
             log_scale=log_scale, dim_low_confidence=dim_low_confidence,
             mutation_low_color=mutation_low_color, mutation_mid_color=mutation_mid_color,
@@ -1208,6 +1252,13 @@ def main() -> None:
              "Enabled by default; use --no-mutation-heatmap to skip it.",
     )
     parser.add_argument(
+        "--residue-heatmap", action="store_true",
+        help="Also generate a ChimeraX heatmap script colored by the number of "
+             "patients with a mutation at each residue itself (rather than "
+             "within 10 A of it). Written to its own mutations_at_residue "
+             "files, so it can be used with or without --mutation-heatmap.",
+    )
+    parser.add_argument(
         "--plddt-heatmap", action="store_true",
         help="Also generate a ChimeraX heatmap script colored by AlphaFold's "
              "per-residue pLDDT confidence, using ChimeraX's built-in "
@@ -1215,10 +1266,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-scale", action="store_true",
-        help="Color the mutation heatmap by log1p(patients_within_10A) instead "
-             "of the raw count -- helps when patient counts are heavily "
-             "right-skewed and a linear scale would crush most residues into "
-             "one flat color. Has no effect on the pLDDT heatmap.",
+        help="Color the mutation and residue heatmaps by log1p of their patient "
+             "count instead of the raw count -- helps when patient counts are "
+             "heavily right-skewed and a linear scale would crush most "
+             "residues into one flat color. Has no effect on the pLDDT heatmap.",
     )
     parser.add_argument(
         "--mark-ptm-sites", action="store_true",
@@ -1235,9 +1286,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--dim-low-confidence", action="store_true",
-        help="Dim each residue's mutation-heatmap color in proportion to how "
-             "low its pLDDT confidence is (100 - pLDDT percent transparent). "
-             "Only affects the mutation heatmap, and switches its lighting "
+        help="Dim each residue's mutation/residue-heatmap color in proportion to "
+             "how low its pLDDT confidence is (100 - pLDDT percent transparent). "
+             "Only affects those two heatmaps, and switches their lighting "
              "from 'soft' to 'simple' (ChimeraX's ambient shadows don't "
              "render correctly with transparent geometry present).",
     )
@@ -1297,6 +1348,7 @@ def main() -> None:
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
             custom_cif_path=Path(args.custom_cif),
             mutation_heatmap=args.mutation_heatmap,
+            residue_heatmap=args.residue_heatmap,
             plddt_heatmap=args.plddt_heatmap,
             mark_ptm_sites=args.mark_ptm_sites,
             mark_mutations=args.mark_mutations,
@@ -1331,6 +1383,7 @@ def main() -> None:
             tokens,
             cosmic_file=Path(args.cosmic) if args.cosmic else None,
             mutation_heatmap=args.mutation_heatmap,
+            residue_heatmap=args.residue_heatmap,
             plddt_heatmap=args.plddt_heatmap,
             mark_ptm_sites=args.mark_ptm_sites,
             mark_mutations=args.mark_mutations,
