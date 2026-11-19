@@ -63,6 +63,13 @@ Usage:
     uv run scripts/export_ca_coordinates.py P04637 --cosmic path/to/COSMIC.tsv
     uv run scripts/export_ca_coordinates.py P04637 --plddt-heatmap --no-mutation-heatmap
     uv run scripts/export_ca_coordinates.py P04637 --mark-ptm-sites --mark-mutations
+    uv run scripts/export_ca_coordinates.py P04637 --mutation-source clinvar --mark-ptm-sites --ptm-source psp
+
+Mutation counts come from COSMIC (patients, the default) or ClinVar (submitters)
+via --mutation-source; PTM markers come from the PTMD or PhosphoSitePlus Step-1
+file via --ptm-source. ClinVar outputs get a clinvar_ filename prefix and scripts
+with PhosphoSitePlus markers a psp_ prefix, so no source combination overwrites
+another's files in the protein's folder.
 """
 from __future__ import annotations
 
@@ -80,11 +87,18 @@ import pandas as pd
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from clinvar_input import DEFAULT_CLINVAR_CLASSES, load_clinvar_counts  # noqa: E402
 from pipeline_utils import (  # noqa: E402
     AA3TO1,
+    CLINVAR_INPUT_DIR,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
+    DEFAULT_MUTATION_SOURCE,
+    DEFAULT_PTM_SOURCE,
     HEATMAP_OUTPUT_DIRNAME,
+    MUTATION_SOURCE_LABELS,
+    MUTATION_SOURCES,
+    PTM_SOURCES,
     extract_uniprot_from_cif,
     find_canonical_cifs,
     get_plddt_map,
@@ -100,9 +114,8 @@ PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
 OUTPUT_DIR = PROJECT_ROOT / "Output" / HEATMAP_OUTPUT_DIRNAME
-# PTM-site marking always needs the ptm-proximity file specifically (its
-# ptms_on_protein column) -- this tool has no --mode of its own.
-PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
+CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+_PTM_SOURCE_LABELS = {"ptmd": "PTMD", "psp": "PhosphoSitePlus"}
 
 _AF_API = "https://alphafold.ebi.ac.uk/api/prediction/{uid}"
 NEARBY_PATIENT_RADIUS_A = 10.0
@@ -435,6 +448,40 @@ def _load_cosmic_mutations(
     return pos_mutations, pos_patients
 
 
+_clinvar_counts_cache: dict[tuple, pd.DataFrame] = {}
+
+
+def _load_clinvar_mutations(
+    gene: str, clinvar_file: Path, classes=DEFAULT_CLINVAR_CLASSES, log_cb: Callable[[str], None] = print,
+) -> tuple[dict[int, list[str]], dict[int, int]]:
+    """Load ClinVar missense variants for a single gene, in the same shape as
+    _load_cosmic_mutations: {pos: [mutations]} and {pos: count}. The count is
+    ClinVar's submitter count (what the pipeline's ClinVar source uses in place
+    of COSMIC's patient count), over the selected classification *classes*.
+
+    The per-(gene, change) table is cached per (file, classes) so a batch export
+    pays the groupby over ClinVar's millions of rows only once.
+    """
+    log_cb(f"Scanning ClinVar for gene {gene} ...")
+    key = (str(Path(clinvar_file).resolve()), tuple(sorted(classes)))
+    if key not in _clinvar_counts_cache:
+        _clinvar_counts_cache[key], _totals = load_clinvar_counts(Path(clinvar_file), CACHE_DIR, classes)
+    counts = _clinvar_counts_cache[key]
+    counts = counts[counts["gene"] == gene]
+
+    pos_mutations: dict[int, list[str]] = {}
+    pos_patients: dict[int, int] = {}
+    for mut, cases in zip(counts["aa_change"], counts["affected_cases"]):
+        m = re.match(r"[A-Z](\d+)[A-Z]$", str(mut))
+        if not m:
+            continue
+        pos = int(m.group(1))
+        pos_mutations.setdefault(pos, []).append(str(mut))
+        pos_patients[pos] = pos_patients.get(pos, 0) + int(cases)
+
+    return pos_mutations, pos_patients
+
+
 def _compute_patients_within_radius(
     ca_df: pd.DataFrame,
     pos_patients: dict[int, int],
@@ -462,21 +509,48 @@ def _compute_patients_within_radius(
     return {int(pos): int(total) for pos, total in zip(ca_df["position"], totals)}
 
 
-def load_ptm_positions(uniprot: str) -> list[tuple[int, str]]:
-    """Load (position, raw PTM token) pairs from the pipeline's intermediate
-    PTM/mutation-hotspot TSV for *uniprot*, e.g. [(15, "S15:Phosphorylation"), ...].
+def load_ptm_positions(
+    uniprot: str, ptm_source: str = DEFAULT_PTM_SOURCE,
+    mutation_source: str = DEFAULT_MUTATION_SOURCE, log_cb: Callable[[str], None] = print,
+) -> list[tuple[int, str]]:
+    """Load (position, raw PTM token) pairs for *uniprot* from the pipeline's
+    Step-1 hotspot TSV for *ptm_source* ("ptmd" or "psp"), e.g.
+    [(15, "S15:Phosphorylation"), ...].
 
-    Returns an empty list if the TSV doesn't exist yet (pipeline step 1 hasn't
-    been run) or has no row for this protein.
+    The Step-1 file is per (PTM source, mutation source). The one matching
+    *mutation_source* is tried first; if it is missing or has no row for this
+    protein, the other mutation source's file for the same PTM source is used,
+    since the PTM sites themselves don't depend on which mutations were counted.
+
+    Returns an empty list (after logging why through *log_cb*) if neither file
+    has a row for this protein.
     """
-    if not PTM_TSV.exists():
-        return []
-    df = pd.read_csv(PTM_TSV, sep="\t", dtype=str, keep_default_na=False)
-    rows = df[df["uniprot_id"] == uniprot]
-    if rows.empty:
+    label = _PTM_SOURCE_LABELS[ptm_source]
+    order = [mutation_source] + [m for m in MUTATION_SOURCES if m != mutation_source]
+    found_file = False
+    row = None
+    for source in order:
+        path = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity", ptm_source, source)
+        if not path.exists():
+            continue
+        found_file = True
+        df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+        rows = df[df["uniprot_id"] == uniprot]
+        if rows.empty:
+            continue
+        row = rows.iloc[0]
+        if source != mutation_source:
+            log_cb(f"  Using {path.name} for the {label} PTM sites (no {MUTATION_SOURCE_LABELS[mutation_source]} "
+                   f"Step-1 file has this protein).")
+        break
+    if row is None:
+        if found_file:
+            log_cb(f"  {uniprot} has no {label} PTM sites in the pipeline's Step-1 data.")
+        else:
+            log_cb(f"  No {label} Step-1 data found -- run the pipeline's Step 1 with PTM source "
+                   f"{label} first.")
         return []
 
-    row = rows.iloc[0]
     positions: list[tuple[int, str]] = []
     for token in str(row.get("ptms_on_protein", "")).split(";"):
         token = token.strip()
@@ -747,6 +821,18 @@ def write_plain_chimerax_script(cif_path: Path, out_path: Path, extra_lines: lis
     return out_path
 
 
+def _resolve_mutation_file(mutation_source: str, cosmic_file: Path | None, clinvar_file: Path | None) -> Path:
+    """The input file for *mutation_source*: the caller's path if given, else the
+    one in its data/input folder."""
+    if mutation_source == "clinvar":
+        if clinvar_file is None:
+            clinvar_file = resolve_input_file(input_dir(PROJECT_ROOT, CLINVAR_INPUT_DIR), (".txt", ".gz"))
+        return Path(clinvar_file)
+    if cosmic_file is None:
+        cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
+    return Path(cosmic_file)
+
+
 def run_export(
     uniprot: str | None = None,
     gene: str | None = None,
@@ -768,9 +854,13 @@ def run_export(
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
     residue_heatmap: bool = False,
+    ptm_source: str = DEFAULT_PTM_SOURCE,
+    mutation_source: str = DEFAULT_MUTATION_SOURCE,
+    clinvar_file: Path | None = None,
+    clinvar_classes=DEFAULT_CLINVAR_CLASSES,
     log_cb: Callable[[str], None] = print,
 ) -> ExportResult:
-    """Export CA coordinates (all residues + COSMIC mutation positions) for a protein.
+    """Export CA coordinates (all residues + mutation positions) for a protein.
 
     Either *uniprot* or *gene* must be given; if *uniprot* is omitted, the
     UniProt accession is resolved from *gene* via a live UniProt API lookup
@@ -801,6 +891,18 @@ def run_export(
     count instead of the raw count, under a separate "..._log" attribute name
     -- see write_chimerax_script's docstring for why this can help with
     heavily right-skewed patient counts.
+
+    *mutation_source* ("cosmic" or "clinvar") picks where the mutation counts
+    come from: COSMIC's Mutant Census (*cosmic_file*, counting distinct patient
+    samples) or ClinVar's variant_summary (*clinvar_file*, restricted to
+    *clinvar_classes* and counting submitters, like the pipeline's ClinVar
+    source). Both default to the file in their data/input folder. ClinVar runs
+    write clinvar_-prefixed files so they never overwrite a COSMIC run's. The
+    count columns keep their patients_* names for either source.
+
+    *ptm_source* ("ptmd" or "psp") picks which Step-1 PTM data the PTM-site
+    markers come from; with PhosphoSitePlus markers the scripts are written
+    with a psp_ prefix so they don't overwrite PTMD-marked ones.
 
     *mark_ptm_sites*, if True, marks each known PTM site (from the pipeline's
     intermediate PTM/mutation-hotspot TSV) with a small green sphere at its CA
@@ -836,7 +938,7 @@ def run_export(
     Raises ValueError if neither uniprot nor gene is given, if a gene-only
     lookup can't be resolved to a UniProt accession, or if no AlphaFold
     structure, no CA atoms, or no gene symbol could be resolved. Raises
-    FileNotFoundError if the COSMIC file is missing.
+    FileNotFoundError if the selected mutation source's input file is missing.
     """
     uniprot = (uniprot or "").strip()
     gene = (gene or "").strip() or None
@@ -869,9 +971,21 @@ def run_export(
         uid = resolved_uid.upper()
         log_cb(f"Resolved {gene} -> {uid}")
 
-    if cosmic_file is None:
-        cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
-    cosmic_file = Path(cosmic_file)
+    if ptm_source not in PTM_SOURCES:
+        raise ValueError(f"Unknown PTM source '{ptm_source}' (expected one of {', '.join(PTM_SOURCES)})")
+    if mutation_source not in MUTATION_SOURCES:
+        raise ValueError(
+            f"Unknown mutation source '{mutation_source}' (expected one of {', '.join(MUTATION_SOURCES)})"
+        )
+    is_clinvar = mutation_source == "clinvar"
+    mut_label = MUTATION_SOURCE_LABELS[mutation_source]
+    unit = "submitters" if is_clinvar else "patients"
+    source_file = _resolve_mutation_file(mutation_source, cosmic_file, clinvar_file)
+    # Files that depend on the mutation source get a clinvar_ prefix; scripts that
+    # also embed PhosphoSitePlus PTM markers get psp_ on top, so no combination
+    # overwrites another's output in the protein's folder.
+    mprefix = "clinvar_" if is_clinvar else ""
+    prefix = mprefix + ("psp_" if mark_ptm_sites and ptm_source == "psp" else "")
 
     # ── 1. Locate CIF files (a caller-provided custom CIF, or download from
     #      AlphaFold DB if not already cached) ────────────────────────────────
@@ -919,12 +1033,17 @@ def run_export(
         )
     log_cb(f"Gene: {resolved_gene}")
 
-    # ── 4. COSMIC missense mutations ──────────────────────────────────────────
-    if not cosmic_file.exists():
-        raise FileNotFoundError(f"COSMIC file not found: {cosmic_file}")
+    # ── 4. Missense mutations from the selected source ────────────────────────
+    if not source_file.exists():
+        raise FileNotFoundError(f"{mut_label} file not found: {source_file}")
 
-    pos_mutations, pos_patients = _load_cosmic_mutations(resolved_gene, cosmic_file, log_cb)
-    log_cb(f"Missense mutation positions in COSMIC: {len(pos_mutations)}")
+    if is_clinvar:
+        pos_mutations, pos_patients = _load_clinvar_mutations(
+            resolved_gene, source_file, clinvar_classes, log_cb,
+        )
+    else:
+        pos_mutations, pos_patients = _load_cosmic_mutations(resolved_gene, source_file, log_cb)
+    log_cb(f"Missense mutation positions in {mut_label}: {len(pos_mutations)}")
 
     # ── 5. Patient counts within radius of each coordinate ────────────────────
     patients_within = _compute_patients_within_radius(all_ca_df, pos_patients)
@@ -962,8 +1081,8 @@ def run_export(
     safe_gene = re.sub(r"[^\w-]+", "_", resolved_gene).strip("_") or "unknown_gene"
     output_dir = Path(output_dir) / f"{safe_gene}_{uid}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    all_out = output_dir / "all_ca.tsv"
-    mut_out = output_dir / "mutation_ca.tsv"
+    all_out = output_dir / f"{mprefix}all_ca.tsv"
+    mut_out = output_dir / f"{mprefix}mutation_ca.tsv"
 
     all_ca_df.to_csv(all_out, sep="\t", index=False)
     mut_ca_df.to_csv(mut_out, sep="\t", index=False)
@@ -998,14 +1117,14 @@ def run_export(
 
         marker_lines: list[str] = []
         if mark_ptm_sites:
-            ptm_positions = load_ptm_positions(uid)
+            ptm_positions = load_ptm_positions(uid, ptm_source, mutation_source, log_cb)
             if ptm_positions:
                 ptm_marker_lines = build_ptm_marker_lines(all_ca_df, ptm_positions, color=ptm_marker_color)
                 marker_lines += ptm_marker_lines
-                log_cb(f"  Marking {len(ptm_marker_lines)} PTM site(s) as {ptm_marker_color} spheres")
+                log_cb(f"  Marking {len(ptm_marker_lines)} {_PTM_SOURCE_LABELS[ptm_source]} PTM site(s) "
+                       f"as {ptm_marker_color} spheres")
             else:
-                log_cb(f"  No PTM site data found for {uid} in the pipeline's "
-                       f"intermediate data — nothing to mark.")
+                log_cb("  No PTM sites to mark.")
 
         if mark_mutations:
             if not mut_ca_df.empty:
@@ -1015,13 +1134,14 @@ def run_export(
                 marker_lines += mutation_marker_lines
                 log_cb(f"  Marking {len(mut_ca_df)} mutation position(s) as {mutation_marker_color} sticks")
             else:
-                log_cb(f"  No COSMIC mutation positions found for {uid} — nothing to mark.")
+                log_cb(f"  No {mut_label} mutation positions found for {uid} — nothing to mark.")
 
         # The patient-count heatmaps: (attribute, per-residue data, file stem, key title, log label)
         patient_heatmaps = []
         if mutation_heatmap:
             patient_heatmaps.append(
-                ("patients_within_10A", all_ca_df, "mutations", "Patients within 10 Å", "mutation heatmap"),
+                ("patients_within_10A", all_ca_df, "mutations", f"{unit.capitalize()} within 10 Å",
+                 "mutation heatmap"),
             )
         if residue_heatmap:
             residue_df = all_ca_df[["position"]].copy()
@@ -1029,13 +1149,13 @@ def run_export(
                 residue_df["position"].map(pos_patients).fillna(0).astype(int)
             )
             patient_heatmaps.append(
-                ("patients_at_residue", residue_df, "mutations_at_residue", "Patients at residue",
+                ("patients_at_residue", residue_df, "mutations_at_residue", f"{unit.capitalize()} at residue",
                  "residue heatmap"),
             )
 
         for attr, source_df, stem, key_title, label in patient_heatmaps:
-            defattr_out = output_dir / f"{stem}.defattr"
-            script_out = output_dir / f"{stem}_view.cxc"
+            defattr_out = output_dir / f"{mprefix}{stem}.defattr"
+            script_out = output_dir / f"{prefix}{stem}_view.cxc"
             if attr == "patients_within_10A":
                 mutation_defattr_out, mutation_chimerax_script_out = defattr_out, script_out
             else:
@@ -1090,7 +1210,7 @@ def run_export(
             log_cb(f"  {label.capitalize()} script (open this in ChimeraX) : {script_out}")
 
         if plddt_heatmap:
-            plddt_chimerax_script_out = output_dir / "plddt_view.cxc"
+            plddt_chimerax_script_out = output_dir / f"{prefix}plddt_view.cxc"
             plddt_palette = ":".join(plddt_colors) if plddt_customized else _PLDDT_KEY_PALETTE
             if plddt_customized:
                 log_cb(f"  pLDDT heatmap colors: {plddt_low_color} (low) -> "
@@ -1103,7 +1223,7 @@ def run_export(
             log_cb(f"  pLDDT heatmap script (open this in ChimeraX) : {plddt_chimerax_script_out}")
 
         if (mark_ptm_sites or mark_mutations) and not (mutation_heatmap or residue_heatmap or plddt_heatmap):
-            plain_chimerax_script_out = output_dir / "markers_view.cxc"
+            plain_chimerax_script_out = output_dir / f"{prefix}markers_view.cxc"
             write_plain_chimerax_script(cif_path, plain_chimerax_script_out, extra_lines=marker_lines)
             log_cb(f"  Marker script (open this in ChimeraX) : {plain_chimerax_script_out}")
 
@@ -1147,6 +1267,10 @@ def run_batch_export(
     ptm_marker_color: str = PTM_MARKER_DEFAULT_COLOR,
     mutation_marker_color: str = MUTATION_MARKER_DEFAULT_COLOR,
     residue_heatmap: bool = False,
+    ptm_source: str = DEFAULT_PTM_SOURCE,
+    mutation_source: str = DEFAULT_MUTATION_SOURCE,
+    clinvar_file: Path | None = None,
+    clinvar_classes=DEFAULT_CLINVAR_CLASSES,
     progress_cb: Callable[[int, int, str], None] | None = None,
     log_cb: Callable[[str], None] = print,
 ) -> list[BatchExportItem]:
@@ -1165,13 +1289,17 @@ def run_batch_export(
     (1-based index) right before each protein starts, for a caller that wants
     to show "N/total" progress independent of the log stream.
 
-    COSMIC is read once and cached across the whole batch (see
-    _load_cosmic_dataframe) -- without that, scanning it fresh per protein
+    The selected mutation source (COSMIC or ClinVar) is read once and cached
+    across the whole batch (see _load_cosmic_dataframe and
+    _load_clinvar_mutations) -- without that, scanning it fresh per protein
     would make a large batch prohibitively slow.
     """
-    if cosmic_file is None:
-        cosmic_file = resolve_input_file(input_dir(PROJECT_ROOT, COSMIC_INPUT_DIR), (".tsv",))
-    cosmic_file = Path(cosmic_file)
+    if mutation_source in MUTATION_SOURCES:  # an unknown one is reported by run_export itself
+        source_file = _resolve_mutation_file(mutation_source, cosmic_file, clinvar_file)
+        if mutation_source == "clinvar":
+            clinvar_file = source_file
+        else:
+            cosmic_file = source_file
 
     total = len(tokens)
     items: list[BatchExportItem] = []
@@ -1184,6 +1312,8 @@ def run_batch_export(
 
         kwargs = dict(
             cosmic_file=cosmic_file, output_dir=output_dir,
+            ptm_source=ptm_source, mutation_source=mutation_source,
+            clinvar_file=clinvar_file, clinvar_classes=clinvar_classes,
             mutation_heatmap=mutation_heatmap, residue_heatmap=residue_heatmap,
             plddt_heatmap=plddt_heatmap,
             mark_ptm_sites=mark_ptm_sites, mark_mutations=mark_mutations,
@@ -1235,6 +1365,26 @@ def main() -> None:
         "--cosmic",
         default=None,
         help="Path to COSMIC Mutant Census TSV (default: auto-detected from data/input/cosmic/)",
+    )
+    parser.add_argument(
+        "--mutation-source", choices=MUTATION_SOURCES, default=DEFAULT_MUTATION_SOURCE,
+        help="Where mutation counts come from: 'cosmic' (default, distinct patients) "
+             "or 'clinvar' (ClinVar submitters). ClinVar outputs get a clinvar_ file prefix.",
+    )
+    parser.add_argument(
+        "--ptm-source", choices=PTM_SOURCES, default=DEFAULT_PTM_SOURCE,
+        help="Which Step-1 PTM data --mark-ptm-sites uses: 'ptmd' (default) or "
+             "'psp' (PhosphoSitePlus). Run the pipeline's Step 1 with that source first.",
+    )
+    parser.add_argument(
+        "--clinvar", default=None,
+        help="Path to ClinVar variant_summary.txt(.gz) for --mutation-source clinvar "
+             "(default: auto-detected from data/input/ClinVar/)",
+    )
+    parser.add_argument(
+        "--clinvar-classes", nargs="+", default=list(DEFAULT_CLINVAR_CLASSES),
+        help="ClinVar classification classes that count with --mutation-source clinvar "
+             "(keys such as P LP VUS LB B CONFLICTING; default: P LP).",
     )
     parser.add_argument(
         "--custom-cif",
@@ -1363,6 +1513,9 @@ def main() -> None:
             plddt_high_color=args.plddt_high_color,
             ptm_marker_color=args.ptm_marker_color,
             mutation_marker_color=args.mutation_marker_color,
+            ptm_source=args.ptm_source, mutation_source=args.mutation_source,
+            clinvar_file=Path(args.clinvar) if args.clinvar else None,
+            clinvar_classes=args.clinvar_classes,
             log_cb=print,
         )
         try:
@@ -1398,6 +1551,9 @@ def main() -> None:
             plddt_high_color=args.plddt_high_color,
             ptm_marker_color=args.ptm_marker_color,
             mutation_marker_color=args.mutation_marker_color,
+            ptm_source=args.ptm_source, mutation_source=args.mutation_source,
+            clinvar_file=Path(args.clinvar) if args.clinvar else None,
+            clinvar_classes=args.clinvar_classes,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         sys.exit(f"Error: {exc}")

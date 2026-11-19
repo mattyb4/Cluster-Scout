@@ -125,7 +125,7 @@ uv run main.py --mode ptm-proximity --ptm-source psp --psp-min-ltp 1 --psp-disea
 3. **Find mutation clusters** — computes pairwise 3D distances between all recurrent mutations on each protein; outputs mutations that cluster within 10 Å of at least one other mutation
 4. **Annotate results** — annotates each anchor mutation and its nearby mutations with PolyPhen-2 pathogenicity scores, AIUPred intrinsic disorder / binding-region scores, and InterPro functional domains
 
-Each mode's Step 1 writes its own intermediate file under `data/steps/PTMD_COSMIC_hotspots_by_protein.tsv` for PTM-proximity mode, `COSMIC_hotspots_by_protein.tsv` for mutation-clustering mode, so running one mode's Step 1 never overwrites the other's data. Tools that are inherently PTM-based (Radius Sweep, `analyze_single_cif_nearby_mutations.py`, the Structure Heatmaps "Mark PTM sites" option) always read the PTM-proximity file specifically, regardless of which mode you ran most recently.
+Each mode's Step 1 writes its own intermediate file under `data/steps/PTMD_COSMIC_hotspots_by_protein.tsv` for PTM-proximity mode, `COSMIC_hotspots_by_protein.tsv` for mutation-clustering mode, so running one mode's Step 1 never overwrites the other's data. Tools that are inherently PTM-based (Radius Sweep, `analyze_single_cif_nearby_mutations.py`, the Structure Heatmaps "Mark PTM sites" option) always read the PTM-proximity file specifically, regardless of which mode you ran most recently. Radius Sweep and the single-CIF script read the PTMD file; the Heatmaps tab has its own PTM source and mutation source selectors and reads the matching file.
 
 The main output for PTM-proximity mode is **`Output/ptm_mutation_proximity_db.tsv`** — a table of PTM sites, their nearby COSMIC mutations, 3D distances, 14-3-3 binding predictions, kinase predictions, disorder scores, PolyPhen-2 pathogenicity scores, and InterPro functional domains.
 
@@ -221,8 +221,10 @@ The **Heatmaps** tab (Structure Heatmaps) exports the 3D coordinates of alpha-ca
 
 If a protein's CIF file hasn't been downloaded yet, it's fetched automatically from the AlphaFold DB. Each protein's outputs go in their own `{gene}_{UniProt}/` subfolder (e.g. `TP53_P04637`) of Structure Heatmaps' output folder — `Output/3D Modeling/` by default, changeable with the tool's own Browse/Reset/Open Folder buttons, separate from the Pipeline tab's output folder. When a run finishes, the results area lists each exported protein with an **Open folder** button.
 
-- **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `plddt` column (AlphaFold's per-residue confidence, read from the CIF's own B-factor field) and a `patients_within_10A` column (total COSMIC patient count summed across all missense mutations within 10 Å of that residue)
-- **`mutation_ca.tsv`** — coordinates and `plddt` only at positions with confirmed somatic missense mutations in COSMIC, plus the mutation labels and patient counts
+- **`all_ca.tsv`** — x/y/z coordinates for every residue, plus a `plddt` column (AlphaFold's per-residue confidence, read from the CIF's own B-factor field) and a `patients_within_10A` column (total patient count summed across all missense mutations within 10 Å of that residue)
+- **`mutation_ca.tsv`** — coordinates and `plddt` only at positions with missense mutations in the chosen mutation source (for COSMIC, confirmed somatic ones), plus the mutation labels and patient counts
+
+**Mutation source and PTM source.** Like the Pipeline tab, the Heatmaps tab has a **Mutation source** (COSMIC, counting distinct patient samples, or ClinVar, counting submitters over the ticked classification classes — Pathogenic and Likely pathogenic by default) and a **PTM source** (PTMD or PhosphoSitePlus, used by **Mark PTM sites**; it reads that source's Step-1 file, so run Step 1 with the same PTM source first). The count columns keep their `patients_*` names for ClinVar, but its color keys read "Submitters". ClinVar outputs get a `clinvar_` file prefix (`clinvar_all_ca.tsv`, `clinvar_mutations_view.cxc`, ...) and scripts carrying PhosphoSitePlus PTM markers get a `psp_` prefix, so exports from different sources sit side by side in the protein's folder instead of overwriting each other. On the CLI: `--mutation-source cosmic|clinvar`, `--ptm-source ptmd|psp`, `--clinvar path/to/variant_summary.txt.gz`, `--clinvar-classes P LP`.
 
 **ChimeraX heatmaps and markers** (single-fragment proteins only — skipped, with a warning, for proteins AlphaFold split into multiple fragments):
 
@@ -234,7 +236,7 @@ If a protein's CIF file hasn't been downloaded yet, it's fetched automatically f
 | &nbsp;&nbsp;↳ Dim low-confidence residues | — | (Both mutation heatmaps.) Fades each residue in proportion to how low its pLDDT is (`100 - pLDDT` percent transparent); switches that script's lighting from ChimeraX's `soft` preset to `simple`, since soft's ambient shadows render incorrectly once part of a model is transparent |
 | pLDDT heatmap | `plddt_view.cxc` | Colors the cartoon by AlphaFold's own per-residue confidence, using ChimeraX's built-in `alphafold` palette by default |
 | Mark PTM sites | — | Marks each known PTM site with a small sphere (green by default) at its CA coordinate (needs PTM Proximity mode's Step 1 to have been run, for the PTM position data) |
-| Show mutation markers | — | Shows each COSMIC mutation position's side chain as a colored stick (orange by default) |
+| Show mutation markers | — | Shows each mutation position's side chain (from the chosen mutation source) as a colored stick (orange by default) |
 
 The heatmaps are independent and can be on in any combination — since ChimeraX's `color` command replaces rather than layers, they're written as **separate** `.cxc` scripts rather than combined into one. Markers are layered into whichever script(s) get generated (or their own plain-cartoon script, `markers_view.cxc`, if no heatmap is selected) as independent geometry/atom-display commands, not a recoloring, so they never overwrite a heatmap's own color at that residue. Open any `.cxc` file directly in ChimeraX to reproduce that view with no manual steps.
 
@@ -248,7 +250,7 @@ uv run scripts/export_ca_coordinates.py P04637
 uv run scripts/export_ca_coordinates.py TP53 EGFR P04637
 ```
 
-**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--residue-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--cosmic path/to/COSMIC.tsv`, `--custom-cif path/to/model.cif`, `--mutation-low-color`, `--mutation-high-color`, `--plddt-low-color`, `--plddt-high-color`, `--ptm-marker-color`, `--mutation-marker-color`.
+**Options** (mirroring the GUI checkboxes above): `--no-mutation-heatmap`, `--residue-heatmap`, `--plddt-heatmap`, `--log-scale`, `--dim-low-confidence`, `--mark-ptm-sites`, `--mark-mutations`, `--mutation-source`, `--ptm-source`, `--clinvar`, `--clinvar-classes`, `--cosmic path/to/COSMIC.tsv`, `--custom-cif path/to/model.cif`, `--mutation-low-color`, `--mutation-high-color`, `--plddt-low-color`, `--plddt-high-color`, `--ptm-marker-color`, `--mutation-marker-color`.
 
 ## Finding the Optimal Distance Cutoff
 

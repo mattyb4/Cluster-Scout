@@ -133,7 +133,8 @@ Not part of the numbered pipeline; each is an independent tool that reuses
 - `analyze_single_cif_nearby_mutations.py` — run step-3-style analysis on a
   user-supplied CIF (for proteins AlphaFold DB doesn't cover).
 - `export_ca_coordinates.py` — export CA coordinates + a ChimeraX heatmap of
-  per-residue mutation burden.
+  per-residue mutation burden, from COSMIC or ClinVar, with PTM markers from
+  PTMD or PhosphoSitePlus.
 - `radius_sweep.py` — sweep the distance cutoff to justify the 10 Å threshold.
 - `cif_variance.py` — compare multiple CIF predictions of one protein
   (per-residue positional variance + pLDDT).

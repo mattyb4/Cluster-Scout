@@ -27,18 +27,25 @@ from ui.common import (
     _BTN2_HOVER,
     _CHIP,
     _CHIP_HOVER,
+    _CLINVAR_CLASS_OPTIONS,
     _GRAY,
     _GREEN,
+    _MUTATION_SOURCE_BY_LABEL,
+    _MUTATION_SOURCE_OPTIONS,
     _PLOT_BG,
+    _PTM_SOURCE_BY_LABEL,
+    _PTM_SOURCE_OPTIONS,
     _RED,
     _YELLOW,
     HEATMAP_OUTPUT_DIRNAME,
     OUTPUT_DIR,
+    PROJECT_ROOT,
     _fmt_time,
     add_resize_grip,
     color_swatch_button,
     extract_uniprot_from_cif,
     help_icon,
+    hotspots_tsv_path,
     isolate_textbox_scroll,
     section_header,
 )
@@ -193,6 +200,11 @@ class StructureHeatmapsMixin:
             self._heatmap_items: list[tuple[str, Path | None, str | None]] = []
             self._heatmap_custom_cif_var = ctk.StringVar(value="")
             self._heatmap_custom_cif_uniprot_var = ctk.StringVar(value="")
+            self._heatmap_mutation_source_var = ctk.StringVar(value=_MUTATION_SOURCE_OPTIONS[0][0])
+            self._heatmap_ptm_source_var = ctk.StringVar(value=_PTM_SOURCE_OPTIONS[0][0])
+            self._heatmap_clinvar_class_vars = {
+                key: ctk.BooleanVar(value=key in ("P", "LP")) for _label, key in _CLINVAR_CLASS_OPTIONS
+            }
             self._heatmap_mutation_var = ctk.BooleanVar(value=False)
             self._heatmap_residue_var = ctk.BooleanVar(value=False)
             self._heatmap_log_scale_var = ctk.BooleanVar(value=False)
@@ -344,22 +356,68 @@ class StructureHeatmapsMixin:
         # Both frames default to gridded -- show only the selected source's
         self._on_heatmap_source_change()
 
+        # ── Data sources ──
+        self._hm_field_label(
+            3, "Mutation source",
+            "Where the mutation counts behind the heatmaps and mutation markers come "
+            "from. COSMIC: distinct patient samples in the COSMIC Mutant Census. "
+            "ClinVar: missense variants from ClinVar's variant_summary file (any "
+            "disease), counted by the number of ClinVar submitters, over the "
+            "classifications ticked below. Same as the Pipeline tab's Mutation "
+            "source. ClinVar files are written with a clinvar_ prefix, so a ClinVar "
+            "export never overwrites a COSMIC one in the protein's folder.",
+        )
+        ctk.CTkSegmentedButton(
+            f, values=[label for label, _ in _MUTATION_SOURCE_OPTIONS],
+            variable=self._heatmap_mutation_source_var, command=self._on_heatmap_mutation_source_change,
+        ).grid(row=4, column=0, sticky="ew")
+        self._heatmap_clinvar_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._heatmap_clinvar_frame.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self._hm_field_label(
+            0, "ClinVar classes",
+            "Which ClinVar classifications count. Pathogenic + Likely pathogenic is "
+            "the usual choice; adding Uncertain significance or Benign shows far more "
+            "positions. A combined classification such as 'Pathogenic/Likely "
+            "pathogenic' counts for each part.",
+            parent=self._heatmap_clinvar_frame,
+        )
+        for i, (label, key) in enumerate(_CLINVAR_CLASS_OPTIONS, start=1):
+            ctk.CTkCheckBox(
+                self._heatmap_clinvar_frame, text=label, variable=self._heatmap_clinvar_class_vars[key],
+                checkbox_width=18, checkbox_height=18,
+            ).grid(row=i, column=0, sticky="w", padx=(24, 0), pady=(2, 0))
+        self._on_heatmap_mutation_source_change()
+
+        self._hm_field_label(
+            6, "PTM source",
+            "Where the Mark PTM sites option gets its PTM sites: PTMD 2.0's "
+            "disease-associated PTMs, or every human PhosphoSitePlus site. Reads that "
+            "source's data from the pipeline's Step 1, so run Step 1 on the Pipeline "
+            "tab with the same PTM source first. Has no effect unless Mark PTM sites "
+            "is ticked. With PhosphoSitePlus markers the scripts are written with a "
+            "psp_ prefix so they don't overwrite PTMD-marked ones.",
+        )
+        ctk.CTkSegmentedButton(
+            f, values=[label for label, _ in _PTM_SOURCE_OPTIONS], variable=self._heatmap_ptm_source_var,
+        ).grid(row=7, column=0, sticky="ew", pady=(0, 6))
+
         # ── Heatmaps and markers ──
-        self._hm_field_label(3, "Heatmaps and markers")
+        self._hm_field_label(8, "Heatmaps and markers")
 
         self._heatmap_mutation_checkbox = _checkbox_row(
-            4, "Mutation heatmap (patients within 10 Å)", self._heatmap_mutation_var,
-            "Colors the ChimeraX cartoon by COSMIC patient count summed "
-            "within 10 Å of each residue - a mutation-hotspot heatmap, "
+            9, "Mutation heatmap (patients within 10 Å)", self._heatmap_mutation_var,
+            "Colors the ChimeraX cartoon by the patient count (COSMIC) or "
+            "submitter count (ClinVar) summed within 10 Å of each residue - "
+            "a mutation-hotspot heatmap, "
             "using a sequential red palette. Single-fragment proteins only.",
             indent=0, command=self._on_heatmap_mutation_toggle,
             # CustomTkinter's bundled Roboto clips the ring of the Å on Windows; Segoe UI doesn't
             font=ctk.CTkFont(family="Segoe UI", size=13) if sys.platform == "win32" else None,
         )
         _checkbox_row(
-            5, "Mutation heatmap (patients at residue only)", self._heatmap_residue_var,
-            "Colors the ChimeraX cartoon by the COSMIC patient count at each "
-            "residue itself - the patients whose mutation is at that exact "
+            10, "Mutation heatmap (patients at residue only)", self._heatmap_residue_var,
+            "Colors the ChimeraX cartoon by the patient (COSMIC) or submitter "
+            "(ClinVar) count at each residue itself - those whose mutation is at that exact "
             "position, with no neighbors counted - so only mutated residues "
             "are colored and every other residue stays at the low color. "
             "Written to its own script, separate from the 10 Å heatmap above, "
@@ -368,7 +426,7 @@ class StructureHeatmapsMixin:
             command=self._on_heatmap_mutation_toggle,
         )
         _colors_row(
-            6, (self._heatmap_mutation_low_var, self._heatmap_mutation_mid_var, self._heatmap_mutation_high_var),
+            11, (self._heatmap_mutation_low_var, self._heatmap_mutation_mid_var, self._heatmap_mutation_high_var),
             (MUTATION_DEFAULT_LOW_COLOR, MUTATION_DEFAULT_MID_COLOR, MUTATION_DEFAULT_HIGH_COLOR),
             "Low, middle and high colors of the mutation heatmap's scale (no "
             "nearby patients, half the protein's highest count, and the "
@@ -377,8 +435,8 @@ class StructureHeatmapsMixin:
             "heatmaps.",
         )
         self._heatmap_log_scale_checkbox = _checkbox_row(
-            7, "Log-scale", self._heatmap_log_scale_var,
-            "Only applies to the mutation heatmaps above. COSMIC patient "
+            12, "Log-scale", self._heatmap_log_scale_var,
+            "Only applies to the mutation heatmaps above. Patient "
             "counts are often heavily right-skewed - a few hotspot residues "
             "can have counts far higher than the rest, so a linear color "
             "scale crushes nearly the whole protein into one flat color. "
@@ -387,7 +445,7 @@ class StructureHeatmapsMixin:
             indent=24,
         )
         self._heatmap_dim_confidence_checkbox = _checkbox_row(
-            8, "Dim low-confidence residues", self._heatmap_dim_confidence_var,
+            13, "Dim low-confidence residues", self._heatmap_dim_confidence_var,
             "Only applies to the mutation heatmaps above. Fades each "
             "residue's heatmap color in proportion to how low its AlphaFold "
             "confidence (pLDDT) is, so a mutation hotspot in a poorly-"
@@ -401,7 +459,7 @@ class StructureHeatmapsMixin:
         self._on_heatmap_mutation_toggle()  # sync initial enabled/disabled state
 
         _checkbox_row(
-            9, "pLDDT heatmap", self._heatmap_plddt_var,
+            14, "pLDDT heatmap", self._heatmap_plddt_var,
             "Colors the ChimeraX cartoon by AlphaFold's per-residue "
             "confidence score (pLDDT), using ChimeraX's built-in AlphaFold "
             "color scheme (blue = very high confidence, down to orange = "
@@ -410,7 +468,7 @@ class StructureHeatmapsMixin:
             "Single-fragment proteins only.",
         )
         _colors_row(
-            10, (self._heatmap_plddt_low_var, self._heatmap_plddt_mid_var, self._heatmap_plddt_high_var),
+            15, (self._heatmap_plddt_low_var, self._heatmap_plddt_mid_var, self._heatmap_plddt_high_var),
             (PLDDT_DEFAULT_LOW_COLOR, PLDDT_DEFAULT_MID_COLOR, PLDDT_DEFAULT_HIGH_COLOR),
             "Low, middle and high colors of the pLDDT heatmap's scale "
             "(pLDDT 0, 50 and 100). Click a swatch to choose a color; ↺ "
@@ -420,9 +478,9 @@ class StructureHeatmapsMixin:
 
         # Independent markers, layered on top of the heatmaps rather than recoloring
         _marker_row(
-            11, "Mark PTM sites", self._heatmap_mark_ptm_var,
-            "Marks each known PTM site (from the pipeline's PTM/mutation "
-            "data) with a small sphere at its CA coordinate, layered on "
+            16, "Mark PTM sites", self._heatmap_mark_ptm_var,
+            "Marks each known PTM site (from the pipeline's Step-1 data for the "
+            "PTM source above) with a small sphere at its CA coordinate, layered on "
             "top of whichever heatmap(s) above are selected (or a plain "
             "cartoon if neither is). This is a separate marker, not a "
             "recoloring, so it never overwrites a heatmap's own color at "
@@ -430,8 +488,8 @@ class StructureHeatmapsMixin:
             self._heatmap_ptm_marker_color_var, PTM_MARKER_DEFAULT_COLOR,
         )
         _marker_row(
-            12, "Show mutation markers", self._heatmap_mark_mutations_var,
-            "Shows each COSMIC mutation position's side chain as a colored "
+            17, "Show mutation markers", self._heatmap_mark_mutations_var,
+            "Shows each mutation position's (from the mutation source above) side chain as a colored "
             "stick, layered on top of whichever heatmap(s) above are "
             "selected (or a plain cartoon if neither is). Like Mark PTM "
             "sites, this reveals real side-chain atoms rather than "
@@ -442,15 +500,15 @@ class StructureHeatmapsMixin:
 
         # Output folder
         self._hm_field_label(
-            13, "Output folder",
+            18, "Output folder",
             "Where each protein's {gene}_{UniProt}/ folder (coordinate tables, "
             "ChimeraX scripts) is written. Defaults to Output/3D Modeling.",
         )
         ctk.CTkEntry(
             f, textvariable=self._heatmap_output_dir_var, state="readonly",
-        ).grid(row=14, column=0, sticky="ew")
+        ).grid(row=19, column=0, sticky="ew")
         buttons = ctk.CTkFrame(f, fg_color="transparent")
-        buttons.grid(row=15, column=0, sticky="w", pady=(6, 0))
+        buttons.grid(row=20, column=0, sticky="w", pady=(6, 0))
         ctk.CTkButton(
             buttons, text="Browse", width=70, height=26, font=ctk.CTkFont(size=12),
             command=self._browse_heatmap_output_dir,
@@ -465,6 +523,34 @@ class StructureHeatmapsMixin:
             fg_color=_BTN2, hover_color=_BTN2_HOVER,
             command=lambda: self._open_folder(Path(self._heatmap_output_dir_var.get())),
         ).pack(side="left")
+
+    def _heatmap_mutation_source(self) -> str:
+        """The Heatmaps tab's selected mutation source ("cosmic" or "clinvar")."""
+        return _MUTATION_SOURCE_BY_LABEL[self._heatmap_mutation_source_var.get()]
+
+    def _heatmap_ptm_source(self) -> str:
+        """The Heatmaps tab's selected PTM source ("ptmd" or "psp")."""
+        return _PTM_SOURCE_BY_LABEL[self._heatmap_ptm_source_var.get()]
+
+    def _heatmap_clinvar_classes(self) -> list[str]:
+        """The ticked ClinVar classes, as --clinvar-classes values."""
+        return [key for _label, key in _CLINVAR_CLASS_OPTIONS if self._heatmap_clinvar_class_vars[key].get()]
+
+    def _heatmap_ptm_data_exists(self) -> bool:
+        """Whether a Step-1 hotspot file exists for the selected PTM source (under either
+        mutation source -- the PTM sites are the same)."""
+        ptm_source = self._heatmap_ptm_source()
+        return any(
+            hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity", ptm_source, source).exists()
+            for source in ("cosmic", "clinvar")
+        )
+
+    def _on_heatmap_mutation_source_change(self, _value: str = "") -> None:
+        """Show the ClinVar class choices only while ClinVar is the mutation source."""
+        if self._heatmap_mutation_source() == "clinvar":
+            self._heatmap_clinvar_frame.grid()
+        else:
+            self._heatmap_clinvar_frame.grid_remove()
 
     def _browse_heatmap_output_dir(self) -> None:
         path = filedialog.askdirectory(
@@ -691,6 +777,16 @@ class StructureHeatmapsMixin:
             )
             return False
 
+        if self._heatmap_mark_ptm_var.get() and not self._heatmap_ptm_data_exists():
+            label = self._heatmap_ptm_source_var.get()
+            if not messagebox.askokcancel(
+                "No PTM data",
+                f"Mark PTM sites is ticked, but no {label} Step-1 data was found. Run the Pipeline "
+                f"tab's Step 1 with PTM source {label} first, or the PTM sites will be left off "
+                "the exported scripts.\n\nExport anyway?",
+            ):
+                return False
+
         if self._heatmap_source_var.get() == "Upload CIF file":
             if not self._heatmap_custom_cif_var.get().strip():
                 messagebox.showwarning("Missing input", "Select a CIF file to upload.")
@@ -748,6 +844,9 @@ class StructureHeatmapsMixin:
             plddt_high_color=self._heatmap_plddt_high_var.get(),
             ptm_marker_color=self._heatmap_ptm_marker_color_var.get(),
             mutation_marker_color=self._heatmap_mutation_marker_color_var.get(),
+            ptm_source=self._heatmap_ptm_source(),
+            mutation_source=self._heatmap_mutation_source(),
+            clinvar_classes=self._heatmap_clinvar_classes(),
         )
 
     def _run_structure_heatmaps(self) -> None:

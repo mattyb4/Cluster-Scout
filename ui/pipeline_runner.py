@@ -189,13 +189,20 @@ class PipelineRunnerMixin:
 
         Returns a list of human-readable problems; empty means everything
         relevant to *mode* checked out. Modes that don't read raw input files
-        (single-protein) are left alone. Structure Heatmaps only needs COSMIC.
+        (single-protein) are left alone. Structure Heatmaps needs whichever mutation
+        source its own tab has selected (COSMIC or ClinVar).
         """
         problems: list[str] = []
 
         uses_pipeline_source = mode in ("ptm-proximity", "mutation-clustering")
-        needs_clinvar = uses_pipeline_source and self._mutation_source() == "clinvar"
-        needs_cosmic = mode == "structure-heatmaps" or (uses_pipeline_source and not needs_clinvar)
+        if mode == "structure-heatmaps":
+            mutation_source = self._heatmap_mutation_source()
+            clinvar_classes = self._heatmap_clinvar_classes()
+        else:
+            mutation_source = self._mutation_source() if uses_pipeline_source else None
+            clinvar_classes = self._clinvar_classes()
+        needs_clinvar = mutation_source == "clinvar"
+        needs_cosmic = mutation_source == "cosmic"
         needs_ptmd = mode == "ptm-proximity" and self._ptm_source() == "ptmd"
         needs_psp = mode == "ptm-proximity" and self._ptm_source() == "psp"
 
@@ -212,7 +219,7 @@ class PipelineRunnerMixin:
                 problems.extend(validate_clinvar_file(clinvar_file))
             except (FileNotFoundError, RuntimeError) as exc:
                 problems.append(str(exc))
-            if not self._clinvar_classes():
+            if not clinvar_classes:
                 problems.append("Tick at least one ClinVar class")
 
         if needs_ptmd:

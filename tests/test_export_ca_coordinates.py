@@ -7,6 +7,16 @@ from conftest import FakeResponse, import_script
 mod = import_script("export_ca_coordinates.py")
 
 
+def _write_ptm_tsv(root, rows, ptm_source="ptmd", mutation_source="cosmic"):
+    """Write a Step-1 hotspot TSV where export_ca_coordinates looks for *ptm_source* /
+    *mutation_source* under a pretend project *root* (pair with
+    monkeypatch.setattr(mod, "PROJECT_ROOT", root))."""
+    path = mod.hotspots_tsv_path(root, "ptm-proximity", ptm_source, mutation_source)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, sep="\t", index=False)
+    return path
+
+
 def _write_synthetic_cif(path, res_ids, res_names, atom_names, coords,
                           b_factors=None, chain_ids=None):
     """Same biotite-round-trip technique as test_pipeline_utils.py's fixture --
@@ -482,12 +492,11 @@ class TestComputePatientsWithinRadius:
 
 class TestLoadPtmPositions:
     def test_parses_positions_and_keeps_raw_token(self, tmp_path, monkeypatch):
-        tsv = tmp_path / "hotspots.tsv"
-        pd.DataFrame([{
+        _write_ptm_tsv(tmp_path, [{
             "uniprot_id": "P04637",
             "ptms_on_protein": "S15:Phosphorylation; T18:Phosphorylation",
-        }]).to_csv(tsv, sep="\t", index=False)
-        monkeypatch.setattr(mod, "PTM_TSV", tsv)
+        }])
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
 
         result = mod.load_ptm_positions("P04637")
         assert result == [(15, "S15:Phosphorylation"), (18, "T18:Phosphorylation")], (
@@ -495,22 +504,54 @@ class TestLoadPtmPositions:
         )
 
     def test_missing_file_returns_empty_list(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
-        assert mod.load_ptm_positions("P04637") == [], (
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        logged = []
+        assert mod.load_ptm_positions("P04637", log_cb=logged.append) == [], (
             "with no intermediate TSV available yet, this should return an empty list, "
             "not raise FileNotFoundError"
         )
+        assert any("Step 1" in line and "PTMD" in line for line in logged), (
+            f"a missing Step-1 file should be explained, naming the PTM source; got {logged}"
+        )
 
     def test_unknown_protein_returns_empty_list(self, tmp_path, monkeypatch):
-        tsv = tmp_path / "hotspots.tsv"
-        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "S15:Phosphorylation"}]).to_csv(
-            tsv, sep="\t", index=False,
-        )
-        monkeypatch.setattr(mod, "PTM_TSV", tsv)
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S15:Phosphorylation"}])
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
         assert mod.load_ptm_positions("Q99999") == [], (
             "a UniProt ID not present in the TSV has no PTM row to read -- expected an "
             "empty list"
         )
+
+    def test_psp_source_reads_the_psp_file_not_ptmd(self, tmp_path, monkeypatch):
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S15"}], ptm_source="ptmd")
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S20"}], ptm_source="psp")
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        assert mod.load_ptm_positions("P04637", "psp") == [(20, "S20")], (
+            "ptm_source='psp' must read PSP_COSMIC_hotspots_by_protein.tsv, not the PTMD file"
+        )
+        assert mod.load_ptm_positions("P04637", "ptmd") == [(15, "S15")]
+
+    def test_psp_only_run_gets_no_markers_from_ptmd_default(self, tmp_path, monkeypatch):
+        # The reported bug: only a PSP Step 1 exists, so the default (PTMD) finds nothing
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S20"}], ptm_source="psp")
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        assert mod.load_ptm_positions("P04637", log_cb=lambda *_: None) == []
+        assert mod.load_ptm_positions("P04637", "psp") == [(20, "S20")]
+
+    def test_clinvar_source_reads_clinvar_file(self, tmp_path, monkeypatch):
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S15"}], mutation_source="cosmic")
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S99"}], mutation_source="clinvar")
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        assert mod.load_ptm_positions("P04637", "ptmd", "clinvar") == [(99, "S99")]
+
+    def test_falls_back_to_other_mutation_sources_file(self, tmp_path, monkeypatch):
+        # PTM sites do not depend on which mutations were counted, so a ClinVar export
+        # can use the COSMIC Step-1 file when only that one has the protein
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S15"}], mutation_source="cosmic")
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        logged = []
+        assert mod.load_ptm_positions("P04637", "ptmd", "clinvar", logged.append) == [(15, "S15")]
+        assert any("PTMD_COSMIC_hotspots_by_protein.tsv" in line for line in logged), logged
 
 
 class TestBuildPtmMarkerLines:
@@ -1132,12 +1173,11 @@ class TestRunExport:
         assert result.mutation_defattr_out is not None and result.mutation_defattr_out.exists()
         assert result.plddt_chimerax_script_out is None
 
-    def _write_ptm_tsv(self, tmp_path, monkeypatch):
-        ptm_tsv = tmp_path / "hotspots.tsv"
-        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}]).to_csv(
-            ptm_tsv, sep="\t", index=False,
+    def _write_ptm_tsv(self, tmp_path, monkeypatch, **source_kwargs):
+        _write_ptm_tsv(
+            tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}], **source_kwargs,
         )
-        monkeypatch.setattr(mod, "PTM_TSV", ptm_tsv)
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
 
     def test_mark_ptm_sites_adds_sphere_to_mutation_script(self, tmp_path, monkeypatch):
         kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
@@ -1179,7 +1219,7 @@ class TestRunExport:
 
     def test_mark_ptm_sites_with_no_ptm_data_does_not_crash(self, tmp_path, monkeypatch):
         kwargs = self._single_fragment_export_kwargs(tmp_path, monkeypatch)
-        monkeypatch.setattr(mod, "PTM_TSV", tmp_path / "does_not_exist.tsv")
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)  # no Step-1 files under it
 
         result = mod.run_export(mutation_heatmap=True, mark_ptm_sites=True, **kwargs)
         assert result.mutation_chimerax_script_out is not None and result.mutation_chimerax_script_out.exists(), (
@@ -1366,11 +1406,8 @@ class TestRunExportColors:
         ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
             cosmic, sep="\t", index=False,
         )
-        ptm_tsv = tmp_path / "hotspots.tsv"
-        pd.DataFrame([{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}]).to_csv(
-            ptm_tsv, sep="\t", index=False,
-        )
-        monkeypatch.setattr(mod, "PTM_TSV", ptm_tsv)
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "A1:Phosphorylation"}])
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
         return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic,
                     output_dir=tmp_path / "out", log_cb=lambda *_: None)
 
@@ -1790,3 +1827,118 @@ class TestResidueHeatmap:
             "the markers are layered into the residue heatmap's script, so no separate plain one is needed"
         )
         assert "show /A:2 & sidechain atoms" in result.residue_chimerax_script_out.read_text()
+
+
+class TestMutationAndPtmSources:
+    """run_export's mutation_source ("cosmic"/"clinvar") and ptm_source ("ptmd"/"psp")."""
+
+    CLINVAR_COUNTS = pd.DataFrame([
+        ("TP53", "S592A", 4),
+        ("TP53", "S592T", 2),
+        ("OTHER", "S592A", 99),
+    ], columns=["gene", "aa_change", "affected_cases"])
+
+    def _setup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "MODELS_ROOT", tmp_path / "cif_models")
+        uid_dir = tmp_path / "cif_models" / "P04637"
+        uid_dir.mkdir(parents=True)
+        _write_synthetic_cif(
+            uid_dir / "AF-P04637-F1-model_v4.cif",
+            res_ids=[1, 592], res_names=["ALA", "SER"], atom_names=["CA", "CA"],
+            coords=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        )
+        cosmic = tmp_path / "cosmic.tsv"
+        pd.DataFrame([
+            ("TP53", "p.S592A", "S1", "Confirmed somatic variant"),
+        ], columns=["GENE_SYMBOL", "MUTATION_AA", "COSMIC_SAMPLE_ID", "MUTATION_SOMATIC_STATUS"]).to_csv(
+            cosmic, sep="\t", index=False,
+        )
+        clinvar = tmp_path / "variant_summary.txt"
+        clinvar.write_text("stub")
+        self.calls = []
+
+        def fake_counts(path, cache_dir, classes=None):
+            self.calls.append((path, tuple(classes)))
+            return self.CLINVAR_COUNTS, {}
+
+        monkeypatch.setattr(mod, "load_clinvar_counts", fake_counts)
+        mod._clinvar_counts_cache.clear()
+        monkeypatch.setattr(mod, "PROJECT_ROOT", tmp_path)
+        return dict(uniprot="P04637", gene="TP53", cosmic_file=cosmic, clinvar_file=clinvar,
+                    output_dir=tmp_path / "out", log_cb=lambda *_: None)
+
+    def test_clinvar_counts_come_from_clinvar_not_cosmic(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_source="clinvar", clinvar_classes=["P", "LP"], **kwargs)
+        row = result.mut_ca_df.iloc[0]
+        assert row["position"] == 592 and row["total_patients"] == 6, (
+            f"S592A (4) + S592T (2) ClinVar submitters at position 592 should sum to 6 and ignore "
+            f"the other gene's rows and COSMIC's single patient, got {row.to_dict()}"
+        )
+        assert row["mutations"] == "S592A; S592T"
+        assert self.calls and self.calls[0][1] == ("P", "LP")
+
+    def test_clinvar_run_writes_prefixed_files_leaving_cosmic_ones_alone(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        cosmic = mod.run_export(mutation_heatmap=True, residue_heatmap=True, **kwargs)
+        clinvar = mod.run_export(mutation_heatmap=True, residue_heatmap=True, mutation_source="clinvar", **kwargs)
+        folder = cosmic.all_out.parent
+        assert cosmic.all_out.name == "all_ca.tsv" and cosmic.mutation_defattr_out.name == "mutations.defattr"
+        assert clinvar.all_out.name == "clinvar_all_ca.tsv"
+        assert clinvar.mut_out.name == "clinvar_mutation_ca.tsv"
+        assert clinvar.mutation_defattr_out.name == "clinvar_mutations.defattr"
+        assert clinvar.mutation_chimerax_script_out.name == "clinvar_mutations_view.cxc"
+        assert clinvar.residue_chimerax_script_out.name == "clinvar_mutations_at_residue_view.cxc"
+        assert clinvar.all_out.parent == folder
+        assert cosmic.mutation_defattr_out.exists() and clinvar.mutation_defattr_out.exists(), (
+            "both sources' files must coexist in the protein's folder"
+        )
+
+    def test_clinvar_key_titles_say_submitters(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        clinvar = mod.run_export(mutation_heatmap=True, residue_heatmap=True, mutation_source="clinvar", **kwargs)
+        assert "Submitters within 10" in clinvar.mutation_chimerax_script_out.read_text()
+        assert "Submitters at residue" in clinvar.residue_chimerax_script_out.read_text()
+        cosmic = mod.run_export(mutation_heatmap=True, **kwargs)
+        assert "Patients within 10" in cosmic.mutation_chimerax_script_out.read_text()
+
+    def test_psp_markers_use_the_psp_file_and_a_psp_prefix(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        _write_ptm_tsv(tmp_path, [{"uniprot_id": "P04637", "ptms_on_protein": "S592"}], ptm_source="psp")
+        # nothing under the PTMD name -> only PSP can supply markers
+        result = mod.run_export(mutation_heatmap=True, mark_ptm_sites=True, ptm_source="psp", **kwargs)
+        assert result.mutation_chimerax_script_out.name == "psp_mutations_view.cxc"
+        assert "shape sphere" in result.mutation_chimerax_script_out.read_text(), (
+            "a PSP-only Step 1 must still mark its PTM sites when PTM source is PhosphoSitePlus"
+        )
+        ptmd = mod.run_export(mutation_heatmap=True, mark_ptm_sites=True, ptm_source="ptmd", **kwargs)
+        assert "shape sphere" not in ptmd.mutation_chimerax_script_out.read_text()
+
+    def test_psp_prefix_only_when_ptm_markers_requested(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        result = mod.run_export(mutation_heatmap=True, ptm_source="psp", **kwargs)
+        assert result.mutation_chimerax_script_out.name == "mutations_view.cxc", (
+            "the PTM source doesn't change a script that carries no PTM markers"
+        )
+
+    def test_unknown_sources_are_rejected(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="PTM source"):
+            mod.run_export(ptm_source="bogus", **kwargs)
+        with pytest.raises(ValueError, match="mutation source"):
+            mod.run_export(mutation_source="bogus", **kwargs)
+
+    def test_missing_clinvar_file_is_reported_by_name(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        kwargs["clinvar_file"] = tmp_path / "missing.txt"
+        with pytest.raises(FileNotFoundError, match="ClinVar file not found"):
+            mod.run_export(mutation_source="clinvar", **kwargs)
+
+    def test_batch_passes_sources_through(self, tmp_path, monkeypatch):
+        kwargs = self._setup(tmp_path, monkeypatch)
+        items = mod.run_batch_export(
+            ["P04637"], output_dir=kwargs["output_dir"], mutation_source="clinvar",
+            clinvar_file=kwargs["clinvar_file"], log_cb=lambda *_: None,
+        )
+        assert items[0].error is None, items[0].error
+        assert items[0].result.all_out.name == "clinvar_all_ca.tsv"
