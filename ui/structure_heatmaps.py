@@ -32,6 +32,7 @@ from ui.common import (
     _PLOT_BG,
     _RED,
     _YELLOW,
+    HEATMAP_OUTPUT_DIRNAME,
     OUTPUT_DIR,
     _fmt_time,
     add_resize_grip,
@@ -44,7 +45,7 @@ from ui.common import (
 
 _SIDE_W = 400  # px; fixed width of the parameters panel
 
-_HEATMAP_DEFAULT_OUTPUT_DIR = OUTPUT_DIR / "coordinates"
+_HEATMAP_DEFAULT_OUTPUT_DIR = OUTPUT_DIR / HEATMAP_OUTPUT_DIRNAME
 
 
 class StructureHeatmapsMixin:
@@ -443,7 +444,7 @@ class StructureHeatmapsMixin:
         self._hm_field_label(
             13, "Output folder",
             "Where each protein's {gene}_{UniProt}/ folder (coordinate tables, "
-            "ChimeraX scripts) is written. Defaults to Output/coordinates.",
+            "ChimeraX scripts) is written. Defaults to Output/3D Modeling.",
         )
         ctk.CTkEntry(
             f, textvariable=self._heatmap_output_dir_var, state="readonly",

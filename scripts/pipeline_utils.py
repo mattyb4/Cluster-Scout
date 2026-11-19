@@ -43,6 +43,9 @@ PTMD_INPUT_DIR = "ptmd"
 PSP_INPUT_DIR = "phosphositeplus"
 INTERACTORS_1433_INPUT_DIR = "1433_interactors"
 
+# Folder inside Output/ that the Structure Heatmaps export writes each protein's files to
+HEATMAP_OUTPUT_DIRNAME = "3D Modeling"
+
 
 def input_dir(root: Path, subfolder: str) -> Path:
     """Return the input folder path for a given input type, creating it if needed."""

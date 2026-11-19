@@ -27,6 +27,7 @@ from pipeline_utils import (  # noqa: E402
     CLINVAR_INPUT_DIR,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
+    HEATMAP_OUTPUT_DIRNAME,
     INTERACTORS_1433_INPUT_DIR,
     MUTATION_CLUSTERING_STEPS,
     PSP_INPUT_DIR,
@@ -58,6 +59,7 @@ from psp_input import discover_psp_files, psp_folder_summary, validate_psp_folde
 # the UI layer, so its "usage" is legitimately elsewhere.
 __all__ = [
     "COSMIC_SOMATIC_STATUSES",
+    "HEATMAP_OUTPUT_DIRNAME",
     "INTERACTORS_1433_INPUT_DIR",
     "MUTATION_CLUSTERING_STEPS",
     "PTM_PROXIMITY_STEPS",

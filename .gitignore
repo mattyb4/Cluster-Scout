@@ -44,7 +44,7 @@ Output/mutation_cluster_long.tsv
 Output/clinvar_*.tsv
 Output/radius_sweep.*
 Output/*.png
-Output/coordinates/
+Output/3D Modeling/
 Output/cif_variance/
 Output/prototype_hotspot_significance*.tsv
 *.bak

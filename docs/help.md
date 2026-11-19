@@ -139,7 +139,7 @@ Selecting a PTM site (or anchor mutation, in Mutation Clustering mode) in the Re
 
 Exports alpha-carbon coordinates for every residue of one or more proteins, plus ready-to-open ChimeraX scripts. This tab is separate from the Pipeline modes and doesn't use their outputs: it works from any protein you list, or from one CIF you upload. Each protein is added by **gene symbol** or **UniProt accession** to a list (**+ Add** button or Enter), then exported as a batch with the same options applied to every one. Each entry is validated as soon as you add it: the gene/UniProt accession is resolved and checked against AlphaFold DB for a canonical entry, the same "catch it upfront" validation Radius Sweep's own gene list uses, so an unresolvable gene or a typo is rejected with an explanation immediately instead of only failing partway through a run. A protein spanning multiple AlphaFold fragments is still accepted (coordinates are exported for every fragment) but flagged with a warning, since the ChimeraX heatmap/marker scripts below are single-fragment only.
 
-Each protein's output goes in its own `{gene}_{UniProt}/` folder (e.g. `TP53_P04637`) inside the **Output folder** (`Output/coordinates/` by default): `all_ca.tsv` (every residue's coordinates, plus its AlphaFold pLDDT confidence and a nearby-patient-count column) and `mutation_ca.tsv` (the same columns, only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
+Each protein's output goes in its own `{gene}_{UniProt}/` folder (e.g. `TP53_P04637`) inside the **Output folder** (`Output/3D Modeling/` by default): `all_ca.tsv` (every residue's coordinates, plus its AlphaFold pLDDT confidence and a nearby-patient-count column) and `mutation_ca.tsv` (the same columns, only at COSMIC mutation positions). If the AlphaFold structure for a protein is only a fragment (very large proteins are split by AlphaFold into multiple fragments), the app warns you upfront rather than silently analyzing an incomplete structure, and the ChimeraX outputs below are skipped for it.
 
 **Heatmaps** — for single-fragment proteins, also produces ChimeraX scripts you can open directly to reproduce the view with no manual steps:
 
@@ -160,7 +160,7 @@ Any combination of heatmaps can be on at once — each is written as its own scr
 
 When a run finishes, the results area on the right lists each exported protein with a ✓ (or a ✗ and the reason it failed) and an **Open folder** button that opens that protein's own folder.
 
-**Output folder** — where the per-protein folders are written; defaults to `Output/coordinates/`. **Browse** changes it, **Reset** restores the default, and **Open Folder** opens it.
+**Output folder** — where the per-protein folders are written; defaults to `Output/3D Modeling/`. **Browse** changes it, **Reset** restores the default, and **Open Folder** opens it.
 
 ---
 
@@ -224,7 +224,7 @@ Output (written to the Output folder above, `Output/cif_variance/` by default):
 
 The Output folder section (and the **Open Output Folder** button at the bottom of the Pipeline tab) is shared by all of the Pipeline tab's modes, since they read and write the same output DB files. It defaults to `Output/`. Use **Change** to pick a custom directory; **Reset** returns it to the default.
 
-Radius Sweep and CIF Variance (Analysis Tools tab) and the Heatmaps tab each have their own **Output folder** field and **Open Folder** button too, independent of the Pipeline tab and of each other — Radius Sweep defaults to `Output/`, CIF Variance to `Output/cif_variance/`, and Structure Heatmaps to `Output/coordinates/`.
+Radius Sweep and CIF Variance (Analysis Tools tab) and the Heatmaps tab each have their own **Output folder** field and **Open Folder** button too, independent of the Pipeline tab and of each other — Radius Sweep defaults to `Output/`, CIF Variance to `Output/cif_variance/`, and Structure Heatmaps to `Output/3D Modeling/`.
 
 ---
 

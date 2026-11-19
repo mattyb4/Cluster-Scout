@@ -244,7 +244,7 @@ cif_models/         downloaded AlphaFold CIF + PAE, one folder per UniProt ID
 Output/
   *_db.tsv          final results
   logs/             skipped-protein / skipped-PTM logs with reasons
-  coordinates/      export_ca_coordinates output (incl. ChimeraX files)
+  3D Modeling/      export_ca_coordinates output (incl. ChimeraX files)
   cif_variance/     cif_variance output
 ```
 

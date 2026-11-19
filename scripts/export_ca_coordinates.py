@@ -1,6 +1,6 @@
 """Export alpha-carbon coordinates for a protein from its AlphaFold CIF.
 
-Every run's output goes into its own Output/coordinates/{gene}_{UniProt}/
+Every run's output goes into its own Output/3D Modeling/{gene}_{UniProt}/
 folder, so files for different proteins never mix together and each folder is
 identifiable by gene name at a glance. Produces two TSV files, each with a
 plddt column (AlphaFold's per-residue confidence, read from the CIF's own
@@ -84,6 +84,7 @@ from pipeline_utils import (  # noqa: E402
     AA3TO1,
     COSMIC_INPUT_DIR,
     COSMIC_SOMATIC_STATUSES,
+    HEATMAP_OUTPUT_DIRNAME,
     extract_uniprot_from_cif,
     find_canonical_cifs,
     get_plddt_map,
@@ -98,7 +99,7 @@ from pipeline_utils import (  # noqa: E402
 PROJECT_ROOT = project_root(__file__)
 MODELS_ROOT = PROJECT_ROOT / "cif_models"
 GENE_CACHE = PROJECT_ROOT / "data" / "cache" / "uniprot_gene_mapping.tsv"
-OUTPUT_DIR = PROJECT_ROOT / "Output" / "coordinates"
+OUTPUT_DIR = PROJECT_ROOT / "Output" / HEATMAP_OUTPUT_DIRNAME
 # PTM-site marking always needs the ptm-proximity file specifically (its
 # ptms_on_protein column) -- this tool has no --mode of its own.
 PTM_TSV = hotspots_tsv_path(PROJECT_ROOT, "ptm-proximity")
@@ -1153,7 +1154,7 @@ def run_batch_export(
     UniProt accession, auto-detected via looks_like_uniprot_id), applying the
     same heatmap/marker options to every protein.
 
-    Each protein's own outputs land in their own Output/coordinates/{gene}_{uid}/
+    Each protein's own outputs land in their own Output/3D Modeling/{gene}_{uid}/
     subfolder (run_export's own design), so a batch never mixes proteins'
     files together. A failure on one protein (bad token, no AlphaFold model,
     no gene symbol resolvable, etc.) is logged and skipped rather than
